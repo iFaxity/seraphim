@@ -1,0 +1,16 @@
+# To learn more about .editorconfig see https://aka.ms/editorconfigdocs
+root = true
+
+# All files
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 100
+
+# Documentation — trailing whitespace is meaningful in markdown (hard line breaks)
+[*.md]
+trim_trailing_whitespace = false
