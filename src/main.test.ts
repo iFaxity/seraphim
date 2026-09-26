@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 
-import { engine } from './engine/engine.ts';
+import { fakeDeps } from './engine/fakes.ts';
 import { main } from './main.ts';
 
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+
 describe('engine', () => {
-  it('parses empty argv as the top-level help view', () => {
-    const result = engine([]);
+  it('parses empty argv as the top-level help view', async () => {
+    const { engine } = await import('./engine/engine.ts');
+    const result = await engine([]);
 
     expect(result.success).toBe(true);
 
@@ -14,8 +19,9 @@ describe('engine', () => {
     }
   });
 
-  it('rejects unknown commands as a failure result', () => {
-    const result = engine(['frobnicate']);
+  it('rejects unknown commands as a failure result', async () => {
+    const { engine } = await import('./engine/engine.ts');
+    const result = await engine(['frobnicate']);
 
     expect(result.success).toBe(false);
 
@@ -24,8 +30,9 @@ describe('engine', () => {
     }
   });
 
-  it('rejects unknown options as a failure result, not a throw', () => {
-    const result = engine(['--verbose']);
+  it('rejects unknown options as a failure result, not a throw', async () => {
+    const { engine } = await import('./engine/engine.ts');
+    const result = await engine(['--verbose']);
 
     expect(result.success).toBe(false);
 
@@ -34,18 +41,20 @@ describe('engine', () => {
     }
   });
 
-  it('reports unimplemented commands as an outcome, not prose', () => {
-    const result = engine(['status']);
+  it('reports unimplemented commands as an outcome, not prose', async () => {
+    const { engine } = await import('./engine/engine.ts');
+    const result = await engine(['gc']);
 
     expect(result.success).toBe(true);
 
     if (result.success) {
-      expect(result.data).toEqual({ kind: 'unimplemented', command: 'status' });
+      expect(result.data).toEqual({ kind: 'unimplemented', command: 'gc' });
     }
   });
 
-  it('validates run arguments and reports the error outcome', () => {
-    const result = engine(['run']);
+  it('validates run arguments and reports the error outcome', async () => {
+    const { engine } = await import('./engine/engine.ts');
+    const result = await engine(['run']);
 
     expect(result.success).toBe(true);
 
@@ -59,23 +68,77 @@ describe('engine', () => {
 });
 
 describe('cli rendering', () => {
-  it('renders the command table for empty argv', () => {
-    const out = main([]);
+  it('renders the command table for empty argv', async () => {
+    const out = await main([]);
 
-    for (const name of ['run', 'status', 'gc', 'tick', 'help']) {
+    ['run', 'status', 'gc', 'tick', 'help'].forEach((name) => {
       expect(out).toContain(name);
+    });
+  });
+
+  it('renders usage for a specific command', async () => {
+    expect(await main(['help', 'run'])).toMatch(/run <repo> <issue#>/);
+  });
+
+  it('renders unknown-command errors once', async () => {
+    expect(await main(['frobnicate'])).toMatch(/^error: unknown command 'frobnicate'$/);
+  });
+
+  it('renders one clean error line for unrecognized options', async () => {
+    expect(await main(['--verbose'])).toMatch(/^error: unrecognized option '--verbose'$/);
+  });
+});
+
+describe('status listing', () => {
+  let root: string;
+
+  afterAll(async () => {
+    if (root) {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
-  it('renders usage for a specific command', () => {
-    expect(main(['help', 'run'])).toMatch(/run <repo> <issue#>/);
+  it('renders one line per session from the receipts directory', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-status-'));
+    const repo = 'demo';
+    const dir = join(root, 'sessions', repo, '7-2026-01-01T00:00:00.000Z');
+
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'manifest.json'),
+      JSON.stringify({
+        repo,
+        issueNumber: 7,
+        flow: 'flow.ts',
+        agent: 'pi',
+        model: 'test-model',
+        state: 'completed',
+        branch: 'seraphim/demo/7',
+        worktreePath: '/tmp/wt',
+        startedAt: '2026-09-27T00:00:00.000Z',
+        endedAt: '2026-09-27T00:01:00.000Z',
+        turns: [],
+      }),
+    );
+
+    const { deps } = fakeDeps({ sessionsRoot: join(root, 'sessions') });
+    const out = await main(['status'], deps);
+
+    expect(out).toContain('demo#7');
+    expect(out).toContain('completed');
+    expect(out).toContain('/tmp/wt');
+
+    const json = await main(['status', '--json'], deps);
+    const parsed = JSON.parse(json) as { sessions: { repo: string; state: string }[] };
+
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0]?.repo).toBe('demo');
   });
 
-  it('renders unknown-command errors once', () => {
-    expect(main(['frobnicate'])).toMatch(/^error: unknown command 'frobnicate'$/);
-  });
+  it('lists no sessions when the receipts root is missing', async () => {
+    const { deps } = fakeDeps({ sessionsRoot: join(tmpdir(), `seraphim-missing-${Date.now()}`) });
+    const json = await main(['status', '--json'], deps);
 
-  it('renders one clean error line for unrecognized options', () => {
-    expect(main(['--verbose'])).toMatch(/^error: unrecognized option '--verbose'$/);
+    expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });
   });
 });

@@ -14,6 +14,9 @@ restate or override them here. This file covers what they can't check.
   `src/commands/`.
 - Internal kernel types stay compile-time TS. `zod` only where untrusted input crosses an edge
   (flow config files, project registration, receipt schemas).
+- Prefer array chaining (`map`/`filter`/`reduce`) over imperative `for`/`while` loops.
+- Infer return types; annotate only load-bearing seams — `seams.ts` members, type
+  predicates (`x is T`), `fakes.ts` factories.
 
 ## Errors
 
@@ -31,7 +34,7 @@ restate or override them here. This file covers what they can't check.
 ## Comments
 
 - Doc comments explain why, not what — a constraint, a rejected alternative, a spec/ADR citation.
-- No comments tied to a ticket, PR, or "recently changed."
+- No comments tied to a ticket, PR, story, or "recently changed."
 
 ## Testing
 
