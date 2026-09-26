@@ -1,4 +1,7 @@
 #!/usr/bin/env node
 import { main } from '../src/main.ts';
 
-process.stdout.write(`${main(process.argv.slice(2))}\n`);
+const args = process.argv.slice(2);
+const output = await main(args);
+
+process.stdout.write(`${output}\n`);

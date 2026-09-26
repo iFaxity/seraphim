@@ -29,9 +29,9 @@ function isPromiseLike<T>(input: unknown): input is PromiseLike<T> {
   return 'then' in input && typeof input?.then == 'function';
 }
 
-export function success<T>(data: T): Success<T> {
+export function success<T>(data: T) {
   return {
-    success: true,
+    success: true as const,
     data,
   };
 }
@@ -40,11 +40,11 @@ export function success<T>(data: T): Success<T> {
  * Normalizes anything thrown (including non-`Error` values like strings) into an `Error`, so
  * `TError` never lies: a `Failure<T>`'s error is always usable without another instanceof check.
  */
-export function failure<T = Error>(ex: unknown): Failure<T> {
+export function failure<T = Error>(ex: unknown) {
   const error = ex instanceof Error ? ex : new Error(String(ex));
 
   return {
-    success: false,
+    success: false as const,
     error: error as T,
   };
 }
@@ -65,14 +65,8 @@ export function tryCatch<TResult>(action: Action<TResult> | PromiseLike<TResult>
       .catch((ex) => failure(ex));
   }
 
-  return tryCatchSync(action);
-}
-
-function tryCatchSync<TResult>(action: Action<TResult>): Result<TResult> {
   try {
-    const data = action();
-
-    return success(data);
+    return success(action());
   } catch (ex) {
     return failure(ex);
   }
