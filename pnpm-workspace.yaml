@@ -1,0 +1,3 @@
+frozenLockfile: true
+allowBuilds:
+  esbuild: true
