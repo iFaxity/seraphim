@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
+import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { main } from './main.ts';
 
@@ -9,7 +10,6 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 
 describe('engine', () => {
   it('parses empty argv as the top-level help view', async () => {
-    const { engine } = await import('./engine/engine.ts');
     const result = await engine([]);
 
     expect(result.success).toBe(true);
@@ -20,7 +20,6 @@ describe('engine', () => {
   });
 
   it('rejects unknown commands as a failure result', async () => {
-    const { engine } = await import('./engine/engine.ts');
     const result = await engine(['frobnicate']);
 
     expect(result.success).toBe(false);
@@ -31,7 +30,6 @@ describe('engine', () => {
   });
 
   it('rejects unknown options as a failure result, not a throw', async () => {
-    const { engine } = await import('./engine/engine.ts');
     const result = await engine(['--verbose']);
 
     expect(result.success).toBe(false);
@@ -42,7 +40,6 @@ describe('engine', () => {
   });
 
   it('reports unimplemented commands as an outcome, not prose', async () => {
-    const { engine } = await import('./engine/engine.ts');
     const result = await engine(['gc']);
 
     expect(result.success).toBe(true);
@@ -53,7 +50,6 @@ describe('engine', () => {
   });
 
   it('validates run arguments and reports the error outcome', async () => {
-    const { engine } = await import('./engine/engine.ts');
     const result = await engine(['run']);
 
     expect(result.success).toBe(true);

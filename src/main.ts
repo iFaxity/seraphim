@@ -60,16 +60,16 @@ async function render(result: Result<Outcome>) {
           out.skipped ? `no sessions (${out.skipped} unreadable skipped)` : 'no sessions',
         );
       }
-      const lines = out.sessions.map((s) => {
-        const head = `${s.repo}#${s.issueNumber}  ${s.state}  ${s.flow}  ${s.agent}/${s.model}`;
-        const pr = s.prUrl ? `  pr:${s.prUrl}` : '';
-        const log = s.lastLog ? `\n    last log: ${s.lastLog}` : '';
 
-        return `${head}${pr}\n    worktree: ${s.worktreePath}${log}`;
-      });
+      // Story 25: one line per session; worktrees are a list after, not inline rows.
+      const lines = out.sessions.map(
+        (s) =>
+          `${s.repo}#${s.issueNumber}  ${s.state}  ${s.flow}  ${s.agent}/${s.model}${s.prUrl ? `  pr:${s.prUrl}` : ''}${s.lastLog ? `  last log: ${s.lastLog}` : ''}`,
+      );
+      const worktrees = out.sessions.map((s) => `${s.repo}#${s.issueNumber}: ${s.worktreePath}`);
       const skipped = out.skipped ? `\n${out.skipped} unreadable receipt directories skipped` : '';
 
-      return success(lines.join('\n') + skipped);
+      return success(`${lines.join('\n')}\nworktrees:\n${worktrees.join('\n')}${skipped}`);
     }
     case 'error':
       return success(`error: ${out.message}`);

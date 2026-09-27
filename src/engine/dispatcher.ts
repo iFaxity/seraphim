@@ -1,6 +1,12 @@
 import { parseArgs } from 'node:util';
 
-import { type CommandName, type Invocation, type Outcome, type SessionLine } from './invocation.ts';
+import {
+  type CommandName,
+  type Invocation,
+  type Outcome,
+  type SessionLine,
+  toSessionLine,
+} from './invocation.ts';
 import { listSessions, sessionRelDir } from './receipts.ts';
 import { runSession, type Deps } from './session.ts';
 
@@ -31,7 +37,11 @@ const COMMANDS: readonly {
       }
 
       if (!deps) {
-        return { kind: 'unimplemented', command: 'run' };
+        return {
+          kind: 'error',
+          message:
+            'no engine home configured: supply Deps to engine() (see src/main.ts composeDeps)',
+        };
       }
 
       const result = await runSession(deps, { repo: args[0] ?? '', issueNumber: Number(args[1]) });
@@ -83,19 +93,7 @@ const COMMANDS: readonly {
         return { kind: 'error', message: listed.error.message };
       }
 
-      const sessions: SessionLine[] = listed.data.map((entry) => ({
-        repo: entry.repo,
-        issueNumber: entry.manifest.issueNumber,
-        flow: entry.manifest.flow,
-        agent: entry.manifest.agent,
-        model: entry.manifest.model,
-        state: entry.manifest.state,
-        ...(entry.manifest.prUrl ? { prUrl: entry.manifest.prUrl } : {}),
-        startedAt: entry.manifest.startedAt,
-        ...(entry.lastLog ? { lastLog: entry.lastLog } : {}),
-        worktreePath: entry.manifest.worktreePath,
-        dir: entry.dir,
-      }));
+      const sessions: SessionLine[] = listed.data.map(toSessionLine);
 
       return {
         kind: 'status',

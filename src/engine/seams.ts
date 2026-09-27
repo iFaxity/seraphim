@@ -49,11 +49,21 @@ export type SandboxExec = {
 };
 
 /**
+ * Identity of the built/cached per-project container image (spec story 7: built from the
+ * project Dockerfile, reused across sessions). v1's fake has nothing to identify — the
+ * real adapter (#5) names the registry tag or content hash here.
+ */
+export type Image = {
+  readonly id: string;
+};
+
+/**
  * Sandbox seam: per-project image build/cache and exec with the session worktree mounted.
  * v1 ships no real adapter (#5); tests inject fakes.
  */
 export type Sandbox = {
-  readonly ensureImage: (repo: string) => Promise<Result<unknown, Error>>;
+  /** Identity of the built/cached container image the session's execs run against. */
+  readonly ensureImage: (repo: string) => Promise<Result<Image, Error>>;
   readonly exec: (input: {
     readonly repo: string;
     readonly worktreePath: string;
