@@ -1,4 +1,10 @@
-import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
+import {
+  type AgentRuntime,
+  type Git,
+  type Sandbox,
+  type Tracker,
+  type TurnResult,
+} from './seams.ts';
 import { type Deps } from './session.ts';
 
 /**
@@ -120,14 +126,33 @@ export function fakeDeps(
     readonly cloneUrl: Deps['cloneUrl'];
     readonly workspaceRoot: string;
     readonly sessionsRoot: string;
+    /** Simulated runtime latency per turn, so tests can exercise clock-based caps. */
+    readonly runtimeDelayMs: number;
   }>,
 ) {
-  const runtime = overrides?.runtime ?? fakeRuntime();
+  const inner = overrides?.runtime ?? fakeRuntime();
   const tracker = overrides?.tracker ?? fakeTracker();
   const sandbox = overrides?.sandbox ?? fakeSandbox();
   const git = overrides?.git ?? fakeGit();
   const workspaceRoot = overrides?.workspaceRoot ?? '/tmp/seraphim-fake';
   const sessionsRoot = overrides?.sessionsRoot ?? '/tmp/seraphim-fake-sessions';
+  const runtimeDelayMs = overrides?.runtimeDelayMs ?? 0;
+
+  // Simulated latency wraps the inner runtime's run rather than mutating it (its `run` is
+  // readonly): a fresh record-bearing object with the delayed dispatch.
+  const runtime: FakeRuntime =
+    runtimeDelayMs > 0
+      ? {
+          ...inner,
+          run: (input) => {
+            const { promise, resolve } = Promise.withResolvers<TurnResult>();
+
+            setTimeout(() => resolve(inner.run(input)), runtimeDelayMs);
+
+            return promise;
+          },
+        }
+      : inner;
 
   return {
     deps: {

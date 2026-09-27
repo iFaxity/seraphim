@@ -64,7 +64,7 @@ async function render(result: Result<Outcome>) {
       // One line per session; worktrees are a list after, not inline rows.
       const lines = out.sessions.map(
         (s) =>
-          `${s.repo}#${s.issueNumber}  ${s.state}  ${s.flow}  ${s.agent}/${s.model}${s.prUrl ? `  pr:${s.prUrl}` : ''}${s.lastLog ? `  last log: ${s.lastLog}` : ''}`,
+          `${s.repo}#${s.issueNumber}  ${s.state}${s.capHit ? ` (${s.capHit})` : ''}  ${s.flow}  ${s.agent}/${s.model}${s.prUrl ? `  pr:${s.prUrl}` : ''}${s.lastLog ? `  last log: ${s.lastLog}` : ''}`,
       );
       const worktrees = out.sessions.map((s) => `${s.repo}#${s.issueNumber}: ${s.worktreePath}`);
       const skipped = out.skipped ? `\n${out.skipped} unreadable receipt directories skipped` : '';

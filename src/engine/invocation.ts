@@ -42,6 +42,8 @@ export type SessionLine = {
   readonly state: SessionState;
   readonly prUrl?: string;
   readonly startedAt: string;
+  /** Why the session stopped on its budget — present exactly when state is `cap-hit`. */
+  readonly capHit?: string;
   readonly lastLog?: string;
   readonly worktreePath: string;
   readonly dir: string;
@@ -61,6 +63,7 @@ export function toSessionLine(listing: SessionListing): SessionLine {
     ...(manifest.prUrl ? { prUrl: manifest.prUrl } : {}),
     startedAt: manifest.startedAt,
     ...(listing.lastLog ? { lastLog: listing.lastLog } : {}),
+    ...(manifest.capHit ? { capHit: manifest.capHit } : {}),
     worktreePath: manifest.worktreePath,
     dir: listing.dir,
   };
