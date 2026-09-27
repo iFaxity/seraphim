@@ -113,6 +113,7 @@ describe('status listing', () => {
         worktreePath: '/tmp/wt',
         startedAt: '2026-09-27T00:00:00.000Z',
         endedAt: '2026-09-27T00:01:00.000Z',
+        caps: { maxTurns: 10, wallClockMs: 1800000 },
         turns: [],
       }),
     );

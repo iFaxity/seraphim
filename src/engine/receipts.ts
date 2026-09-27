@@ -24,6 +24,13 @@ export const TurnRecordSchema = z.object({
 
 export type TurnRecord = z.infer<typeof TurnRecordSchema>;
 
+export const CapsSchema = z.object({
+  maxTurns: z.number().int().min(1),
+  wallClockMs: z.number().int().min(0),
+});
+
+export type Caps = z.infer<typeof CapsSchema>;
+
 /** The session manifest: one file per session, the row `seraphim status` lists. */
 export const SessionManifestSchema = z.object({
   repo: z.string().min(1),
@@ -37,6 +44,10 @@ export const SessionManifestSchema = z.object({
   startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime().optional(),
   prUrl: z.string().url().optional(),
+  /** The effective budget: what the kernel enforced, not merely what the flow asked for. */
+  caps: CapsSchema,
+  /** Why the session hit its budget — present exactly when state is `cap-hit`. */
+  capHit: z.string().optional(),
   turns: z.array(TurnRecordSchema),
 });
 

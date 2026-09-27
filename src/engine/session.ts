@@ -2,6 +2,7 @@ import { join } from 'node:path';
 
 import { loadFlow } from './flow.ts';
 import {
+  type Caps,
   type SessionManifest,
   type TurnRecord,
   MANIFEST_FILE,
@@ -19,6 +20,17 @@ export type TranscriptFile = {
   readonly name: string;
   readonly body: string;
 };
+
+/**
+ * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
+ * resolve ambiguity itself, never wait for a confirmation nobody can give.
+ */
+export const AFK_PREAMBLE =
+  'You are running unattended: no user input is available. Resolve ambiguity yourself and ' +
+  'never wait for confirmation.';
+
+/** Kernel-side default budget when a flow declares none — runaway protection is not optional. */
+const DEFAULT_CAPS: Caps = { maxTurns: 10, wallClockMs: 30 * 60 * 1000 };
 
 export type SessionInput = {
   readonly repo: string;
@@ -155,6 +167,12 @@ export async function runSession(deps: Deps, input: SessionInput) {
   const turns: TurnRecord[] = [];
   const logs: string[] = [];
   const transcripts: TranscriptFile[] = [];
+  const sessionTranscript: string[] = [];
+
+  // The declared budget is the flow's; enforcement is the kernel's — flow code sees neither
+  // the caps nor a bypass (spec: caps live in the kernel, invisible to flows).
+  const caps = flow.data.config.caps ?? DEFAULT_CAPS;
+  const deadline = Date.now() + caps.wallClockMs;
 
   // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at
   // write time below, so the validated shape is the one actually persisted — not an
@@ -171,6 +189,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     branch,
     worktreePath,
     startedAt,
+    caps,
     turns: [],
   };
 
@@ -202,9 +221,29 @@ export async function runSession(deps: Deps, input: SessionInput) {
           }),
     },
     run: async (prompt: string) => {
+      // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
+      // not be able to dispatch past a budget by catching the abort (spec: caps live in
+      // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
+      if (Date.now() >= deadline) {
+        capAbort(
+          manifest,
+          `wall-clock cap of ${caps.wallClockMs}ms exhausted before turn ${turns.length + 1}`,
+        );
+      }
+
+      if (turns.length >= caps.maxTurns) {
+        capAbort(manifest, `turn cap of ${caps.maxTurns} reached before turn ${turns.length + 1}`);
+      }
+
       const turnStart = new Date().toISOString();
+      // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
+      // non-interactive contract, flows stay prompt-pure.
       const turn = await tryCatch(
-        deps.runtime.run({ cwd: worktreePath, prompt, model: flow.data.config.model }),
+        deps.runtime.run({
+          cwd: worktreePath,
+          prompt: `${AFK_PREAMBLE}\n\n${prompt}`,
+          model: flow.data.config.model,
+        }),
       );
       const exitState = !turn.success ? ('failed' as const) : turn.data.exitState;
 
@@ -217,12 +256,14 @@ export async function runSession(deps: Deps, input: SessionInput) {
         startedAt: turnStart,
         endedAt: new Date().toISOString(),
       });
-
       // Transcript capture alongside the schema files — empty body on a runtime crash
       // rather than a missing file, so diagnostics always have something to read.
       const transcript = turn.success ? turn.data.transcript : String(turn.error);
 
       transcripts.push({ name: `turn-${turns.length}.transcript.md`, body: transcript });
+      // The prompt as the runtime received it (preamble included), so the session file is
+      // the conversation, not just the replies.
+      sessionTranscript.push(`## turn ${turns.length}\n\n> prompt: ${prompt}\n\n${transcript}\n`);
 
       if (exitState != 'completed') {
         manifest.state = exitState;
@@ -252,7 +293,9 @@ export async function runSession(deps: Deps, input: SessionInput) {
     finalManifest,
     turns,
     logs,
-    transcripts,
+    // The whole-session transcript rides alongside the per-turn files — the per-turn
+    // captures stay for per-turn diagnostics.
+    [...transcripts, { name: 'session.transcript.md', body: sessionTranscript.join('\n') }],
   );
 
   if (!write.success) {
@@ -267,6 +310,17 @@ class TurnAbortedError extends Error {
   constructor(exitState: 'failed' | 'cap-hit') {
     super(`turn aborted: ${exitState}`);
   }
+}
+
+/**
+ * Records the budget reason on the manifest, then throws to stop the flow. One helper so
+ * every cap abort records state exactly the same way — the manifest is the receipt.
+ */
+function capAbort(manifest: SessionManifest, reason: string): never {
+  manifest.state = 'cap-hit';
+  manifest.capHit = reason;
+
+  throw new TurnAbortedError('cap-hit');
 }
 
 /** Fails fast on missing Dockerfile-shaped prerequisites; loadFlow owns the flow file. */

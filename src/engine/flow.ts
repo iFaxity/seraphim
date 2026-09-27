@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { z } from 'zod';
 
+import { CapsSchema } from './receipts.ts';
 import { type Tracker } from './seams.ts';
 
 import { tryCatch } from '../lib/result.ts';
@@ -18,6 +19,9 @@ export const FlowConfigSchema = z.object({
   skills: z.array(z.string()),
   // Sandbox strategy (spec: docker for now; only member today).
   sandbox: z.enum(['docker']),
+  // Kernel-enforced budget: flows declare it, the kernel owns enforcement (spec: caps live
+  // in the kernel, invisible to flow code). Optional — a default applies when omitted.
+  caps: CapsSchema.optional(),
 });
 
 export type FlowConfig = z.infer<typeof FlowConfigSchema>;
