@@ -25,6 +25,13 @@ restate or override them here. This file covers what they can't check.
   converts it into a `Result`.
 - Prefer `Result`/`tryCatch` over `try`/`catch` wherever the caller can reach for it.
 
+## Time
+
+- Instants are `Temporal.Instant` in memory (`src/lib/time.ts`) and epoch-millisecond numbers
+  on disk/wire. Never `Date`: it is mutable and silently stringifies in JSON.
+- Clock reads, edge conversions, and `Intl` formatting go through `lib/time.ts` — no
+  `Date.now()`, `new Date()`, or raw `Intl.DateTimeFormat` elsewhere.
+
 ## Naming
 
 - Files: kebab-case, enforced by `unicorn/filename-case`.

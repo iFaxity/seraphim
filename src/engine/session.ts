@@ -2,8 +2,8 @@ import { join } from 'node:path';
 
 import { loadFlow } from './flow.ts';
 import {
-  type SessionManifest,
-  type TurnRecord,
+  type Session,
+  type Turn,
   MANIFEST_FILE,
   SessionManifestSchema,
   sessionDir,
@@ -12,6 +12,7 @@ import {
 import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
 
 import { tryCatch } from '../lib/result.ts';
+import { now, toEpochMs } from '../lib/time.ts';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 
 /** Free-text artifacts that sit alongside — never replace — the schema'd receipt JSON. */
@@ -33,9 +34,9 @@ export type SessionInput = {
   readonly issueNumber: number;
 };
 
-/** The receipt-visible result of one completed session. */
+/** The receipt-visible result of one completed session — kernel types, instants unconverted. */
 export type SessionOutcome = {
-  readonly manifest: SessionManifest;
+  readonly manifest: Session;
 };
 
 export type Deps = {
@@ -126,13 +127,13 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return pull;
   }
 
-  const startedAt = new Date().toISOString();
-  const relDir = sessionRelDir(input.repo, input.issueNumber, startedAt);
+  const startedAt = now();
+  const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
   const worktreePath = join(
     deps.workspaceRoot,
     'worktrees',
     input.repo,
-    `${input.issueNumber}-${startedAt}`,
+    `${input.issueNumber}-${toEpochMs(startedAt)}`,
   );
   const defaultBranch = await step(
     deps.git.defaultBranch(repoPath),
@@ -143,9 +144,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return defaultBranch;
   }
 
-  // Git refnames forbid colons, so the ISO timestamp is compacted for the branch while the
-  // receipt directory keeps the full one (git refnames forbid colons).
-  const branch = `seraphim/${input.repo}/${input.issueNumber}-${startedAt.replaceAll(':', '')}`;
+  const branch = `seraphim/${input.repo}/${input.issueNumber}-${toEpochMs(startedAt)}`;
   const worktree = await step(
     deps.git.createWorktree({
       repoPath,
@@ -160,7 +159,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return worktree;
   }
 
-  const turns: TurnRecord[] = [];
+  const turns: Turn[] = [];
   const logs: string[] = [];
   const transcripts: TranscriptFile[] = [];
   const sessionTranscript: string[] = [];
@@ -168,12 +167,12 @@ export async function runSession(deps: Deps, input: SessionInput) {
   // The declared budget is the flow's; enforcement is the kernel's — flow code sees neither
   // the caps nor a bypass (spec: caps live in the kernel, invisible to flows).
   const caps = flow.data.config.caps;
-  const deadline = Date.now() + caps.wallClockMs;
+  const deadline = toEpochMs(now()) + caps.wallClockMs;
 
   // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at
   // write time below, so the validated shape is the one actually persisted — not an
   // empty-turns snapshot.
-  const manifest: SessionManifest = {
+  const manifest: Session = {
     repo: input.repo,
     issueNumber: input.issueNumber,
     // Flow identity: v1 is one flow per repo (spec Out of Scope), so the repo is the
@@ -220,18 +219,23 @@ export async function runSession(deps: Deps, input: SessionInput) {
       // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
       // not be able to dispatch past a budget by catching the abort (spec: caps live in
       // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
-      if (Date.now() >= deadline) {
+      if (toEpochMs(now()) >= deadline) {
         capAbort(
           manifest,
           `wall-clock cap of ${caps.wallClockMs}ms exhausted before turn ${turns.length + 1}`,
+          sessionTranscript,
         );
       }
 
       if (turns.length >= caps.maxTurns) {
-        capAbort(manifest, `turn cap of ${caps.maxTurns} reached before turn ${turns.length + 1}`);
+        capAbort(
+          manifest,
+          `turn cap of ${caps.maxTurns} reached before turn ${turns.length + 1}`,
+          sessionTranscript,
+        );
       }
 
-      const turnStart = new Date().toISOString();
+      const turnStart = now();
       // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
       // non-interactive contract, flows stay prompt-pure.
       const turn = await tryCatch(
@@ -250,8 +254,20 @@ export async function runSession(deps: Deps, input: SessionInput) {
         model: flow.data.config.model,
         exitState,
         startedAt: turnStart,
-        endedAt: new Date().toISOString(),
+        endedAt: now(),
       });
+
+      // A turn that outlived the deadline still ran to completion — the runtime is not
+      // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
+      // completed (spec: exceeding wall clock is a cap hit with the retention contract).
+      if (toEpochMs(now()) >= deadline) {
+        capAbort(
+          manifest,
+          `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${turns.length}`,
+          sessionTranscript,
+        );
+      }
+
       // Transcript capture alongside the schema files — empty body on a runtime crash
       // rather than a missing file, so diagnostics always have something to read.
       const transcript = turn.success ? turn.data.transcript : String(turn.error);
@@ -281,9 +297,8 @@ export async function runSession(deps: Deps, input: SessionInput) {
   if (manifest.state == 'running') {
     manifest.state = 'completed';
   }
-  manifest.endedAt = new Date().toISOString();
 
-  const finalManifest = { ...manifest, turns };
+  const finalManifest = { ...manifest, endedAt: now(), turns };
   // The whole-session transcript rides alongside the per-turn files — the per-turn
   // captures stay for per-turn diagnostics.
   transcripts.push({ name: 'session.transcript.md', body: sessionTranscript.join('\n') });
@@ -310,12 +325,14 @@ class TurnAbortedError extends Error {
 }
 
 /**
- * Records the budget reason on the manifest, then throws to stop the flow. One helper so
- * every cap abort records state exactly the same way — the manifest is the receipt.
+ * Records the budget reason on the manifest and in the session transcript, then throws to
+ * stop the flow. One helper so every cap abort records the breach exactly the same way —
+ * the manifest is the receipt, and the transcript tells the human what the flow wanted next.
  */
-function capAbort(manifest: SessionManifest, reason: string): never {
+function capAbort(manifest: Session, reason: string, sessionTranscript?: string[]): never {
   manifest.state = 'cap-hit';
   manifest.capHit = reason;
+  sessionTranscript?.push(`## cap hit\n\n> ${reason}\n`);
 
   throw new TurnAbortedError('cap-hit');
 }
@@ -341,18 +358,30 @@ async function fileExists(path: string) {
   );
 }
 
+/** The disk shape of one kernel turn: instants converted to epoch ms. */
+function toDiskTurn(turn: Turn) {
+  return { ...turn, startedAt: toEpochMs(turn.startedAt), endedAt: toEpochMs(turn.endedAt) };
+}
+
 /**
- * Validates the manifest against the receipt contract, then writes every file — the
- * persisted shape is the validated shape, checked where it's written.
+ * The disk boundary: converts kernel instants into the epoch-ms receipt schema, validates the
+ * persisted shape, then writes every file — the disk sees only plain numbers, checked here.
  */
+
 async function writeReceipts(
   dir: string,
-  manifest: SessionManifest,
-  turns: readonly TurnRecord[],
+  manifest: Session,
+  turns: readonly Turn[],
   logs: readonly string[],
   transcripts: readonly TranscriptFile[],
 ) {
-  const validated = SessionManifestSchema.safeParse(manifest);
+  const diskManifest = {
+    ...manifest,
+    startedAt: toEpochMs(manifest.startedAt),
+    ...(manifest.endedAt ? { endedAt: toEpochMs(manifest.endedAt) } : {}),
+    turns: manifest.turns.map(toDiskTurn),
+  };
+  const validated = SessionManifestSchema.safeParse(diskManifest);
 
   if (!validated.success) {
     return {
@@ -371,7 +400,7 @@ async function writeReceipts(
   }
 
   const manifestWrite = await tryCatch(
-    writeFile(join(dir, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
+    writeFile(join(dir, MANIFEST_FILE), `${JSON.stringify(validated.data, null, 2)}\n`, 'utf8'),
   );
 
   if (!manifestWrite.success) {
@@ -385,7 +414,7 @@ async function writeReceipts(
     dir,
     turns.map((turn) => ({
       name: `turn-${turn.index}.json`,
-      body: `${JSON.stringify(turn, null, 2)}\n`,
+      body: `${JSON.stringify(toDiskTurn(turn), null, 2)}\n`,
     })),
   );
 

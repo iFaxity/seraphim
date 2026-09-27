@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { tryCatch } from '../lib/result.ts';
+import { fromEpochMs, toEpochMs, type Instant } from '../lib/time.ts';
 import { readFile, readdir } from 'node:fs/promises';
 
 /**
@@ -18,8 +19,8 @@ export const TurnRecordSchema = z.object({
   agent: z.string().min(1),
   model: z.string().min(1),
   exitState: z.enum(['completed', 'failed', 'cap-hit']),
-  startedAt: z.iso.datetime(),
-  endedAt: z.iso.datetime(),
+  startedAt: z.number().int(),
+  endedAt: z.number().int(),
 });
 
 export type TurnRecord = z.infer<typeof TurnRecordSchema>;
@@ -28,8 +29,6 @@ export const CapsSchema = z.object({
   maxTurns: z.number().int().min(1),
   wallClockMs: z.number().int().min(0),
 });
-
-export type Caps = z.infer<typeof CapsSchema>;
 
 /** The session manifest: one file per session, the row `seraphim status` lists. */
 export const SessionManifestSchema = z.object({
@@ -41,8 +40,8 @@ export const SessionManifestSchema = z.object({
   state: z.enum(['running', 'completed', 'failed', 'cap-hit']),
   branch: z.string().min(1),
   worktreePath: z.string().min(1),
-  startedAt: z.iso.datetime(),
-  endedAt: z.iso.datetime().optional(),
+  startedAt: z.number().int(),
+  endedAt: z.number().int().optional(),
   prUrl: z.string().url().optional(),
   /** The effective budget: what the kernel enforced, not merely what the flow asked for. */
   caps: CapsSchema,
@@ -53,13 +52,31 @@ export const SessionManifestSchema = z.object({
 
 export type SessionManifest = z.infer<typeof SessionManifestSchema>;
 
-/** Terminal/lifecycle state of a session, shared by manifests and dispatch outcomes. */
+/**
+ * Kernel-facing turn: timestamps as instants. Disk schemas stay epoch numbers (JSON
+ * boundary); this shape is what the kernel drafts, mutates, and hands to writeReceipts.
+ */
+export type Turn = Omit<TurnRecord, 'startedAt' | 'endedAt'> & {
+  readonly startedAt: Instant;
+  readonly endedAt: Instant;
+};
+
+/**
+ * Kernel-facing manifest: timestamps as instants, turns as kernel `Turn`s — the shape the
+ * kernel drafts and mutates before the disk conversion at write time.
+ */
+export type Session = Omit<SessionManifest, 'startedAt' | 'endedAt' | 'turns'> & {
+  readonly startedAt: Instant;
+  readonly endedAt?: Instant;
+  readonly turns: readonly Turn[];
+};
+
 export type SessionState = SessionManifest['state'];
 
 export const MANIFEST_FILE = 'manifest.json';
 
-/** Relative receipt directory for one session: `<repo>/<issue#>-<timestamp>/` (ADR-0001). */
-export function sessionRelDir(repo: string, issueNumber: number, startedAt: string) {
+/** Relative receipt directory for one session: `<repo>/<issue#>-<epoch ms>/` (ADR-0001). */
+export function sessionRelDir(repo: string, issueNumber: number, startedAt: number) {
   return join(repo, `${issueNumber}-${startedAt}`);
 }
 
@@ -90,19 +107,36 @@ export async function readManifest(sessionPath: string) {
 
   const parsed = SessionManifestSchema.safeParse(json.data);
 
-  return parsed.success
-    ? { success: true as const, data: parsed.data }
-    : {
-        success: false as const,
-        error: new Error(`invalid manifest in ${sessionPath}: ${parsed.error.message}`),
-      };
+  if (!parsed.success) {
+    return {
+      success: false as const,
+      error: new Error(`invalid manifest in ${sessionPath}: ${parsed.error.message}`),
+    };
+  }
+
+  // The kernel-facing shape: instants. The disk saw numbers; the conversion happens once,
+  // here, at the same edge that validated them.
+  const manifest: Session = {
+    ...parsed.data,
+    startedAt: fromEpochMs(parsed.data.startedAt),
+    ...(parsed.data.endedAt != null
+      ? { endedAt: fromEpochMs(parsed.data.endedAt) }
+      : { endedAt: undefined }),
+    turns: parsed.data.turns.map((turn) => ({
+      ...turn,
+      startedAt: fromEpochMs(turn.startedAt),
+      endedAt: fromEpochMs(turn.endedAt),
+    })),
+  };
+
+  return { success: true as const, data: manifest };
 }
 
 /** All sessions across all repos under the receipts root, newest first. */
 export type SessionListing = {
   readonly repo: string;
   readonly dir: string;
-  readonly manifest: SessionManifest;
+  readonly manifest: Session;
   /** Last line of the session's free-text `flow.log`, if any, for status rendering. */
   readonly lastLog?: string;
 };
@@ -166,7 +200,9 @@ export async function listSessions(sessionsRoot: string) {
 
   return {
     success: true as const,
-    data: listings.sort((a, b) => b.manifest.startedAt.localeCompare(a.manifest.startedAt)),
+    data: listings.sort(
+      (a, b) => toEpochMs(b.manifest.startedAt) - toEpochMs(a.manifest.startedAt),
+    ),
     skipped,
   };
 }

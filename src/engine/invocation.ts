@@ -1,5 +1,7 @@
 import { type SessionListing, type SessionState } from './receipts.ts';
 
+import { toEpochMs } from '../lib/time.ts';
+
 /** The single command a CLI invocation names, parsed from the first positional. */
 export type CommandName = 'run' | 'status' | 'gc' | 'tick' | 'help';
 
@@ -41,7 +43,7 @@ export type SessionLine = {
   readonly model: string;
   readonly state: SessionState;
   readonly prUrl: string | null;
-  readonly startedAt: string;
+  readonly startedAt: number;
   /** Why the session stopped on its budget — non-null exactly when state is `cap-hit`. */
   readonly capHit: string | null;
   readonly lastLog: string | null;
@@ -61,7 +63,7 @@ export function toSessionLine(listing: SessionListing): SessionLine {
     model: manifest.model,
     state: manifest.state,
     prUrl: manifest.prUrl ?? null,
-    startedAt: manifest.startedAt,
+    startedAt: toEpochMs(manifest.startedAt),
     capHit: manifest.capHit ?? null,
     lastLog: listing.lastLog ?? null,
     worktreePath: manifest.worktreePath,
