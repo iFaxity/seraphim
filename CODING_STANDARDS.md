@@ -1,7 +1,7 @@
 # Coding Standards
 
-`oxlint.config.ts` and `oxfmt.config.ts` are the authoritative, machine-checked rules — don't
-restate or override them here. This file covers what they can't check.
+`oxlint.config.ts` and `oxfmt.config.ts` are machine-checked — this file covers what they
+can't.
 
 ## Architecture
 
@@ -23,22 +23,18 @@ restate or override them here. This file covers what they can't check.
 
 ## Errors
 
-- Use `Result`/`tryCatch` (`src/lib/result.ts`) for expected failure the caller branches on.
-- Throw an `Error` subclass only for unexpected/propagating failure; `tryCatch` at the boundary
-  converts it into a `Result`.
-- Prefer `Result`/`tryCatch` over `try`/`catch` wherever the caller can reach for it.
+- Expected failure the caller branches on → `Result`/`tryCatch` (`src/lib/result.ts`). Throw
+  an `Error` subclass only for unexpected/propagating failure; `tryCatch` at the boundary
+  converts it back into a `Result`.
 
 ## Time
 
-- Instants are `Temporal.Instant` in memory (`src/lib/time.ts`) and epoch-millisecond numbers
-  on disk/wire. Never `Date`: it is mutable and silently stringifies in JSON.
-- Clock reads, edge conversions, and `Intl` formatting go through `lib/time.ts` — no
-  `Date.now()`, `new Date()`, or raw `Intl.DateTimeFormat` elsewhere.
+- Instants are `Temporal.Instant` in memory and epoch-millisecond numbers on disk/wire — all
+  clock reads, edge conversions, and `Intl` formatting go through `src/lib/time.ts`. `Date`
+  never appears: it is mutable and silently stringifies in JSON.
 
 ## Naming
 
-- Files: kebab-case, enforced by `unicorn/filename-case`.
-- Tests: co-located `<subject>.test.ts`, not a parallel `__tests__/` tree.
 - Match `CONTEXT.md`'s glossary and its `_Avoid_` terms.
 
 ## Comments
@@ -48,8 +44,6 @@ restate or override them here. This file covers what they can't check.
 
 ## Testing
 
-- Vitest, co-located with the module under test.
-- Assert external behavior a user observes — receipts on disk, tracker calls issued, exit states —
-  never internal call ordering or kernel internals. See `.scratch/seraphim-v1/spec.md` (Testing
-  Decisions) for the seam doctrine: fake `Tracker`/`Sandbox`/`AgentRuntime` adapters, filesystem
-  assertions on the receipts directory.
+- Vitest, co-located as `<subject>.test.ts` — not a parallel `__tests__/` tree.
+- Assert what a user observes — receipts on disk, tracker calls issued, exit states — never
+  internal call ordering or kernel internals.
