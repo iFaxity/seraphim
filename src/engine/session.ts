@@ -184,6 +184,9 @@ export async function runSession(deps: Deps, input: SessionInput) {
     branch,
     worktreePath,
     startedAt,
+    endedAt: null,
+    prUrl: null,
+    capHit: null,
     caps,
     turns: [],
   };
@@ -378,7 +381,7 @@ async function writeReceipts(
   const diskManifest = {
     ...manifest,
     startedAt: toEpochMs(manifest.startedAt),
-    ...(manifest.endedAt ? { endedAt: toEpochMs(manifest.endedAt) } : {}),
+    endedAt: manifest.endedAt == null ? null : toEpochMs(manifest.endedAt),
     turns: manifest.turns.map(toDiskTurn),
   };
   const validated = SessionManifestSchema.safeParse(diskManifest);
