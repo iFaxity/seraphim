@@ -117,6 +117,7 @@ description: Creates a pull request for the current branch on GitHub or Azure De
 - `GITHUB.md` and `ADO.md` linked-items lines now read the issue from the session context
   (skip + note when absent); `GITHUB.md`'s draft line defaults to `--draft`;
   `DESCRIPTION-FORMAT.md` is verbatim from the interactive original.
+conflict://1
 - Rules tightened: force-push prohibition moved into the push step; the "report unsupported
   remote" stop is the only hard stop left.
 - Everything else (platform detection, sub-file loading, description format, command
