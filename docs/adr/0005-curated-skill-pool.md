@@ -9,7 +9,7 @@ issue and repo agent docs, missing inputs are skipped and noted, and only unreso
 fail a session. Each skill carries a `## Ported from the interactive original` note listing
 exactly what changed vs. its upstream, so upstream updates are re-ported deliberately.
 
-Why: story 14 wants proven workflow skills maintained in one place, story 15 forbids implicit
+Why: story 14 wants proven skills maintained in one place, story 15 forbids implicit
 skill loading, and the no-user-input constraint (spec Further Notes) applies to skills
 themselves — so ported skills must strip interactive gates at authoring time, not runtime.
 Spawn/worktree skills are excluded: the kernel owns that layer entirely.
