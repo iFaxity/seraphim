@@ -34,6 +34,12 @@ A project is two assets in the central directory:
 `defineFlow` and the session machinery behind it are planned but not yet implemented.
 Everything runs locally or on a server you own.
 
+## Skill pool
+
+`skills/` holds the curated global pool: non-interactive skills a flow declares in
+`config.skills` and the kernel stages into the worktree. Adding one is a directory plus a
+flow declaration — see `skills/README.md`.
+
 ## Development
 
 `pnpm install && pnpm dev` runs the CLI from source. For quality gates, PR and commit
