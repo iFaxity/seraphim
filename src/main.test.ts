@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -97,7 +98,7 @@ describe('status listing', () => {
   it('renders one line per session from the receipts directory', async () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-status-'));
     const repo = 'demo';
-    const dir = join(root, 'sessions', repo, '7-2026-01-01T00:00:00.000Z');
+    const dir = join(root, 'sessions', repo, '7-1727414400000');
 
     await mkdir(dir, { recursive: true });
     await writeFile(
@@ -111,8 +112,8 @@ describe('status listing', () => {
         state: 'completed',
         branch: 'seraphim/demo/7',
         worktreePath: '/tmp/wt',
-        startedAt: '2026-09-27T00:00:00.000Z',
-        endedAt: '2026-09-27T00:01:00.000Z',
+        startedAt: 1727414400000,
+        endedAt: 1727414460000,
         caps: { maxTurns: 10, wallClockMs: 1800000 },
         turns: [],
       }),
@@ -133,7 +134,9 @@ describe('status listing', () => {
   });
 
   it('lists no sessions when the receipts root is missing', async () => {
-    const { deps } = fakeDeps({ sessionsRoot: join(tmpdir(), `seraphim-missing-${Date.now()}`) });
+    const { deps } = fakeDeps({
+      sessionsRoot: join(tmpdir(), `seraphim-missing-${randomUUID()}`),
+    });
     const json = await main(['status', '--json'], deps);
 
     expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });

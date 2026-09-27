@@ -11,6 +11,7 @@ import { listSessions, sessionRelDir } from './receipts.ts';
 import { runSession, type Deps } from './session.ts';
 
 import { failure, success, tryCatch } from '../lib/result.ts';
+import { toEpochMs } from '../lib/time.ts';
 
 type Handler = (deps: Deps | undefined, args: readonly string[]) => Promise<Outcome>;
 
@@ -57,7 +58,11 @@ const COMMANDS: readonly {
         repo: manifest.repo,
         issueNumber: manifest.issueNumber,
         state: manifest.state,
-        receiptDir: sessionRelDir(manifest.repo, manifest.issueNumber, manifest.startedAt),
+        receiptDir: sessionRelDir(
+          manifest.repo,
+          manifest.issueNumber,
+          toEpochMs(manifest.startedAt),
+        ),
       };
     },
   },
