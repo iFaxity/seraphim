@@ -1,4 +1,4 @@
-import { type SessionState } from './receipts.ts';
+import { type SessionListing, type SessionState } from './receipts.ts';
 
 /** The single command a CLI invocation names, parsed from the first positional. */
 export type CommandName = 'run' | 'status' | 'gc' | 'tick' | 'help';
@@ -46,6 +46,25 @@ export type SessionLine = {
   readonly worktreePath: string;
   readonly dir: string;
 };
+
+/** The status-command view of one listing: the manifest row, presentation-free. */
+export function toSessionLine(listing: SessionListing): SessionLine {
+  const { manifest } = listing;
+
+  return {
+    repo: manifest.repo,
+    issueNumber: manifest.issueNumber,
+    flow: manifest.flow,
+    agent: manifest.agent,
+    model: manifest.model,
+    state: manifest.state,
+    ...(manifest.prUrl ? { prUrl: manifest.prUrl } : {}),
+    startedAt: manifest.startedAt,
+    ...(listing.lastLog ? { lastLog: listing.lastLog } : {}),
+    worktreePath: manifest.worktreePath,
+    dir: listing.dir,
+  };
+}
 
 /** One usage line of the command table, as help needs it. */
 export type UsageEntry = {

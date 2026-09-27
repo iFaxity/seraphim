@@ -79,7 +79,7 @@ export function fakeSandbox(): FakeSandbox {
   const executed: string[] = [];
   return {
     executed,
-    ensureImage: () => Promise.resolve({ success: true as const, data: null }),
+    ensureImage: () => Promise.resolve({ success: true as const, data: { id: 'fake-image' } }),
     exec: (input) => {
       executed.push(input.command.join(' '));
 

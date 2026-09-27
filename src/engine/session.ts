@@ -41,6 +41,18 @@ export type Deps = {
 };
 
 /**
+ * Runs one adapter step, normalizing any rejection into a labeled failure Result. The one
+ * place `runSession`'s steps report failure, so each call site is a single await + branch.
+ */
+function step<TResult>(action: PromiseLike<TResult>, label: string) {
+  return tryCatch(action).then((result) =>
+    result.success
+      ? result
+      : { success: false as const, error: new Error(`${label}: ${String(result.error)}`) },
+  );
+}
+
+/**
  * Runs one session end-to-end over injected adapters: preflight fail-fast, image ensure,
  * clone-if-missing + pull, worktree off the default branch (kernel-only ownership per story
  * 30), `ctx.run(prompt)` dispatch into the runtime, receipt files under the sessions root.
@@ -68,46 +80,42 @@ export async function runSession(deps: Deps, input: SessionInput) {
       error: new Error(`adapter not available: ${flow.data.config.agent}`),
     };
   }
-
-  const issue = await tryCatch(deps.tracker.getIssue(input.repo, input.issueNumber));
+  const issue = await step(
+    deps.tracker.getIssue(input.repo, input.issueNumber),
+    'tracker read failed',
+  );
 
   if (!issue.success) {
-    return {
-      success: false as const,
-      error: new Error(`tracker read failed: ${String(issue.error)}`),
-    };
+    return issue;
   }
 
   // Claim on pickup so concurrent sessions cannot double-run the same issue (spec story 28).
-  const claimed = await tryCatch(deps.tracker.claim(issue.data));
+  const claimed = await step(deps.tracker.claim(issue.data), 'tracker claim failed');
 
   if (!claimed.success) {
-    return {
-      success: false as const,
-      error: new Error(`tracker claim failed: ${String(claimed.error)}`),
-    };
+    return claimed;
   }
 
-  const image = await tryCatch(deps.sandbox.ensureImage(input.repo));
+  const image = await step(deps.sandbox.ensureImage(input.repo), 'image build failed');
 
   if (!image.success) {
-    return {
-      success: false as const,
-      error: new Error(`image build failed: ${String(image.error)}`),
-    };
+    return image;
   }
 
   const repoPath = join(deps.workspaceRoot, 'repos', input.repo);
-  const clone = await tryCatch(deps.git.cloneIfMissing(repoPath, deps.cloneUrl(input.repo)));
+  const clone = await step(
+    deps.git.cloneIfMissing(repoPath, deps.cloneUrl(input.repo)),
+    'clone failed',
+  );
 
   if (!clone.success) {
-    return { success: false as const, error: new Error(`clone failed: ${String(clone.error)}`) };
+    return clone;
   }
 
-  const pull = await tryCatch(deps.git.pull(repoPath));
+  const pull = await step(deps.git.pull(repoPath), 'pull failed');
 
   if (!pull.success) {
-    return { success: false as const, error: new Error(`pull failed: ${String(pull.error)}`) };
+    return pull;
   }
 
   const startedAt = new Date().toISOString();
@@ -118,40 +126,44 @@ export async function runSession(deps: Deps, input: SessionInput) {
     input.repo,
     `${input.issueNumber}-${startedAt}`,
   );
-  const defaultBranch = await tryCatch(deps.git.defaultBranch(repoPath));
+  const defaultBranch = await step(
+    deps.git.defaultBranch(repoPath),
+    'default branch lookup failed',
+  );
 
   if (!defaultBranch.success) {
-    return {
-      success: false as const,
-      error: new Error(`default branch lookup failed: ${String(defaultBranch.error)}`),
-    };
+    return defaultBranch;
   }
 
-  const branch = `seraphim/${input.repo}/${input.issueNumber}-${startedAt}`;
-  const worktree = await tryCatch(
+  // Git refnames forbid colons, so the ISO timestamp is compacted for the branch while the
+  // receipt directory keeps the full one (issue #2: worktree creation off the default branch).
+  const branch = `seraphim/${input.repo}/${input.issueNumber}-${startedAt.replaceAll(':', '')}`;
+  const worktree = await step(
     deps.git.createWorktree({
       repoPath,
       branch,
       path: worktreePath,
       baseBranch: defaultBranch.data,
     }),
+    'worktree creation failed',
   );
 
   if (!worktree.success) {
-    return {
-      success: false as const,
-      error: new Error(`worktree creation failed: ${String(worktree.error)}`),
-    };
+    return worktree;
   }
 
   const turns: TurnRecord[] = [];
   const logs: string[] = [];
   const transcripts: TranscriptFile[] = [];
 
-  // Built through the schema so the receipt contract is checked where the manifest is written.
-  const manifestBuild = SessionManifestSchema.safeParse({
+  // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at write
+  // time below, so the validated shape is the one actually persisted (issue #2: zod-schema'd
+  // receipts) — not an empty-turns snapshot.
+  const manifest: SessionManifest = {
     repo: input.repo,
     issueNumber: input.issueNumber,
+    // Flow identity: v1 is one flow per repo (spec Out of Scope), so the repo is the
+    // flow's name in receipts — a named config field arrives with multi-flow projects.
     flow: input.repo,
     agent: flow.data.config.agent,
     model: flow.data.config.model,
@@ -159,17 +171,8 @@ export async function runSession(deps: Deps, input: SessionInput) {
     branch,
     worktreePath,
     startedAt,
-    turns,
-  });
-
-  if (!manifestBuild.success) {
-    return {
-      success: false as const,
-      error: new Error(`session manifest construction failed: ${manifestBuild.error.message}`),
-    };
-  }
-
-  const manifest = manifestBuild.data;
+    turns: [],
+  };
 
   const ctx = {
     repo: input.repo,
@@ -246,13 +249,10 @@ export async function runSession(deps: Deps, input: SessionInput) {
     manifest.endedAt = new Date().toISOString();
   }
 
-  // The schema-parse snapshot captured the empty turn list; publish the live records.
-  manifest.turns = turns;
-
+  const finalManifest = { ...manifest, turns };
   const write = await writeReceipts(
-    deps,
     sessionDir(deps.sessionsRoot, relDir),
-    manifest,
+    finalManifest,
     turns,
     logs,
     transcripts,
@@ -262,7 +262,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return write;
   }
 
-  return { success: true as const, data: { manifest } };
+  return { success: true as const, data: { manifest: finalManifest } };
 }
 
 /** Thrown by ctx.run when a turn fails or hits a cap — the flow stops, state is recorded. */
@@ -292,15 +292,26 @@ async function fileExists(path: string) {
     () => false,
   );
 }
-
+/**
+ * Validates the manifest against the receipt contract (issue #2: zod-schema'd receipts), then
+ * writes every file — the persisted shape is the validated shape, checked where it's written.
+ */
 async function writeReceipts(
-  deps: Deps,
   dir: string,
   manifest: SessionManifest,
   turns: readonly TurnRecord[],
   logs: readonly string[],
   transcripts: readonly TranscriptFile[],
 ) {
+  const validated = SessionManifestSchema.safeParse(manifest);
+
+  if (!validated.success) {
+    return {
+      success: false as const,
+      error: new Error(`session manifest invalid: ${validated.error.message}`),
+    };
+  }
+
   const mkdirResult = await tryCatch(mkdir(dir, { recursive: true }));
 
   if (!mkdirResult.success) {
