@@ -9,7 +9,7 @@ import { runSession } from './session.ts';
 
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
-/** Seeds the central directory: project flow file + Dockerfile (registration artifacts, #3). */
+/** Seeds the central directory: project flow file + Dockerfile, the registration artifacts. */
 async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
   const projectDir = join(root, 'projects', repo);
 

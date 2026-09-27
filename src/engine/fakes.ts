@@ -58,9 +58,8 @@ export function fakeRuntime(
   return {
     prompts,
     transcript,
-    // The fake stands in for the real pi/omp adapter (#4); claude has no adapter yet (#11),
-    // so availability mirrors the shipped reality — a claude flow fails fast even in tests
-    // that don't override `available` (issue #2: "adapter not available").
+    // Only the pi/omp adapter is implemented so far; a claude flow fails fast here
+    // rather than mid-session, and the fake's availability mirrors that shipped reality.
     available: (agent) => agent != 'claude',
     run: (input) => {
       prompts.push(`${input.cwd}::${input.prompt}::${input.model}`);
