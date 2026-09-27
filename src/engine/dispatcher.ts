@@ -7,6 +7,7 @@ import {
   type SessionLine,
   toSessionLine,
 } from './invocation.ts';
+import { deactivateProject, listProjects, registerProject } from './projects.ts';
 import { listSessions, sessionRelDir } from './receipts.ts';
 import { runSession, type Deps } from './session.ts';
 
@@ -17,6 +18,14 @@ type Handler = (deps: Deps | undefined, args: readonly string[]) => Promise<Outc
 
 function notImplemented(command: CommandName) {
   return () => Promise.resolve({ kind: 'unimplemented' as const, command });
+}
+
+/** The one missing-Deps error, shared by every command that needs an engine home. */
+function noDepsError() {
+  return {
+    kind: 'error' as const,
+    message: 'no engine home configured: supply Deps to engine() (see src/main.ts composeDeps)',
+  };
 }
 /**
  * The command table — the engine's whole externally visible surface. Adding a command is one
@@ -106,6 +115,92 @@ const COMMANDS: readonly {
         skipped: listed.skipped > 0 ? listed.skipped : null,
         json: parsed.data.values['json'] === true,
       };
+    },
+  },
+  {
+    name: 'register',
+    summary: 'register a project in the central directory',
+    usage: 'register <git-url> [name]',
+    handler: async (deps, args) => {
+      if (args.length < 1 || args.length > 2) {
+        return { kind: 'error', message: 'expected usage: register <git-url> [name]' };
+      }
+
+      if (!deps) {
+        return noDepsError();
+      }
+
+      const result = await registerProject(deps.workspaceRoot, deps.git, args[0] ?? '', args[1]);
+
+      if (!result.success) {
+        return { kind: 'error', message: result.error.message };
+      }
+
+      return {
+        kind: 'registered',
+        repo: result.data.record.repo,
+        remote: result.data.record.remote,
+        reactivated: result.data.reactivated,
+        artifacts: result.data.artifacts,
+      };
+    },
+  },
+  {
+    name: 'list',
+    summary: 'list registered projects',
+    usage: 'list [--json]',
+    handler: async (deps, args) => {
+      const parsed = tryCatch(() =>
+        parseArgs({
+          args: [...args],
+          options: { json: { type: 'boolean', default: false } },
+          allowPositionals: false,
+          strict: true,
+        }),
+      );
+
+      if (!parsed.success) {
+        return { kind: 'error', message: `invalid list arguments: ${parsed.error.message}` };
+      }
+
+      if (!deps) {
+        return noDepsError();
+      }
+
+      const listed = await listProjects(deps.workspaceRoot);
+
+      if (!listed.success) {
+        return { kind: 'error', message: listed.error.message };
+      }
+
+      return {
+        kind: 'projects',
+        projects: listed.data,
+        skipped: listed.skipped,
+        json: parsed.data.values['json'] === true,
+      };
+    },
+  },
+  {
+    name: 'deactivate',
+    summary: 'mark a project inactive so it stops claiming sessions',
+    usage: 'deactivate <repo>',
+    handler: async (deps, args) => {
+      if (args.length !== 1) {
+        return { kind: 'error', message: 'expected usage: deactivate <repo>' };
+      }
+
+      if (!deps) {
+        return noDepsError();
+      }
+
+      const result = await deactivateProject(deps.workspaceRoot, args[0] ?? '');
+
+      if (!result.success) {
+        return { kind: 'error', message: result.error.message };
+      }
+
+      return { kind: 'deactivated', repo: result.data.repo };
     },
   },
   {

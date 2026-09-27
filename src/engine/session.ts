@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 
 import { loadFlow } from './flow.ts';
+import { loadProject } from './projects.ts';
 import {
   type Session,
   type Turn,
@@ -45,7 +46,6 @@ export type Deps = {
   readonly sandbox: Sandbox;
   readonly runtime: AgentRuntime;
   readonly git: Git;
-  readonly cloneUrl: (repo: string) => string;
   readonly workspaceRoot: string;
   readonly sessionsRoot: string;
 };
@@ -69,7 +69,23 @@ function step<TResult>(action: PromiseLike<TResult>, label: string) {
  * Failures stop for human takeover: state is recorded, branch retained.
  */
 export async function runSession(deps: Deps, input: SessionInput) {
-  // The flow file is the first prerequisite: loadFlow owns its existence and shape errors.
+  // The registration is the first prerequisite: it resolves the remote and fail-fast names
+  // the register fix for unregistered repos. The flow file follows: loadFlow owns its errors.
+  const project = await loadProject(deps.workspaceRoot, input.repo);
+
+  if (!project.success) {
+    return project;
+  }
+
+  if (project.data.state != 'active') {
+    return {
+      success: false as const,
+      error: new Error(
+        `project '${input.repo}' is inactive: re-register it (seraphim register <git-url>) to run sessions`,
+      ),
+    };
+  }
+
   const flow = await loadFlow(deps.workspaceRoot, input.repo);
 
   if (!flow.success) {
@@ -113,10 +129,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
   }
 
   const repoPath = join(deps.workspaceRoot, 'repos', input.repo);
-  const clone = await step(
-    deps.git.cloneIfMissing(repoPath, deps.cloneUrl(input.repo)),
-    'clone failed',
-  );
+  const clone = await step(deps.git.cloneIfMissing(repoPath, project.data.remote), 'clone failed');
 
   if (!clone.success) {
     return clone;

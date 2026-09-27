@@ -5,7 +5,6 @@ import {
   type Tracker,
   type TurnResult,
 } from './seams.ts';
-import { type Deps } from './session.ts';
 
 /**
  * Hand-written fakes for the three adapter seams plus the internal `Git` seam (ADR-0002 keeps
@@ -94,6 +93,7 @@ export function fakeSandbox(): FakeSandbox {
 }
 
 export type FakeGit = Git & {
+  readonly clones: { readonly path: string; readonly url: string }[];
   readonly worktrees: {
     readonly branch: string;
     readonly baseBranch: string;
@@ -102,18 +102,25 @@ export type FakeGit = Git & {
 };
 
 export function fakeGit(defaultBranch = 'main'): FakeGit {
+  const clones: FakeGit['clones'] = [];
   const worktrees: FakeGit['worktrees'] = [];
 
   return {
+    clones,
     worktrees,
     defaultBranch: () => Promise.resolve(defaultBranch),
-    cloneIfMissing: () => Promise.resolve(),
+    cloneIfMissing: (path, url) => {
+      clones.push({ path, url });
+
+      return Promise.resolve();
+    },
     pull: () => Promise.resolve(),
     createWorktree: (input) => {
       worktrees.push({ branch: input.branch, baseBranch: input.baseBranch, path: input.path });
 
       return Promise.resolve();
     },
+    probeRemote: () => Promise.resolve(),
   };
 }
 
@@ -122,8 +129,7 @@ export function fakeDeps(
     readonly runtime: FakeRuntime;
     readonly tracker: FakeTracker;
     readonly sandbox: FakeSandbox | Sandbox;
-    readonly git: FakeGit;
-    readonly cloneUrl: Deps['cloneUrl'];
+    readonly git: FakeGit | Git;
     readonly workspaceRoot: string;
     readonly sessionsRoot: string;
     /** Simulated runtime latency per turn, so tests can exercise clock-based caps. */
@@ -159,14 +165,13 @@ export function fakeDeps(
       tracker,
       sandbox,
       runtime,
-      git,
-      cloneUrl: overrides?.cloneUrl ?? ((repo) => `https://example.invalid/${repo}.git`),
+      git: git as FakeGit,
       workspaceRoot,
       sessionsRoot,
     },
     runtime,
     tracker,
     sandbox,
-    git,
+    git: git as FakeGit,
   };
 }

@@ -1,0 +1,282 @@
+import { z } from 'zod';
+
+import { type Git } from './seams.ts';
+
+import { tryCatch } from '../lib/result.ts';
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+
+/**
+ * Projects are the filesystem-as-database (ADR-0001): one zod-validated record per project at
+ * `projects/<repo>/project.json`, sitting beside the project's flow file, Dockerfile, and env
+ * slots in the central directory. Registration is the write edge; sessions read it to resolve
+ * the clone remote, so the schema is the machine contract.
+ */
+
+export const ProjectRecordSchema = z.object({
+  repo: z.string().min(1),
+  remote: z.string().min(1),
+  state: z.enum(['active', 'inactive']),
+});
+
+export type ProjectRecord = z.infer<typeof ProjectRecordSchema>;
+
+export const RECORD_FILE = 'project.json';
+
+function projectPath(home: string, repo: string) {
+  return `${home}/projects/${repo}`;
+}
+
+/** Refuses path-traversing names before they can escape `projects/`. */
+const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function deriveName(url: string) {
+  const last = url.replace(/\/+$/, '').split(/[/:]/).at(-1) ?? '';
+  const name = last.replace(/\.git$/, '');
+
+  // A name containing a dot with no path separator before it is a bare host — not a repo.
+  return name && !/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(name) ? name : undefined;
+}
+
+/**
+ * Seeds a new project's central directory: flow template, Dockerfile slot, env-file slot, and
+ * the registration record. `wx` keeps owner edits intact on a re-register of a partial
+ * directory — a slot already on disk is that owner's content, not scaffolding to clobber.
+ */
+const SLOTS: readonly { name: string; body: string }[] = [
+  {
+    name: 'flow.ts',
+    // A plain-object default export, no imports: a seeded flow must load against any home
+    // (the record's acceptance is `run` working with no manual step), and importing the
+    // engine's defineFlow would pin the home to a full seraphim checkout. loadFlow
+    // schema-checks this shape at the load edge anyway; defineFlow buys only typecheck,
+    // which the owner adds back the moment they import it for their own edits.
+    body: `export default {
+  config: {
+    agent: 'pi',
+    model: 'pi/latest',
+    skills: [],
+    sandbox: 'docker',
+    caps: { maxTurns: 10, wallClockMs: 600000 },
+  },
+  run: async (ctx) => {
+    await ctx.run('implement the issue');
+  },
+};
+`,
+  },
+  { name: 'Dockerfile', body: 'FROM node:26\n' },
+  { name: '.env', body: '' },
+];
+
+export type Registration = {
+  readonly record: ProjectRecord;
+  readonly reactivated: boolean;
+  readonly artifacts: readonly string[];
+};
+
+/**
+ * Registers one project in the central directory: probe the remote (fail fast on an
+ * unreachable URL before anything is seeded), reject duplicates, seed missing slots, write the
+ * record. Re-registering an inactive project reactivates it and updates the remote.
+ */
+export async function registerProject(
+  home: string,
+  git: Pick<Git, 'probeRemote'>,
+  url: string,
+  name?: string,
+) {
+  const derived = name ?? deriveName(url);
+
+  if (!derived) {
+    return {
+      success: false as const,
+      error: new Error(
+        `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
+      ),
+    };
+  }
+
+  if (!NAME_PATTERN.test(derived)) {
+    return {
+      success: false as const,
+      error: new Error(
+        `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
+      ),
+    };
+  }
+
+  const repo = derived;
+
+  const probe = await tryCatch(git.probeRemote(url));
+
+  if (!probe.success) {
+    return {
+      success: false as const,
+      error: new Error(`remote not reachable '${url}': ${String(probe.error)}`),
+    };
+  }
+
+  const dir = projectPath(home, repo);
+  const made = await tryCatch(mkdir(dir, { recursive: true }));
+
+  if (!made.success) {
+    return made;
+  }
+
+  const existing = await readRecord(dir);
+
+  // Reactivation path: an inactive record re-registers with the new remote; an active one
+  // is refused so a changed URL can never silently swap under a working project.
+  if (existing.success && existing.data.state == 'active') {
+    return {
+      success: false as const,
+      error: new Error(
+        `project '${repo}' already registered: deactivate it first (seraphim deactivate ${repo}) to change its remote`,
+      ),
+    };
+  }
+
+  // A slot already on disk is the owner's content — skip it, never clobber (wx).
+  const seeded = (
+    await Promise.all(
+      SLOTS.map(async (slot) => {
+        const wrote = await tryCatch(writeFile(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }));
+
+        return wrote.success ||
+          (wrote.error instanceof Error && 'code' in wrote.error && wrote.error.code == 'EEXIST')
+          ? `projects/${repo}/${slot.name}`
+          : undefined;
+      }),
+    )
+  ).filter((artifact) => artifact != undefined);
+
+  if (seeded.length < SLOTS.length) {
+    return {
+      success: false as const,
+      error: new Error(`could not seed the project directory ${dir}`),
+    };
+  }
+
+  const record: ProjectRecord = { repo, remote: url, state: 'active' };
+
+  const wrote = await writeRecord(dir, record);
+
+  if (!wrote.success) {
+    return wrote;
+  }
+
+  return {
+    success: true as const,
+    data: { record, reactivated: existing.success, artifacts: seeded },
+  };
+}
+
+/** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
+async function requireRegistered(home: string, repo: string) {
+  const read = await readRecord(projectPath(home, repo));
+
+  return read.success || !isMissing(read.error)
+    ? read
+    : {
+        success: false as const,
+        error: new Error(
+          `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
+        ),
+      };
+}
+
+/** The absent-file case: everything else (corrupt record, unreadable dir) keeps its error. */
+function isMissing(error: unknown) {
+  return error instanceof Error && 'code' in error && error.code == 'ENOENT';
+}
+
+/** Loads one project record. An absent record fails fast naming the register fix. */
+export async function loadProject(home: string, repo: string) {
+  return requireRegistered(home, repo);
+}
+
+/** Marks one project inactive in place — the record stays, nothing is deleted. */
+export async function deactivateProject(home: string, repo: string) {
+  const read = await requireRegistered(home, repo);
+
+  if (!read.success) {
+    return read;
+  }
+
+  if (read.data.state == 'inactive') {
+    return {
+      success: false as const,
+      error: new Error(`project '${repo}' is already inactive`),
+    };
+  }
+
+  return writeRecord(projectPath(home, repo), { ...read.data, state: 'inactive' });
+}
+
+/** All registered projects, repo order. Corrupt records are skipped, never fatal. */
+export async function listProjects(home: string) {
+  const root = `${home}/projects`;
+  const dirs = await tryCatch(readdir(root, { withFileTypes: true }));
+
+  if (!dirs.success) {
+    return isMissing(dirs.error)
+      ? { success: true as const, data: [], skipped: 0 }
+      : {
+          success: false as const,
+          error: new Error(`unreadable projects root ${root}: ${String(dirs.error)}`),
+        };
+  }
+  const listed = await Promise.all(
+    dirs.data
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry) => await readRecord(`${root}/${entry.name}`)),
+  );
+  const records = listed
+    .filter((read) => read.success)
+    .map((read) => read.data)
+    .sort((a, b) => a.repo.localeCompare(b.repo));
+
+  return {
+    success: true as const,
+    data: records,
+    skipped: listed.length - records.length,
+  };
+}
+
+/** Reads and schema-checks one `project.json`. Invalid shape is a failure Result. */
+async function readRecord(dir: string) {
+  const raw = await tryCatch(readFile(`${dir}/${RECORD_FILE}`, 'utf8'));
+
+  if (!raw.success) {
+    return raw;
+  }
+
+  const json = tryCatch(() => JSON.parse(raw.data) as unknown);
+
+  if (!json.success) {
+    return {
+      success: false as const,
+      error: new Error(`invalid project record in ${dir}: ${String(json.error)}`),
+    };
+  }
+
+  const parsed = ProjectRecordSchema.safeParse(json.data);
+
+  return parsed.success
+    ? { success: true as const, data: parsed.data }
+    : {
+        success: false as const,
+        error: new Error(`invalid project record in ${dir}: ${parsed.error.message}`),
+      };
+}
+
+/** Persists one record atomically: temp file then rename, so readers never see a torn row. */
+async function writeRecord(dir: string, record: ProjectRecord) {
+  const write = await tryCatch(
+    writeFile(`${dir}/${RECORD_FILE}.tmp`, `${JSON.stringify(record, null, 2)}\n`).then(() =>
+      rename(`${dir}/${RECORD_FILE}.tmp`, `${dir}/${RECORD_FILE}`),
+    ),
+  );
+
+  return write.success ? { success: true as const, data: record } : write;
+}

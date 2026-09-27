@@ -1,9 +1,18 @@
+import { type ProjectRecord } from './projects.ts';
 import { type SessionListing, type SessionState } from './receipts.ts';
 
 import { toEpochMs } from '../lib/time.ts';
 
 /** The single command a CLI invocation names, parsed from the first positional. */
-export type CommandName = 'run' | 'status' | 'gc' | 'tick' | 'help';
+export type CommandName =
+  | 'run'
+  | 'register'
+  | 'list'
+  | 'deactivate'
+  | 'status'
+  | 'gc'
+  | 'tick'
+  | 'help';
 
 /** A parsed CLI invocation: one command plus its positional arguments. */
 export type Invocation = {
@@ -32,7 +41,24 @@ export type Outcome =
       readonly skipped: number | null;
       readonly json: boolean;
     }
-  | { readonly kind: 'error'; readonly message: string };
+  | { readonly kind: 'error'; readonly message: string }
+  | {
+      readonly kind: 'registered';
+      readonly repo: string;
+      readonly remote: string;
+      readonly reactivated: boolean;
+      readonly artifacts: readonly string[];
+    }
+  | {
+      readonly kind: 'deactivated';
+      readonly repo: string;
+    }
+  | {
+      readonly kind: 'projects';
+      readonly projects: readonly ProjectRecord[];
+      readonly skipped: number;
+      readonly json: boolean;
+    };
 
 /** One listed session, as `status` reports it (the manifest row, presentation-free). */
 export type SessionLine = {

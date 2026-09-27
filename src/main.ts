@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
+import { gitAdapter, processGit } from './engine/git.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
 import { type Deps } from './engine/session.ts';
 import { failure, success, type Result } from './lib/result.ts';
@@ -25,8 +26,8 @@ export async function main(argv: readonly string[], deps?: Deps) {
 
 /**
  * Composition root: builds the real `Deps` from the engine's seams. v1 wires fakes over a real
- * filesystem home and swaps real adapters in here as they land — the Docker sandbox is one;
- * the tracker and agent runtime remain faked until their adapters ship.
+ * filesystem home and swaps real adapters in here as they land — the Docker sandbox and the
+ * git CLI are two; the tracker and agent runtime remain faked until their adapters ship.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
@@ -34,6 +35,7 @@ function composeDeps() {
 
   return fakeDeps({
     sandbox: dockerSandbox({ projectsRoot, docker: cliDocker }),
+    git: gitAdapter(processGit),
     workspaceRoot: home,
     sessionsRoot: join(home, 'sessions'),
   }).deps;
@@ -60,6 +62,28 @@ async function render(result: Result<Outcome>) {
       return success(
         `session ${out.repo}#${out.issueNumber} ${out.state} — receipts: ${out.receiptDir}`,
       );
+    case 'registered':
+      return success(
+        `${out.reactivated ? 'reactivated' : 'registered'} ${out.repo} — ${out.remote}\n${out.artifacts.length > 0 ? `seeded: ${out.artifacts.join(', ')}` : 'existing project assets kept'}`,
+      );
+    case 'deactivated':
+      return success(`deactivated ${out.repo} — sessions will refuse it until re-registered`);
+    case 'projects': {
+      if (out.json) {
+        return success(JSON.stringify(out, null, 2));
+      }
+
+      if (out.projects.length === 0) {
+        return success(
+          out.skipped ? `no projects (${out.skipped} unreadable skipped)` : 'no projects',
+        );
+      }
+
+      const rows = out.projects.map((p) => `  ${p.repo}  ${p.state}  ${p.remote}`);
+      const skipped = out.skipped ? `\n${out.skipped} unreadable project records skipped` : '';
+
+      return success(`projects:\n${rows.join('\n')}${skipped}`);
+    }
     case 'status': {
       if (out.json) {
         return success(JSON.stringify(out, null, 2));
