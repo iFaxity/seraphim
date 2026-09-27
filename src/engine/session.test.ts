@@ -18,7 +18,7 @@ async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 
   await writeFile(
     join(projectDir, 'flow.ts'),
     `const flow = {
-  config: { agent: '${agent}', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: '${agent}', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('implement issue');
   },
@@ -96,6 +96,32 @@ describe('runSession', () => {
 
     if (!result.success) {
       expect(result.error.message).toMatch(/no project flow for 'ghost'/);
+    }
+  });
+
+  it('fails fast when a flow omits its budget — caps are required, no silent default', async () => {
+    const projectDir = await seedProject(root, 'nobudget');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  run: async (ctx) => {
+    await ctx.run('implement issue');
+  },
+};
+
+export default flow;
+`,
+    );
+    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+
+    const result = await runSession(deps, { repo: 'nobudget', issueNumber: 5 });
+
+    expect(result.success).toBe(false);
+
+    if (!result.success) {
+      expect(result.error.message).toMatch(/caps/);
     }
   });
 
@@ -394,7 +420,7 @@ export default flow;
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('first prompt');
     await ctx.run('second prompt');
@@ -441,7 +467,7 @@ export default flow;
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('turn that fails');
     await ctx.run('retry must never happen');
@@ -491,7 +517,7 @@ export default flow;
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('first turn fails');
     await ctx.run('second turn must not run');
@@ -523,7 +549,7 @@ export default flow;
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('implement issue');
     await ctx.tracker.openDraftPr({ title: 'demo PR', body: 'closes issue' });
@@ -553,7 +579,7 @@ export default flow;
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     const code = await ctx.sh(['pnpm', 'lint']);
 
@@ -684,7 +710,7 @@ describe('receipt regressions', () => {
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     ctx.log('cloned repository');
     ctx.log('dispatched turn 1');
@@ -723,7 +749,7 @@ export default flow;
     await writeFile(
       join(projectDir, 'flow.ts'),
       `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     ctx.log('cloned repository');
     ctx.log('dispatched turn 1');
