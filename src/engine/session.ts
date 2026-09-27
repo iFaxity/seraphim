@@ -288,14 +288,15 @@ export async function runSession(deps: Deps, input: SessionInput) {
   manifest.endedAt = new Date().toISOString();
 
   const finalManifest = { ...manifest, turns };
+  // The whole-session transcript rides alongside the per-turn files — the per-turn
+  // captures stay for per-turn diagnostics.
+  transcripts.push({ name: 'session.transcript.md', body: sessionTranscript.join('\n') });
   const write = await writeReceipts(
     sessionDir(deps.sessionsRoot, relDir),
     finalManifest,
     turns,
     logs,
-    // The whole-session transcript rides alongside the per-turn files — the per-turn
-    // captures stay for per-turn diagnostics.
-    [...transcripts, { name: 'session.transcript.md', body: sessionTranscript.join('\n') }],
+    transcripts,
   );
 
   if (!write.success) {
