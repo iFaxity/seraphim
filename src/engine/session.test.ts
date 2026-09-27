@@ -4,14 +4,23 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { engine } from './engine.ts';
 import { fakeDeps, fakeRuntime } from './fakes.ts';
+import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession } from './session.ts';
 
 import { toEpochMs } from '../lib/time.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
-/** Seeds the central directory: project flow file + Dockerfile, the registration artifacts. */
+/** The remote seedProject registers; tests assert the session clones exactly this URL. */
+function seedRemote(repo: string) {
+  return `https://example.invalid/acme/${repo}.git`;
+}
+
 async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
+  const { deps } = fakeDeps({ workspaceRoot: root });
+
+  await registerProject(root, deps.git, seedRemote(repo), repo);
+
   const projectDir = join(root, 'projects', repo);
 
   await mkdir(projectDir, { recursive: true });
@@ -60,7 +69,8 @@ describe('runSession', () => {
 
     const { manifest } = result.data;
 
-    // Branch off the default branch, kernel-owned worktree
+    // The session clones from the registered remote — never any other URL
+    expect(git.clones).toEqual([{ path: join(root, 'repos', 'demo'), url: seedRemote('demo') }]);
     expect(git.worktrees).toHaveLength(1);
     expect(git.worktrees[0]?.baseBranch).toBe('main');
     expect(git.worktrees[0]?.branch).toBe(manifest.branch);
@@ -87,7 +97,7 @@ describe('runSession', () => {
     expect(manifest.model).toBe('test-model');
   });
 
-  it('fails fast with a clear error when the project config is missing', async () => {
+  it('fails fast naming the register fix for an unregistered repo', async () => {
     const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
 
     const result = await runSession(deps, { repo: 'ghost', issueNumber: 1 });
@@ -95,7 +105,23 @@ describe('runSession', () => {
     expect(result.success).toBe(false);
 
     if (!result.success) {
-      expect(result.error.message).toMatch(/no project flow for 'ghost'/);
+      expect(result.error.message).toMatch(/unregistered project 'ghost'/);
+      expect(result.error.message).toMatch(/seraphim register/);
+    }
+  });
+
+  it('fails fast for an inactive project, naming the re-register fix', async () => {
+    await seedProject(root, 'dormant');
+    await deactivateProject(root, 'dormant');
+    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+
+    const result = await runSession(deps, { repo: 'dormant', issueNumber: 9 });
+
+    expect(result.success).toBe(false);
+
+    if (!result.success) {
+      expect(result.error.message).toMatch(/inactive/);
+      expect(result.error.message).toMatch(/seraphim register/);
     }
   });
 

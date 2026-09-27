@@ -2,7 +2,16 @@ import { dispatch } from './dispatcher.ts';
 import { type CommandName } from './invocation.ts';
 import { type Deps } from './session.ts';
 
-const KNOWN: readonly CommandName[] = ['run', 'status', 'gc', 'tick', 'help'];
+const KNOWN: readonly CommandName[] = [
+  'run',
+  'register',
+  'list',
+  'deactivate',
+  'status',
+  'gc',
+  'tick',
+  'help',
+];
 
 function isCommandName(name: string): name is CommandName {
   return (KNOWN as readonly string[]).includes(name);

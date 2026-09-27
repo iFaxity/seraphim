@@ -106,4 +106,9 @@ export type Git = {
     readonly path: string;
     readonly baseBranch: string;
   }) => Promise<void>;
+  /**
+   * Reachability check over the remote — registration's fail-fast on an unreachable URL.
+   * Read-only (a ref-list ping), never a clone.
+   */
+  readonly probeRemote: (url: string) => Promise<void>;
 };
