@@ -29,7 +29,7 @@ export type Outcome =
   | {
       readonly kind: 'status';
       readonly sessions: readonly SessionLine[];
-      readonly skipped?: number;
+      readonly skipped: number | null;
       readonly json: boolean;
     }
   | { readonly kind: 'error'; readonly message: string };

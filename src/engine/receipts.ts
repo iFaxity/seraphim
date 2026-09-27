@@ -41,12 +41,12 @@ export const SessionManifestSchema = z.object({
   branch: z.string().min(1),
   worktreePath: z.string().min(1),
   startedAt: z.number().int(),
-  endedAt: z.number().int().optional(),
-  prUrl: z.string().url().optional(),
+  endedAt: z.number().int().nullable(),
+  prUrl: z.string().url().nullable(),
   /** The effective budget: what the kernel enforced, not merely what the flow asked for. */
   caps: CapsSchema,
   /** Why the session hit its budget — present exactly when state is `cap-hit`. */
-  capHit: z.string().optional(),
+  capHit: z.string().nullable(),
   turns: z.array(TurnRecordSchema),
 });
 
@@ -65,9 +65,16 @@ export type Turn = Omit<TurnRecord, 'startedAt' | 'endedAt'> & {
  * Kernel-facing manifest: timestamps as instants, turns as kernel `Turn`s — the shape the
  * kernel drafts and mutates before the disk conversion at write time.
  */
-export type Session = Omit<SessionManifest, 'startedAt' | 'endedAt' | 'turns'> & {
-  readonly startedAt: Temporal.Instant;
-  readonly endedAt?: Temporal.Instant;
+export type Session = Omit<
+  SessionManifest,
+  'startedAt' | 'endedAt' | 'prUrl' | 'capHit' | 'turns'
+> & {
+  startedAt: Temporal.Instant;
+  endedAt: Temporal.Instant | null;
+  /** URL of the draft PR the flow opened, null until it does. */
+  prUrl: string | null;
+  /** Why the session hit its budget, null exactly when state is not `cap-hit`. */
+  capHit: string | null;
   readonly turns: readonly Turn[];
 };
 
@@ -119,9 +126,7 @@ export async function readManifest(sessionPath: string) {
   const manifest: Session = {
     ...parsed.data,
     startedAt: fromEpochMs(parsed.data.startedAt),
-    ...(parsed.data.endedAt != null
-      ? { endedAt: fromEpochMs(parsed.data.endedAt) }
-      : { endedAt: undefined }),
+    endedAt: parsed.data.endedAt == null ? null : fromEpochMs(parsed.data.endedAt),
     turns: parsed.data.turns.map((turn) => ({
       ...turn,
       startedAt: fromEpochMs(turn.startedAt),
@@ -138,7 +143,7 @@ export type SessionListing = {
   readonly dir: string;
   readonly manifest: Session;
   /** Last line of the session's free-text `flow.log`, if any, for status rendering. */
-  readonly lastLog?: string;
+  readonly lastLog: string | null;
 };
 
 export async function listSessions(sessionsRoot: string) {
@@ -211,15 +216,15 @@ function successEmpty() {
   return { success: true as const, data: [], skipped: 0 };
 }
 
-/** Last line of a session's `flow.log`, or undefined when there is none. */
+/** Last line of a session's `flow.log`, or null when there is none. */
 async function lastLog(dir: string) {
   const read = await tryCatch(readFile(join(dir, 'flow.log'), 'utf8'));
 
   if (!read.success) {
-    return undefined;
+    return null;
   }
 
   const lines = read.data.trimEnd().split('\n');
 
-  return lines.at(-1) ?? undefined;
+  return lines.at(-1) ?? null;
 }

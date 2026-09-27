@@ -103,7 +103,7 @@ const COMMANDS: readonly {
       return {
         kind: 'status',
         sessions,
-        ...(listed.skipped > 0 ? { skipped: listed.skipped } : {}),
+        skipped: listed.skipped > 0 ? listed.skipped : null,
         json: parsed.data.values['json'] === true,
       };
     },

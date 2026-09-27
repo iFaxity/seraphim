@@ -411,7 +411,7 @@ export default flow;
 
     expect(runtime.prompts).toHaveLength(2);
     expect(result.data.manifest.state).toBe('completed');
-    expect(result.data.manifest.capHit).toBeUndefined();
+    expect(result.data.manifest.capHit).toBeNull();
   });
 
   it('saves one transcript per session containing every turn the runtime emitted', async () => {

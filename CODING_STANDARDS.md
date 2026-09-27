@@ -17,6 +17,9 @@ restate or override them here. This file covers what they can't check.
 - Prefer array chaining (`map`/`filter`/`reduce`) over imperative `for`/`while` loops.
 - Infer return types; annotate only load-bearing seams — `seams.ts` members, type
   predicates (`x is T`), `fakes.ts` factories.
+- Absent values are `null`, never `undefined` or optional fields (`?:`/`.optional()`).
+  Exceptions: optional _parameters_ at call sites (`deps?: Deps`), and receipt JSON keys may
+  be omitted on disk — the kernel-facing types are still `| null`.
 
 ## Errors
 

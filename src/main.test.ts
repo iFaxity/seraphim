@@ -114,6 +114,8 @@ describe('status listing', () => {
         worktreePath: '/tmp/wt',
         startedAt: 1727414400000,
         endedAt: 1727414460000,
+        prUrl: null,
+        capHit: null,
         caps: { maxTurns: 10, wallClockMs: 1800000 },
         turns: [],
       }),
