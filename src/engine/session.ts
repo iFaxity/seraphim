@@ -54,9 +54,9 @@ function step<TResult>(action: PromiseLike<TResult>, label: string) {
 
 /**
  * Runs one session end-to-end over injected adapters: preflight fail-fast, image ensure,
- * clone-if-missing + pull, worktree off the default branch (kernel-only ownership per story
- * 30), `ctx.run(prompt)` dispatch into the runtime, receipt files under the sessions root.
- * Failures stop for human takeover (spec story 22): state is recorded, branch retained.
+ * clone-if-missing + pull, worktree off the default branch owned only by the kernel,
+ * `ctx.run(prompt)` dispatch into the runtime, receipt files under the sessions root.
+ * Failures stop for human takeover: state is recorded, branch retained.
  */
 export async function runSession(deps: Deps, input: SessionInput) {
   // The flow file is the first prerequisite: loadFlow owns its existence and shape errors.
@@ -72,8 +72,8 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return preflight;
   }
 
-  // Availability is the adapter's own report — the kernel never branches on a backend name
-  // (ADR-0003). Selecting a runtime whose adapter is missing fails fast here.
+  // Availability is the adapter's own report — the kernel never branches on a backend
+  // name. Selecting a runtime whose adapter is missing fails fast here.
   if (!deps.runtime.available(flow.data.config.agent)) {
     return {
       success: false as const,
@@ -89,7 +89,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return issue;
   }
 
-  // Claim on pickup so concurrent sessions cannot double-run the same issue (spec story 28).
+  // Claim on pickup so concurrent sessions cannot double-run the same issue.
   const claimed = await step(deps.tracker.claim(issue.data), 'tracker claim failed');
 
   if (!claimed.success) {
@@ -136,7 +136,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
   }
 
   // Git refnames forbid colons, so the ISO timestamp is compacted for the branch while the
-  // receipt directory keeps the full one (issue #2: worktree creation off the default branch).
+  // receipt directory keeps the full one (git refnames forbid colons).
   const branch = `seraphim/${input.repo}/${input.issueNumber}-${startedAt.replaceAll(':', '')}`;
   const worktree = await step(
     deps.git.createWorktree({
@@ -156,9 +156,9 @@ export async function runSession(deps: Deps, input: SessionInput) {
   const logs: string[] = [];
   const transcripts: TranscriptFile[] = [];
 
-  // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at write
-  // time below, so the validated shape is the one actually persisted (issue #2: zod-schema'd
-  // receipts) — not an empty-turns snapshot.
+  // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at
+  // write time below, so the validated shape is the one actually persisted — not an
+  // empty-turns snapshot.
   const manifest: SessionManifest = {
     repo: input.repo,
     issueNumber: input.issueNumber,
@@ -218,19 +218,17 @@ export async function runSession(deps: Deps, input: SessionInput) {
         endedAt: new Date().toISOString(),
       });
 
-      // Transcript capture alongside the schema files (spec story 23) — empty body on a
-      // runtime crash rather than a missing file, so diagnostics always have something to read.
+      // Transcript capture alongside the schema files — empty body on a runtime crash
+      // rather than a missing file, so diagnostics always have something to read.
       const transcript = turn.success ? turn.data.transcript : String(turn.error);
 
       transcripts.push({ name: `turn-${turns.length}.transcript.md`, body: transcript });
 
       if (exitState != 'completed') {
         manifest.state = exitState;
-        manifest.endedAt = new Date().toISOString();
-
-        // Failures always stop for human takeover (spec story 22) — no recovery, no further turns.
-        // A throw, not a Result, because flow code (`flow.data.run(ctx)`) is untrusted and must
-        // not be able to swallow the abort; tryCatch at the call site converts it back.
+        // Failures always stop for human takeover — no recovery, no further turns.
+        // A throw, not a Result, because flow code (`flow.data.run(ctx)`) is untrusted and
+        // must not be able to swallow the abort; tryCatch at the call site converts it back.
         throw new TurnAbortedError(exitState);
       }
     },
@@ -238,16 +236,15 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   const flowRun = await tryCatch(flow.data.run(ctx));
 
-  // A turn that already set a terminal state keeps it — cap-hit stays cap-hit (stories 20/21).
+  // A turn that already set a terminal state keeps it — cap-hit stays cap-hit.
   if (!flowRun.success && manifest.state == 'running') {
     manifest.state = 'failed';
-    manifest.endedAt = new Date().toISOString();
   }
 
   if (manifest.state == 'running') {
     manifest.state = 'completed';
-    manifest.endedAt = new Date().toISOString();
   }
+  manifest.endedAt = new Date().toISOString();
 
   const finalManifest = { ...manifest, turns };
   const write = await writeReceipts(
@@ -272,7 +269,7 @@ class TurnAbortedError extends Error {
   }
 }
 
-/** Fails fast on missing Dockerfile-shaped prerequisites (spec story 9); loadFlow owns the flow file. */
+/** Fails fast on missing Dockerfile-shaped prerequisites; loadFlow owns the flow file. */
 async function checkPreflight(deps: Deps, repo: string) {
   if (!(await fileExists(join(deps.workspaceRoot, 'projects', repo, 'Dockerfile')))) {
     return {
@@ -292,9 +289,10 @@ async function fileExists(path: string) {
     () => false,
   );
 }
+
 /**
- * Validates the manifest against the receipt contract (issue #2: zod-schema'd receipts), then
- * writes every file — the persisted shape is the validated shape, checked where it's written.
+ * Validates the manifest against the receipt contract, then writes every file — the
+ * persisted shape is the validated shape, checked where it's written.
  */
 async function writeReceipts(
   dir: string,
@@ -347,7 +345,6 @@ async function writeReceipts(
     };
   }
 
-  // Free-text logs sit alongside the schema files, never replace them (issue #2 acceptance).
   if (logs.length > 0) {
     const logWrite = await tryCatch(
       writeFile(join(dir, 'flow.log'), `${logs.join('\n')}\n`, 'utf8'),
@@ -361,7 +358,7 @@ async function writeReceipts(
     }
   }
 
-  // Full conversation transcript per turn (spec story 23) alongside the turn record.
+  // Full conversation transcript per turn, alongside the turn record.
   const transcriptWrite = await writeAll(
     dir,
     transcripts.map((transcript) => ({ name: transcript.name, body: `${transcript.body}\n` })),

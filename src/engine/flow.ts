@@ -27,9 +27,9 @@ export type SessionContext = {
   readonly issueNumber: number;
   readonly worktreePath: string;
   readonly run: (prompt: string) => Promise<void>;
-  /** Gate command inside the sandbox (spec story 12); exit code nonzero means the gate failed. */
+  /** Gate command inside the sandbox; exit code nonzero means the gate failed. */
   readonly sh: (command: readonly string[]) => Promise<number>;
-  /** Tracker handle for this session's issue — flows open draft PRs through it (story 13, 27). */
+  /** Tracker handle for this session's issue — flows open draft PRs through it. */
   readonly tracker: Pick<Tracker, 'openDraftPr'>;
   readonly log: (message: string) => void;
 };
@@ -47,8 +47,8 @@ const FlowModuleSchema = z.object({
 });
 
 /**
- * Identity helper: the kernel never calls it — flow files `export default defineFlow(...)` so
- * the config and run shape are checked at typecheck time (spec user story 10).
+ * Identity helper: the kernel never calls it — flow files `export default defineFlow(...)`
+ * so the config and run shape are checked at typecheck time, before the engine runs them.
  */
 export function defineFlow(flow: Flow) {
   return flow;

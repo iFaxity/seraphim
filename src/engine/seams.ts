@@ -49,9 +49,9 @@ export type SandboxExec = {
 };
 
 /**
- * Identity of the built/cached per-project container image (spec story 7: built from the
- * project Dockerfile, reused across sessions). v1's fake has nothing to identify — the
- * real adapter (#5) names the registry tag or content hash here.
+ * Identity of the built/cached per-project container image: built from the project
+ * Dockerfile and reused across sessions. The fake has nothing to identify — the real
+ * adapter names the registry tag or content hash here.
  */
 export type Image = {
   readonly id: string;
@@ -59,7 +59,7 @@ export type Image = {
 
 /**
  * Sandbox seam: per-project image build/cache and exec with the session worktree mounted.
- * v1 ships no real adapter (#5); tests inject fakes.
+ * v1 ships no real adapter; tests inject fakes.
  */
 export type Sandbox = {
   /** Identity of the built/cached container image the session's execs run against. */
@@ -78,10 +78,10 @@ export type TurnResult = {
 };
 
 /**
- * AgentRuntime seam: headless launch in a cwd with caps and transcript capture (spec user
- * story 29). Adapter availability lives here — the kernel never branches on a backend name
- * (ADR-0003); a runtime that cannot drive an agent reports so through `available`. v1 ships
- * no real adapter (#4/#11); tests inject fakes.
+ * AgentRuntime seam: headless launch in a cwd with caps and transcript capture. Adapter
+ * availability lives here — the kernel never branches on a backend name (ADR-0003); a
+ * runtime that cannot drive an agent reports so through `available`. v1 ships no real
+ * adapter; tests inject fakes.
  */
 export type AgentRuntime = {
   readonly available: (agent: 'pi' | 'claude') => boolean;

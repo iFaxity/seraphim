@@ -5,10 +5,10 @@ import { tryCatch } from '../lib/result.ts';
 import { readFile, readdir } from 'node:fs/promises';
 
 /**
- * Receipts are the filesystem-as-database (ADR-0001): a zod-validated session manifest plus
- * per-turn records under `sessions/<repo>/<issue#>-<timestamp>/`, with free-text transcript and
- * logs sitting alongside — never replacing — the schema files. The control plane (#12) reads
- * these same files, so the schemas are the machine contract.
+ * Receipts are the filesystem-as-database (ADR-0001): a zod-validated session manifest
+ * plus per-turn records under `sessions/<repo>/<issue#>-<timestamp>/`, with free-text
+ * transcript and logs sitting alongside — never replacing — the schema files. A future
+ * control plane reads these same files, so the schemas are the machine contract.
  */
 
 /** One agent invocation within a session (CONTEXT.md: turn). */
@@ -92,7 +92,7 @@ export type SessionListing = {
   readonly repo: string;
   readonly dir: string;
   readonly manifest: SessionManifest;
-  /** Last line of the session's free-text `flow.log`, if any (status rendering, story 25). */
+  /** Last line of the session's free-text `flow.log`, if any, for status rendering. */
   readonly lastLog?: string;
 };
 

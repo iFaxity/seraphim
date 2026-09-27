@@ -20,10 +20,10 @@ export async function main(argv: readonly string[], deps?: Deps) {
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams. v1 wires the engine's fakes
- * over a real filesystem home — issue #2's "driven entirely by fakes" is deliberate: fakes as
- * production deps inverts the usual test-only convention, traded for a runnable skeleton now;
- * real adapters land with #4/#5/#6 and replace them here, nowhere else.
+ * Composition root: builds the real `Deps` from the engine's seams. v1 wires the engine's
+ * fakes over a real filesystem home — a deliberate trade: fakes as production deps inverts
+ * the usual test-only convention for a runnable skeleton now; real adapters replace them
+ * here and nowhere else as they land.
  */
 function composeDeps() {
   return fakeDeps().deps;
@@ -61,7 +61,7 @@ async function render(result: Result<Outcome>) {
         );
       }
 
-      // Story 25: one line per session; worktrees are a list after, not inline rows.
+      // One line per session; worktrees are a list after, not inline rows.
       const lines = out.sessions.map(
         (s) =>
           `${s.repo}#${s.issueNumber}  ${s.state}  ${s.flow}  ${s.agent}/${s.model}${s.prUrl ? `  pr:${s.prUrl}` : ''}${s.lastLog ? `  last log: ${s.lastLog}` : ''}`,
