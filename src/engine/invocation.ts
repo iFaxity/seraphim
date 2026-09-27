@@ -40,11 +40,11 @@ export type SessionLine = {
   readonly agent: string;
   readonly model: string;
   readonly state: SessionState;
-  readonly prUrl?: string;
+  readonly prUrl: string | null;
   readonly startedAt: string;
-  /** Why the session stopped on its budget — present exactly when state is `cap-hit`. */
-  readonly capHit?: string;
-  readonly lastLog?: string;
+  /** Why the session stopped on its budget — non-null exactly when state is `cap-hit`. */
+  readonly capHit: string | null;
+  readonly lastLog: string | null;
   readonly worktreePath: string;
   readonly dir: string;
 };
@@ -60,10 +60,10 @@ export function toSessionLine(listing: SessionListing): SessionLine {
     agent: manifest.agent,
     model: manifest.model,
     state: manifest.state,
-    ...(manifest.prUrl ? { prUrl: manifest.prUrl } : {}),
+    prUrl: manifest.prUrl ?? null,
     startedAt: manifest.startedAt,
-    ...(listing.lastLog ? { lastLog: listing.lastLog } : {}),
-    ...(manifest.capHit ? { capHit: manifest.capHit } : {}),
+    capHit: manifest.capHit ?? null,
+    lastLog: listing.lastLog ?? null,
     worktreePath: manifest.worktreePath,
     dir: listing.dir,
   };

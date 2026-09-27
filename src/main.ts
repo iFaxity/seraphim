@@ -1,6 +1,6 @@
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
-import { type Outcome } from './engine/invocation.ts';
+import { type Outcome, type SessionLine } from './engine/invocation.ts';
 import { type Deps } from './engine/session.ts';
 import { failure, success, type Result } from './lib/result.ts';
 
@@ -61,11 +61,7 @@ async function render(result: Result<Outcome>) {
         );
       }
 
-      // One line per session; worktrees are a list after, not inline rows.
-      const lines = out.sessions.map(
-        (s) =>
-          `${s.repo}#${s.issueNumber}  ${s.state}${s.capHit ? ` (${s.capHit})` : ''}  ${s.flow}  ${s.agent}/${s.model}${s.prUrl ? `  pr:${s.prUrl}` : ''}${s.lastLog ? `  last log: ${s.lastLog}` : ''}`,
-      );
+      const lines = out.sessions.map(renderSessionLine);
       const worktrees = out.sessions.map((s) => `${s.repo}#${s.issueNumber}: ${s.worktreePath}`);
       const skipped = out.skipped ? `\n${out.skipped} unreadable receipt directories skipped` : '';
 
@@ -74,4 +70,15 @@ async function render(result: Result<Outcome>) {
     case 'error':
       return success(`error: ${out.message}`);
   }
+}
+
+/** One text status row: state with cap reason, then flow, agent/model, and extras. */
+function renderSessionLine(s: SessionLine) {
+  const state = s.capHit ? `${s.state} (${s.capHit})` : s.state;
+  const extras = [
+    s.prUrl ? `pr:${s.prUrl}` : null,
+    s.lastLog ? `last log: ${s.lastLog}` : null,
+  ].filter(Boolean) as string[];
+
+  return `${s.repo}#${s.issueNumber}  ${state}  ${s.flow}  ${s.agent}/${s.model}  ${extras.join('  ')}`;
 }
