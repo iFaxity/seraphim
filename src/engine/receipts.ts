@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { tryCatch } from '../lib/result.ts';
-import { fromEpochMs, toEpochMs, type Instant } from '../lib/time.ts';
+import { fromEpochMs, toEpochMs } from '../lib/time.ts';
 import { readFile, readdir } from 'node:fs/promises';
 
 /**
@@ -57,8 +57,8 @@ export type SessionManifest = z.infer<typeof SessionManifestSchema>;
  * boundary); this shape is what the kernel drafts, mutates, and hands to writeReceipts.
  */
 export type Turn = Omit<TurnRecord, 'startedAt' | 'endedAt'> & {
-  readonly startedAt: Instant;
-  readonly endedAt: Instant;
+  readonly startedAt: Temporal.Instant;
+  readonly endedAt: Temporal.Instant;
 };
 
 /**
@@ -66,8 +66,8 @@ export type Turn = Omit<TurnRecord, 'startedAt' | 'endedAt'> & {
  * kernel drafts and mutates before the disk conversion at write time.
  */
 export type Session = Omit<SessionManifest, 'startedAt' | 'endedAt' | 'turns'> & {
-  readonly startedAt: Instant;
-  readonly endedAt?: Instant;
+  readonly startedAt: Temporal.Instant;
+  readonly endedAt?: Temporal.Instant;
   readonly turns: readonly Turn[];
 };
 
