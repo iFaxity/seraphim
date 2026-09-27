@@ -2,7 +2,6 @@ import { join } from 'node:path';
 
 import { loadFlow } from './flow.ts';
 import {
-  type Caps,
   type SessionManifest,
   type TurnRecord,
   MANIFEST_FILE,
@@ -28,9 +27,6 @@ export type TranscriptFile = {
 export const AFK_PREAMBLE =
   'You are running unattended: no user input is available. Resolve ambiguity yourself and ' +
   'never wait for confirmation.';
-
-/** Kernel-side default budget when a flow declares none — runaway protection is not optional. */
-const DEFAULT_CAPS: Caps = { maxTurns: 10, wallClockMs: 30 * 60 * 1000 };
 
 export type SessionInput = {
   readonly repo: string;
@@ -171,7 +167,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   // The declared budget is the flow's; enforcement is the kernel's — flow code sees neither
   // the caps nor a bypass (spec: caps live in the kernel, invisible to flows).
-  const caps = flow.data.config.caps ?? DEFAULT_CAPS;
+  const caps = flow.data.config.caps;
   const deadline = Date.now() + caps.wallClockMs;
 
   // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at

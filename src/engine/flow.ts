@@ -20,8 +20,9 @@ export const FlowConfigSchema = z.object({
   // Sandbox strategy (spec: docker for now; only member today).
   sandbox: z.enum(['docker']),
   // Kernel-enforced budget: flows declare it, the kernel owns enforcement (spec: caps live
-  // in the kernel, invisible to flow code). Optional — a default applies when omitted.
-  caps: CapsSchema.optional(),
+  // in the kernel, invisible to flow code). Required — every flow states its own budget,
+  // no silent default hides the cost of running it.
+  caps: CapsSchema,
 });
 
 export type FlowConfig = z.infer<typeof FlowConfigSchema>;
