@@ -74,5 +74,9 @@ surface, and record the derivation in the transcript.
   didn't stage.
 - Dropped the `agents/openai.yaml` interface file: discovery is the flow's explicit
   declaration, not an interactive surface.
-- Everything else is verbatim from the interactive original; re-porting upstream tdd changes
-  needs no edits beyond this list.
+- Sub-files: `tests.md` and `mocking.md` match the interactive original except for quote
+  style (`"` → `'`) and one blank line, applied by this repo's formatter (oxfmt) — the
+  reformat is mechanical, not a content change.
+- Everything else is verbatim from the interactive original, except the frontmatter
+  description (dropped "the user wants to" — no interactive user exists); re-porting
+  upstream tdd changes needs no edits beyond this list.

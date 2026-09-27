@@ -145,4 +145,7 @@ Reporting them separately stops one axis from masking the other.
 - Added step 5's resolution doctrine — fix hard findings, record judgement calls, surface
   out-of-scope findings in the commit summary — because there is no user to hand a report
   to.
+- Frontmatter description rewritten for AFK ("a fixed point the user supplies" → a fixed
+  point; "Use when the user wants to review… 'review since X'" → "Use when reviewing the
+  session's work before its final commit").
 - Everything else is verbatim from the interactive original.

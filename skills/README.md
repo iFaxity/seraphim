@@ -36,13 +36,14 @@ enrollment, and the kernel stages exactly what a flow declares.
 
 ## Current pool
 
-| Skill          | Source                                                     | Interactive gates removed                                                                                                                                                    |
-| -------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `implement`    | Ported from the maintainer's interactive `implement` skill | Spec hand-off → session issue; `/tdd` + `/code-review` → pool references; added publish prohibition (no push)                                                                |
-| `tdd`          | Ported from the maintainer's interactive `tdd`             | Seam confirmation question → read of issue + repo testing doctrine; `codebase-design` → conditional pool reference with derivation fallback                                  |
-| `code-review`  | Ported from the maintainer's interactive `code-review`     | Fixed point asked → merge-base default; missing spec asked → recorded skip; added resolve-without-user doctrine (fix hard findings, record judgement calls)                  |
-| `pull-request` | Ported from the maintainer's interactive `pull-request`    | Confirmation gate → transcript-recorded self-check; linked items asked → session issue (skip + note when absent); draft default on; PR URL → tracker step instead of display |
+| Skill          | Source                                                     | Interactive gates removed                                                                                                                                                           |
+| -------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `implement`    | Ported from the maintainer's interactive `implement` skill | Spec hand-off → session issue; `/tdd` + `/code-review` → pool references; added publish prohibition (no push)                                                                       |
+| `tdd`          | Ported from the maintainer's interactive `tdd`             | Seam confirmation question → read of issue + repo testing doctrine; `codebase-design` → conditional pool reference with derivation fallback                                         |
+| `code-review`  | Ported from the maintainer's interactive `code-review`     | Fixed point asked → merge-base default; missing spec asked → recorded skip; added resolve-without-user doctrine (fix hard findings, record judgement calls)                         |
+| `pull-request` | Ported from the maintainer's interactive `pull-request`    | Confirmation gate → transcript-recorded self-check; linked items asked → session issue (skip + note when absent); draft default on; URL → `ctx.log` (tracker step owns PR creation) |
 
 Each pool skill carries its own `## Ported from the interactive original` section listing
 exactly what changed, so an upstream edit can be diffed against the port and re-ported
-deliberately. Sub-files copied verbatim from an upstream skill are noted in that section too.
+deliberately. Copied sub-files and any formatter-applied reformatting are noted in that
+section too.
