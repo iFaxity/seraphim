@@ -11,9 +11,10 @@ import {
 } from './receipts.ts';
 import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
 
+import { fileExists } from '../lib/fs.ts';
 import { tryCatch } from '../lib/result.ts';
 import { now, toEpochMs } from '../lib/time.ts';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 /** Free-text artifacts that sit alongside — never replace — the schema'd receipt JSON. */
 export type TranscriptFile = {
@@ -354,18 +355,10 @@ async function checkPreflight(deps: Deps, repo: string) {
   return { success: true as const, data: undefined };
 }
 
-async function fileExists(path: string) {
-  return stat(path).then(
-    (info) => info.isFile(),
-    () => false,
-  );
-}
-
 /** The disk shape of one kernel turn: instants converted to epoch ms. */
 function toDiskTurn(turn: Turn) {
   return { ...turn, startedAt: toEpochMs(turn.startedAt), endedAt: toEpochMs(turn.endedAt) };
 }
-
 /**
  * The disk boundary: converts kernel instants into the epoch-ms receipt schema, validates the
  * persisted shape, then writes every file — the disk sees only plain numbers, checked here.

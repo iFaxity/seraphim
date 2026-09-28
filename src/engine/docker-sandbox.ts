@@ -2,10 +2,11 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 
-import { type Image, type Sandbox } from './seams.ts';
+import { type Sandbox } from './seams.ts';
 
-import { failure, type Result } from '../lib/result.ts';
-import { readFile, stat } from 'node:fs/promises';
+import { fileExists } from '../lib/fs.ts';
+import { failure, tryCatch } from '../lib/result.ts';
+import { readFile } from 'node:fs/promises';
 
 /**
  * The `docker` CLI surface the adapter needs. Injected so tests script docker's behavior
@@ -31,13 +32,14 @@ const LOCKFILES = ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'Cargo.lo
 /**
  * Real `Sandbox` adapter over the docker CLI: per-project image build/cache and exec with the
  * session worktree bind-mounted. Project assets come from the central directory's project
- * directory — Dockerfile plus optional `env` file for credentials (#6 verifies the auth flow).
+ * directory — Dockerfile plus optional `env` file for credentials; the adapter mounts the
+ * file, it does not verify how agents authenticate with it.
  */
 export function dockerSandbox(options: DockerSandboxOptions): Sandbox {
   const { projectsRoot, docker } = options;
 
   return {
-    ensureImage: async (repo): Promise<Result<Image, Error>> => {
+    ensureImage: async (repo) => {
       const dir = join(projectsRoot, repo);
       const dockerfilePath = join(dir, 'Dockerfile');
 
@@ -51,7 +53,12 @@ export function dockerSandbox(options: DockerSandboxOptions): Sandbox {
       const inspect = await docker.run(['image', 'inspect', '--format', '{{json .Id}}', tag]);
 
       if (inspect.exitCode === 0) {
-        return { success: true as const, data: { id: imageId(inspect.stdout) } };
+        const id = tryCatch(() => imageId(inspect.stdout));
+
+        // An unparseable inspect payload is a docker-side anomaly, not a cache miss.
+        return id.success
+          ? { success: true as const, data: { id: id.data } }
+          : failure(new Error(`image inspect returned malformed output for '${repo}'`));
       }
 
       const build = await docker.run(['build', '-q', '-t', tag, dir]);
@@ -80,8 +87,8 @@ export function dockerSandbox(options: DockerSandboxOptions): Sandbox {
         `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
       ];
 
-      // Credentials surface: the project's `env` file, mounted only when it exists (#6
-      // verifies the auth flows this enables; the mount shape is the adapter's contract).
+      // Credentials surface: the project's `env` file, mounted only when it exists — the
+      // mount shape is the adapter's contract; what agents do with the variables is not.
       const envFile = join(dir, 'env');
 
       if (await fileExists(envFile)) {
@@ -109,18 +116,12 @@ export function dockerSandbox(options: DockerSandboxOptions): Sandbox {
  * "tagged by content hash over Dockerfile + lockfiles, rebuilt only on change".
  */
 async function imageTag(dir: string) {
-  const parts: string[] = [];
-
-  parts.push(await readFile(join(dir, 'Dockerfile'), 'utf8'));
-
-  for (const name of LOCKFILES) {
-    const path = join(dir, name);
-
-    if (await fileExists(path)) {
-      parts.push(await readFile(path, 'utf8'));
-    }
-  }
-
+  const bodies = await Promise.all(
+    [join(dir, 'Dockerfile'), ...LOCKFILES.map((name) => join(dir, name))].map((path) =>
+      readFile(path, 'utf8').catch(() => null),
+    ),
+  );
+  const parts = bodies.filter((body) => body != null);
   const hash = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 16);
 
   return `seraphim/${basename(dir)}:${hash}`;
@@ -131,25 +132,39 @@ function imageId(stdout: string) {
   return JSON.parse(stdout) as string;
 }
 
-async function fileExists(path: string) {
-  return stat(path).then(
-    (info) => info.isFile(),
-    () => false,
-  );
-}
-
 /** The production runner: one `docker` CLI invocation per `run` call, full argv passthrough. */
 export const cliDocker: DockerRunner = {
   run: async (args) => {
-    const child = spawn('docker', [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const spawned = tryCatch(() =>
+      spawn('docker', [...args], { stdio: ['ignore', 'pipe', 'pipe'] }),
+    );
+
+    // A missing binary surfaces as an 'error' event, not a nonzero exit — without this
+    // listener it crashes the process instead of reporting through the runner's result.
+    if (!spawned.success) {
+      return { exitCode: 127, stdout: '', stderr: String(spawned.error) };
+    }
+
+    const child = spawned.data;
     const stdout: string[] = [];
     const stderr: string[] = [];
 
-    child.stdout.on('data', (chunk) => stdout.push(String(chunk)));
-    child.stderr.on('data', (chunk) => stderr.push(String(chunk)));
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(String(chunk)));
+    child.stderr?.on('data', (chunk: Buffer) => stderr.push(String(chunk)));
 
-    const exitCode = await new Promise<number>((resolve) => child.on('close', resolve));
+    // 'error' (binary missing/unspawnable) and 'close' (normal exit) are mutually exclusive
+    // completions; whichever fires first resolves.
+    const outcome = await new Promise<{ exitCode: number; stderr: string }>((resolve) => {
+      child.once('error', (error: NodeJS.ErrnoException) =>
+        resolve({ exitCode: 127, stderr: error.message }),
+      );
+      child.once('close', (code) => resolve({ exitCode: code ?? 127, stderr: '' }));
+    });
 
-    return { exitCode, stdout: stdout.join(''), stderr: stderr.join('') };
+    return {
+      exitCode: outcome.exitCode,
+      stdout: stdout.join(''),
+      stderr: stderr.join('') || outcome.stderr,
+    };
   },
 };
