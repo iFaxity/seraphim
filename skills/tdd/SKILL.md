@@ -1,82 +1,16 @@
 ---
 name: tdd
-description: Test-driven development. Use when building features or fixing bugs test-first, mentions "red-green-refactor", or wants integration tests.
+description: 'Test-driven red-green loop at pre-agreed seams.'
 ---
 
-# Test-Driven Development
-
-TDD is the red → green loop. This skill is the reference that makes that loop produce tests
-worth keeping: what a good test is, where tests go, the anti-patterns, and the rules of the
-loop. Every section applies on every cycle: consult them before and during the loop, not
-after.
-
-When exploring the codebase, read `CONTEXT.md` (if it exists) so test names and interface
-vocabulary match the project's domain language, and respect ADRs in the area you're
-touching.
-
-## What a good test is
-
-Tests verify behavior through public interfaces, not implementation details. Code can change
-entirely; tests shouldn't. A good test reads like a specification: "user can checkout with
-valid cart" tells you exactly what capability exists, and it survives refactors because it
-doesn't care about internal structure.
-
-See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
-
-## Seams: where tests go
-
-A **seam** is the public boundary you test at: the interface where you observe behavior
-without reaching inside. Tests live at seams, never against internals.
-
-**Test only at pre-agreed seams.** The seams under test come from the session's issue —
-acceptance criteria, the repo's documented testing doctrine (e.g. a Testing Decisions section
-in its spec, or `docs/adr/`), and existing co-located tests. Those sources are the agreement;
-proceed with them. No test is written at a seam those sources don't establish. You can't test
-everything, so agreeing the seams up front is how testing effort lands on the critical paths
-and complex logic instead of every edge case.
-
-If the shape of the interface itself is in question — how deep the module is, where the seam
-belongs, what it should expose — consult the codebase-design skill when the pool declares it;
-otherwise derive the seam from the issue's acceptance criteria and the existing public
-surface, and record the derivation in the transcript.
-
-## Anti-patterns
-
-- **Implementation-coupled**: mocks internal collaborators, tests private methods, or
-  verifies through a side channel (querying the database instead of using the interface). The
-  tell: the test breaks when you refactor but behavior hasn't changed.
-- **Tautological**: the assertion recomputes the expected value the way the code does
-  (`expect(add(a, b)).toBe(a + b)`, a snapshot derived by hand the same way, a constant
-  asserted equal to itself), so it passes by construction and can never disagree with the
-  code. Expected values must come from an independent source of truth: a known-good literal,
-  a worked example, the spec.
-- **Horizontal slicing**: writing all tests first, then all implementation. Bulk tests verify
-  _imagined_ behavior: you test the _shape_ of things rather than user-facing behavior, the
-  tests go insensitive to real changes, and you commit to test structure before understanding
-  the implementation. Work in **vertical slices** instead: one test → one implementation →
-  repeat, each test a **tracer bullet** that responds to what the last cycle taught you.
-
-## Rules of the loop
-
-- **Red before green.** Write the failing test first, then only enough code to pass it.
-  Don't anticipate future tests or add speculative features.
-- **One slice at a time.** One seam, one test, one minimal implementation per cycle.
-- **Refactoring is not part of the loop.** It belongs to the review stage (see the
-  code-review skill), not the red → green implementation cycle.
+Work in the red → green loop: write one failing test at a pre-agreed seam, then only enough
+code to pass it, one slice at a time. Seams are pre-agreed by the issue's acceptance criteria
+and the repo's documented testing doctrine — never invented per test. Tests verify behavior
+through public interfaces, never implementation details, and never mock internal
+collaborators. Refactoring belongs to the review pass, not the loop.
 
 ## Ported from the interactive original
 
-- Seam confirmation is a read of the session's sources — issue acceptance criteria, the
-  repo's documented testing doctrine, existing co-located tests — instead of a question to a
-  user; those sources are the agreement.
-- The codebase-design reference became a conditional pool reference (only when the flow
-  declares it) with a derivation fallback, because a session cannot invoke a skill the flow
-  didn't stage.
-- Dropped the `agents/openai.yaml` interface file: discovery is the flow's explicit
-  declaration, not an interactive surface.
-- Sub-files: `tests.md` and `mocking.md` match the interactive original except for quote
-  style (`"` → `'`) and one blank line, applied by this repo's formatter (oxfmt) — the
-  reformat is mechanical, not a content change.
-- Everything else is verbatim from the interactive original, except the frontmatter
-  description (dropped "the user wants to" — no interactive user exists); re-porting
-  upstream tdd changes needs no edits beyond this list.
+Seam confirmation became a read of the issue and the repo's testing doctrine; the full
+reference (test examples, mocking guidelines, smell list) lives in the interactive original
+and can be re-ported section by section.
