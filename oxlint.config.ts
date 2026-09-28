@@ -1,7 +1,7 @@
 import { defineConfig } from 'oxlint';
 
 export default defineConfig({
-  plugins: ['eslint', 'unicorn', 'typescript', 'oxc', 'import'],
+  plugins: ['eslint', 'promise', 'unicorn', 'typescript', 'oxc', 'import'],
   options: {
     typeAware: true,
     typeCheck: true,
@@ -30,6 +30,8 @@ export default defineConfig({
     'typescript/consistent-type-assertions': ['warn', { assertionStyle: 'as' }],
     // Unicorn — style
     'unicorn/filename-case': ['error', { case: 'kebabCase' }],
+    // Promise — style
+    'promise/avoid-new': 'error',
   },
   ignorePatterns: ['node_modules', 'dist/**', '**/*.md'],
 });
