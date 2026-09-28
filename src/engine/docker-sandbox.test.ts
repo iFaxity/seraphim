@@ -25,6 +25,21 @@ export function fakeDockerRunner(
   return { run, invocations } satisfies DockerRunner & { invocations: string[][] };
 }
 
+/** A live-daemon runner that additionally records every `build` invocation for assertions. */
+function countingDocker() {
+  const builds: string[][] = [];
+
+  async function run(args: readonly string[]) {
+    if (args[0] === 'build') {
+      builds.push([...args]);
+    }
+
+    return cliDocker.run(args);
+  }
+
+  return { run, builds };
+}
+
 let projectsRoot: string;
 
 beforeEach(async () => {
@@ -256,16 +271,7 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', () => {
 
   it('reuses the image when Dockerfile and lockfiles are unchanged — no second build', async () => {
     await seedDockerfileUnder(root, 'cache', `FROM alpine:3.20\n# ${randomUUID()}\n`);
-    const buildArgs: string[][] = [];
-    const counting: DockerRunner = {
-      run: async (args) => {
-        if (args[0] === 'build') {
-          buildArgs.push([...args]);
-        }
-
-        return cliDocker.run(args);
-      },
-    };
+    const counting = countingDocker();
     const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
     const first = await countingSandbox.ensureImage('cache');
@@ -281,27 +287,18 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', () => {
     }
 
     // Cache hit observable: exactly one build happened across two ensureImage calls.
-    expect(buildArgs).toHaveLength(1);
+    expect(counting.builds).toHaveLength(1);
   });
 
   it('rebuilds when a lockfile changes', async () => {
     await seedDockerfileUnder(root, 'lockchange', `FROM alpine:3.20\n# ${randomUUID()}\n`);
-    const buildArgs: string[][] = [];
-    const counting: DockerRunner = {
-      run: async (args) => {
-        if (args[0] === 'build') {
-          buildArgs.push([...args]);
-        }
-
-        return cliDocker.run(args);
-      },
-    };
+    const counting = countingDocker();
     const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
     await countingSandbox.ensureImage('lockchange');
     await writeFile(join(root, 'lockchange', 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
     await countingSandbox.ensureImage('lockchange');
 
-    expect(buildArgs).toHaveLength(2);
+    expect(counting.builds).toHaveLength(2);
   });
 });

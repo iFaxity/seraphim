@@ -25,8 +25,8 @@ export async function main(argv: readonly string[], deps?: Deps) {
 
 /**
  * Composition root: builds the real `Deps` from the engine's seams. v1 wires fakes over a real
- * filesystem home (a deliberate trade from #2) and swaps real adapters in here as they land —
- * the Docker sandbox is one; tracker and runtime fakes remain until #6/#4.
+ * filesystem home and swaps real adapters in here as they land — the Docker sandbox is one;
+ * the tracker and agent runtime remain faked until their adapters ship.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
