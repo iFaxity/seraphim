@@ -1,3 +1,7 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
@@ -20,13 +24,19 @@ export async function main(argv: readonly string[], deps?: Deps) {
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams. v1 wires the engine's
- * fakes over a real filesystem home — a deliberate trade: fakes as production deps inverts
- * the usual test-only convention for a runnable skeleton now; real adapters replace them
- * here and nowhere else as they land.
+ * Composition root: builds the real `Deps` from the engine's seams. v1 wires fakes over a real
+ * filesystem home (a deliberate trade from #2) and swaps real adapters in here as they land —
+ * the Docker sandbox is one; tracker and runtime fakes remain until #6/#4.
  */
 function composeDeps() {
-  return fakeDeps().deps;
+  const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
+  const projectsRoot = join(home, 'projects');
+
+  return fakeDeps({
+    sandbox: dockerSandbox({ projectsRoot, docker: cliDocker }),
+    workspaceRoot: home,
+    sessionsRoot: join(home, 'sessions'),
+  }).deps;
 }
 
 async function render(result: Result<Outcome>) {
