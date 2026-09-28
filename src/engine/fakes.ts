@@ -121,7 +121,7 @@ export function fakeDeps(
   overrides?: Partial<{
     readonly runtime: FakeRuntime;
     readonly tracker: FakeTracker;
-    readonly sandbox: FakeSandbox;
+    readonly sandbox: FakeSandbox | Sandbox;
     readonly git: FakeGit;
     readonly cloneUrl: Deps['cloneUrl'];
     readonly workspaceRoot: string;
