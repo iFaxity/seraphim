@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { type Git } from './seams.ts';
 
-import { tryCatch } from '../lib/result.ts';
+import { failure, success, tryCatch } from '../lib/result.ts';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 
 /**
@@ -88,21 +88,19 @@ export async function registerProject(
   const derived = name ?? deriveName(url);
 
   if (!derived) {
-    return {
-      success: false as const,
-      error: new Error(
-        `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
-      ),
-    };
+    const error = new Error(
+      `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
+    );
+
+    return failure(error);
   }
 
   if (!NAME_PATTERN.test(derived)) {
-    return {
-      success: false as const,
-      error: new Error(
-        `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
-      ),
-    };
+    const error = new Error(
+      `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
+    );
+
+    return failure(error);
   }
 
   const repo = derived;
@@ -110,10 +108,9 @@ export async function registerProject(
   const probe = await tryCatch(git.probeRemote(url));
 
   if (!probe.success) {
-    return {
-      success: false as const,
-      error: new Error(`remote not reachable '${url}': ${String(probe.error)}`),
-    };
+    const error = new Error(`remote not reachable '${url}': ${String(probe.error)}`);
+
+    return failure(error);
   }
 
   const dir = projectPath(home, repo);
@@ -128,12 +125,11 @@ export async function registerProject(
   // Reactivation path: an inactive record re-registers with the new remote; an active one
   // is refused so a changed URL can never silently swap under a working project.
   if (existing.success && existing.data.state == 'active') {
-    return {
-      success: false as const,
-      error: new Error(
-        `project '${repo}' already registered: deactivate it first (seraphim deactivate ${repo}) to change its remote`,
-      ),
-    };
+    const error = new Error(
+      `project '${repo}' already registered: deactivate it first (seraphim deactivate ${repo}) to change its remote`,
+    );
+
+    return failure(error);
   }
 
   // A slot already on disk is the owner's content — skip it, never clobber (wx).
@@ -145,44 +141,40 @@ export async function registerProject(
         return wrote.success ||
           (wrote.error instanceof Error && 'code' in wrote.error && wrote.error.code == 'EEXIST')
           ? `projects/${repo}/${slot.name}`
-          : undefined;
+          : null;
       }),
     )
-  ).filter((artifact) => artifact != undefined);
+  ).filter((artifact) => artifact != null);
 
   if (seeded.length < SLOTS.length) {
-    return {
-      success: false as const,
-      error: new Error(`could not seed the project directory ${dir}`),
-    };
+    const error = new Error(`could not seed the project directory ${dir}`);
+
+    return failure(error);
   }
 
   const record: ProjectRecord = { repo, remote: url, state: 'active' };
-
   const wrote = await writeRecord(dir, record);
 
   if (!wrote.success) {
     return wrote;
   }
 
-  return {
-    success: true as const,
-    data: { record, reactivated: existing.success, artifacts: seeded },
-  };
+  return success({ record, reactivated: existing.success, artifacts: seeded });
 }
 
 /** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
 async function requireRegistered(home: string, repo: string) {
   const read = await readRecord(projectPath(home, repo));
 
-  return read.success || !isMissing(read.error)
-    ? read
-    : {
-        success: false as const,
-        error: new Error(
-          `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
-        ),
-      };
+  if (read.success || !isMissing(read.error)) {
+    return read;
+  }
+
+  const error = new Error(
+    `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
+  );
+
+  return failure(error);
 }
 
 /** The absent-file case: everything else (corrupt record, unreadable dir) keeps its error. */
@@ -202,12 +194,10 @@ export async function deactivateProject(home: string, repo: string) {
   if (!read.success) {
     return read;
   }
-
   if (read.data.state == 'inactive') {
-    return {
-      success: false as const,
-      error: new Error(`project '${repo}' is already inactive`),
-    };
+    const error = new Error(`project '${repo}' is already inactive`);
+
+    return failure(error);
   }
 
   return writeRecord(projectPath(home, repo), { ...read.data, state: 'inactive' });
@@ -220,11 +210,8 @@ export async function listProjects(home: string) {
 
   if (!dirs.success) {
     return isMissing(dirs.error)
-      ? { success: true as const, data: [], skipped: 0 }
-      : {
-          success: false as const,
-          error: new Error(`unreadable projects root ${root}: ${String(dirs.error)}`),
-        };
+      ? success({ projects: [], skipped: 0 })
+      : failure(new Error(`unreadable projects root ${root}: ${String(dirs.error)}`));
   }
   const listed = await Promise.all(
     dirs.data
@@ -236,11 +223,7 @@ export async function listProjects(home: string) {
     .map((read) => read.data)
     .sort((a, b) => a.repo.localeCompare(b.repo));
 
-  return {
-    success: true as const,
-    data: records,
-    skipped: listed.length - records.length,
-  };
+  return success({ projects: records, skipped: listed.length - records.length });
 }
 
 /** Reads and schema-checks one `project.json`. Invalid shape is a failure Result. */
@@ -254,20 +237,16 @@ async function readRecord(dir: string) {
   const json = tryCatch(() => JSON.parse(raw.data) as unknown);
 
   if (!json.success) {
-    return {
-      success: false as const,
-      error: new Error(`invalid project record in ${dir}: ${String(json.error)}`),
-    };
+    const error = new Error(`invalid project record in ${dir}: ${String(json.error)}`);
+
+    return failure(error);
   }
 
   const parsed = ProjectRecordSchema.safeParse(json.data);
 
   return parsed.success
-    ? { success: true as const, data: parsed.data }
-    : {
-        success: false as const,
-        error: new Error(`invalid project record in ${dir}: ${parsed.error.message}`),
-      };
+    ? success(parsed.data)
+    : failure(new Error(`invalid project record in ${dir}: ${parsed.error.message}`));
 }
 
 /** Persists one record atomically: temp file then rename, so readers never see a torn row. */
@@ -278,5 +257,5 @@ async function writeRecord(dir: string, record: ProjectRecord) {
     ),
   );
 
-  return write.success ? { success: true as const, data: record } : write;
+  return write.success ? success(record) : write;
 }
