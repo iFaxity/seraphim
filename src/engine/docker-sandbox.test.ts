@@ -241,7 +241,7 @@ describe('dockerSandbox.exec', () => {
 // the second ensureImage is a cache hit, a lockfile change rebuilds, and the host stays clean.
 const dockerReady = (await cliDocker.run(['info'])).exitCode === 0;
 
-describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', () => {
+describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout: 30_000 }, () => {
   let root: string;
 
   beforeEach(async () => {
