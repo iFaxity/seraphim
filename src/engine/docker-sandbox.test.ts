@@ -161,8 +161,13 @@ describe('dockerSandbox.ensureImage', () => {
 });
 
 describe('dockerSandbox.exec', () => {
+  let worktreePath: string;
+
   beforeEach(async () => {
     await seedDockerfile('demo', 'FROM node:26\n');
+    worktreePath = join(projectsRoot, 'wt');
+
+    await mkdir(worktreePath, { recursive: true });
   });
 
   it('runs the command inside a container with the worktree mounted read-write at /workspace', async () => {
@@ -177,7 +182,7 @@ describe('dockerSandbox.exec', () => {
 
     const executed = await sandbox.exec({
       repo: 'demo',
-      worktreePath: '/tmp/worktrees/demo/7-2026',
+      worktreePath,
       command: ['pnpm', 'lint'],
     });
 
@@ -205,7 +210,7 @@ describe('dockerSandbox.exec', () => {
 
     const executed = await sandbox.exec({
       repo: 'demo',
-      worktreePath: '/tmp/wt',
+      worktreePath,
       command: ['false'],
     });
 
@@ -221,7 +226,7 @@ describe('dockerSandbox.exec', () => {
 
     await sandbox.exec({
       repo: 'withenv',
-      worktreePath: '/tmp/wt',
+      worktreePath,
       command: ['printenv', 'AGENT_KEY'],
     });
 

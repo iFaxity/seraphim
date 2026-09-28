@@ -14,6 +14,10 @@ can't.
   `src/commands/`.
 - Internal kernel types stay compile-time TS. `zod` only where untrusted input crosses an edge
   (flow config files, project registration, receipt schemas).
+- Bind every `await` to a named const first (`const tag = await imageTag(dir)`), never chain
+  it inline into a larger expression — the name documents the intermediate value.
+- Compose `Promise.all` over a pre-built array variable; no spreads or `join` chains inside
+  the call — build the list, then await it.
 - Prefer array chaining (`map`/`filter`/`reduce`) over imperative `for`/`while` loops.
 - Infer return types; annotate only load-bearing seams — `seams.ts` members, type
   predicates (`x is T`), `fakes.ts` factories.
