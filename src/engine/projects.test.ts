@@ -273,15 +273,15 @@ describe('listProjects', () => {
     expect(listed.success).toBe(true);
 
     if (listed.success) {
-      expect(listed.data.map((p) => p.repo)).toEqual(['apples', 'widgets']);
-      expect(listed.skipped).toBe(1);
+      expect(listed.data.projects.map((p) => p.repo)).toEqual(['apples', 'widgets']);
+      expect(listed.data.skipped).toBe(1);
     }
   });
 
   it('lists no projects on a fresh home', async () => {
     const listed = await listProjects(root);
 
-    expect(listed).toEqual({ success: true, data: [], skipped: 0 });
+    expect(listed).toEqual({ success: true, data: { projects: [], skipped: 0 } });
   });
 });
 

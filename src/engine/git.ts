@@ -2,6 +2,9 @@ import { spawn } from 'node:child_process';
 
 import { type Git } from './seams.ts';
 
+/** Per-stream output cap: clone/ls-remote output is diagnostics only, never retained wholesale. */
+const MAX_STREAM_BYTES = 10 * 1024 * 1024;
+
 /**
  * The real `Git` adapter over the git CLI: one subprocess per operation, full argv
  * passthrough. Registration's remote probe (`ls-remote`) and the session's clone/pull/worktree
@@ -24,21 +27,43 @@ export type GitRunner = {
 export const processGit: GitRunner = {
   run: (args, cwd) => {
     const child = spawn('git', [...args], { stdio: ['ignore', 'pipe', 'pipe'], cwd });
-    const stdout: string[] = [];
-    const stderr: string[] = [];
+    const stdout = boundedCapture();
+    const stderr = boundedCapture();
 
-    child.stdout.on('data', (chunk) => stdout.push(String(chunk)));
-    child.stderr.on('data', (chunk) => stderr.push(String(chunk)));
+    stdout.stream(child.stdout);
+    stderr.stream(child.stderr);
 
     const { promise, resolve } = Promise.withResolvers<GitRun>();
 
     child.on('close', (code) => {
-      resolve({ exitCode: code ?? -1, stdout: stdout.join(''), stderr: stderr.join('') });
+      resolve({
+        exitCode: code ?? -1,
+        stdout: stdout.chunks.join(''),
+        stderr: stderr.chunks.join(''),
+      });
     });
 
     return promise;
   },
 };
+
+/** Collects one stdout/stderr stream into strings, dropping bytes past the retention cap. */
+function boundedCapture() {
+  const chunks: string[] = [];
+  let captured = 0;
+
+  return {
+    chunks,
+    stream(target: NodeJS.ReadableStream | null) {
+      target?.on('data', (chunk: Buffer) => {
+        if (captured < MAX_STREAM_BYTES) {
+          captured += chunk.length;
+          chunks.push(String(chunk));
+        }
+      });
+    },
+  };
+}
 
 function gitFailure(label: string, run: GitRun): Error {
   const detail = run.stderr.trim() || run.stdout.trim() || `git exited ${run.exitCode}`;
@@ -63,10 +88,11 @@ export function gitAdapter(runner: GitRunner): Git {
     defaultBranch: async (repoPath) => {
       // `--short` yields `origin/<branch>`; the seam's contract is the branch name (the fake
       // returns 'main' and createWorktree re-prefixes origin/), so strip the remote here.
-      const run = expectOk(
-        'default branch lookup failed',
-        await runner.run(['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'], repoPath),
+      const run = await runner.run(
+        ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+        repoPath,
       );
+      expectOk('default branch lookup failed', run);
 
       return run.stdout.trim().replace(/^origin\//, '');
     },
@@ -80,22 +106,28 @@ export function gitAdapter(runner: GitRunner): Git {
         return;
       }
 
-      expectOk('clone failed', await runner.run(['clone', url, repoPath]));
+      const clone = await runner.run(['clone', url, repoPath]);
+      expectOk('clone failed', clone);
     },
     pull: async (repoPath) => {
-      expectOk('pull failed', await runner.run(['pull', '--ff-only'], repoPath));
+      const run = await runner.run(['pull', '--ff-only'], repoPath);
+      expectOk('pull failed', run);
     },
     createWorktree: async (input) => {
-      expectOk(
-        'worktree creation failed',
-        await runner.run(
-          ['worktree', 'add', '-b', input.branch, input.path, `origin/${input.baseBranch}`],
-          input.repoPath,
-        ),
-      );
+      const args = [
+        'worktree',
+        'add',
+        '-b',
+        input.branch,
+        input.path,
+        `origin/${input.baseBranch}`,
+      ];
+      const run = await runner.run(args, input.repoPath);
+      expectOk('worktree creation failed', run);
     },
     probeRemote: async (url) => {
-      expectOk('remote not reachable', await runner.run(['ls-remote', '--heads', url]));
+      const run = await runner.run(['ls-remote', '--heads', url]);
+      expectOk('remote not reachable', run);
     },
   };
 }

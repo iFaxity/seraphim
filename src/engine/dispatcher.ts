@@ -175,8 +175,8 @@ const COMMANDS: readonly {
 
       return {
         kind: 'projects',
-        projects: listed.data,
-        skipped: listed.skipped,
+        projects: listed.data.projects,
+        skipped: listed.data.skipped,
         json: parsed.data.values['json'] === true,
       };
     },

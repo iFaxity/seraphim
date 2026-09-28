@@ -13,7 +13,7 @@ import {
 import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
 
 import { fileExists } from '../lib/fs.ts';
-import { tryCatch } from '../lib/result.ts';
+import { failure, tryCatch } from '../lib/result.ts';
 import { now, toEpochMs } from '../lib/time.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 
@@ -78,12 +78,11 @@ export async function runSession(deps: Deps, input: SessionInput) {
   }
 
   if (project.data.state != 'active') {
-    return {
-      success: false as const,
-      error: new Error(
-        `project '${input.repo}' is inactive: re-register it (seraphim register <git-url>) to run sessions`,
-      ),
-    };
+    const error = new Error(
+      `project '${input.repo}' is inactive: re-register it (seraphim register <git-url>) to run sessions`,
+    );
+
+    return failure(error);
   }
 
   const flow = await loadFlow(deps.workspaceRoot, input.repo);
