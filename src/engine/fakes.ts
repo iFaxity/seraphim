@@ -20,8 +20,8 @@ export type FakeTracker = Tracker & {
     readonly prsOpened: readonly string[];
     readonly listed: readonly string[];
   };
-  /** Seeds what `listReady` reports so tests script the queue's intake view. */
-  readonly seed: (issues: readonly (Issue & { ready?: boolean })[]) => void;
+  /** Seeds the ready set `listReady` reports; tests script the queue's intake view. */
+  readonly seed: (ready: readonly Issue[]) => void;
 };
 
 export function fakeTracker(): FakeTracker {
@@ -33,7 +33,7 @@ export function fakeTracker(): FakeTracker {
   return {
     calls: { claimed, prsOpened, listed },
     seed: (issues) => {
-      ready = issues.filter((issue) => issue.ready !== false);
+      ready = issues;
     },
     getIssue: (repo, issueNumber) =>
       Promise.resolve({
@@ -144,7 +144,7 @@ export function fakeGit(defaultBranch = 'main'): FakeGit {
 export function fakeDeps(
   overrides?: Partial<{
     readonly runtime: FakeRuntime;
-    readonly tracker: FakeTracker;
+    readonly tracker: FakeTracker | Tracker;
     readonly sandbox: FakeSandbox | Sandbox;
     readonly git: FakeGit | Git;
     readonly workspaceRoot: string;

@@ -5,6 +5,7 @@ import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { gitAdapter, processGit } from './engine/git.ts';
+import { ghTracker, processGh } from './engine/github-tracker.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
 import { type Deps } from './engine/session.ts';
 import { failure, success, type Result } from './lib/result.ts';
@@ -25,15 +26,16 @@ export async function main(argv: readonly string[], deps?: Deps) {
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams. v1 wires fakes over a real
- * filesystem home and swaps real adapters in here as they land — the Docker sandbox and the
- * git CLI are two; the tracker and agent runtime remain faked until their adapters ship.
+ * Composition root: builds the real `Deps` from the engine's seams. v1 wires real adapters
+ * as they land — the Docker sandbox, the git CLI, and the GitHub tracker are in; the agent
+ * runtime remains faked until its adapter ships.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
 
   return fakeDeps({
+    tracker: ghTracker(processGh),
     sandbox: dockerSandbox({ projectsRoot, docker: cliDocker }),
     git: gitAdapter(processGit),
     workspaceRoot: home,
