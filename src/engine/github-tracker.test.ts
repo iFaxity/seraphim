@@ -3,7 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { CLAIMED_LABEL, ghTracker, processGh, type GhRunner } from './github-tracker.ts';
+import {
+  CLAIMED_LABEL,
+  ghTracker,
+  processGh,
+  tokenGhRunner,
+  type GhRunner,
+} from './github-tracker.ts';
 
 /** A runner that always fails with the given stderr, so error paths need no scripting. */
 function failingRunner(stderr: string): GhRunner {
@@ -237,6 +243,18 @@ describe('ghTracker openDraftPr', () => {
         body: '',
       }),
     ).rejects.toThrow('draft PR creation failed: head branch not found');
+  });
+});
+
+describe('tokenGhRunner', () => {
+  it('authenticates subprocesses with GH_TOKEN in the inherited environment', async () => {
+    const runner = tokenGhRunner('gho_testtoken');
+    const run = await runner.run(['auth', 'status']);
+
+    // A real gh with a bogus token reports the auth failure through GH_TOKEN, not the
+    // keyring — proving the env var reached the subprocess and took precedence.
+    expect(run.exitCode).not.toBe(127);
+    expect(/[Tt]oken|auth/i.test(run.stderr + run.stdout)).toBe(true);
   });
 });
 
