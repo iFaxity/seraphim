@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { CLAIMED_LABEL, ghTracker, processGh, type GhRunner } from './github-tracker.ts';
@@ -105,6 +108,27 @@ describe('ghTracker listReady', () => {
     expect(issue.blockedBy).toEqual([1, 2]);
   });
 
+  it('treats bare issue references as links, not blockers', async () => {
+    const runner = scriptedRunner([
+      {
+        exitCode: 0,
+        stdout: JSON.stringify([
+          {
+            number: 20,
+            title: 'mentions but not blocked',
+            body: 'Duplicate of #12, see #45 for context.\nCloses #7.',
+            labels: [],
+          },
+        ]),
+      },
+    ]);
+
+    const ready = await ghTracker(runner).listReady('owner/repo');
+
+    expect(ready.map((issue) => issue.number)).toEqual([20]);
+    expect(ready[0]?.blockedBy).toEqual([]);
+  });
+
   it('fails through the gh stderr when the CLI errors', async () => {
     const tracker = ghTracker(failingRunner('gh: auth required'));
 
@@ -132,6 +156,23 @@ describe('ghTracker claim', () => {
     expect(runner.calls[0]?.slice(-2)).toEqual(['--add-label', CLAIMED_LABEL]);
     expect(runner.calls[1]?.slice(0, 3)).toEqual(['issue', 'comment', '12']);
     expect(runner.calls[1]?.at(-2)).toBe('--body');
+  });
+
+  it('refuses to claim an issue already carrying the claim label', async () => {
+    const runner = scriptedRunner([]);
+    const tracker = ghTracker(runner);
+
+    await expect(
+      tracker.claim({
+        repo: 'owner/repo',
+        number: 9,
+        title: 't',
+        body: '',
+        labels: [CLAIMED_LABEL],
+        blockedBy: [],
+      }),
+    ).rejects.toThrow('issue #9 already claimed (in-progress)');
+    expect(runner.calls).toEqual([]);
   });
 
   it('aborts the comment half when labeling fails', async () => {
@@ -200,11 +241,21 @@ describe('ghTracker openDraftPr', () => {
 });
 
 describe('processGh', () => {
-  it('returns CLI_NOT_FOUND with the spawn error as stderr for a missing binary', async () => {
-    const run = await processGh.run(['--version']);
+  // `PATH` pointing at an empty directory: spawn fails with ENOENT and the runner must
+  // convert it into CLI_NOT_FOUND rather than crash the process on the 'error' event.
+  it('reports CLI_NOT_FOUND with the spawn error as stderr for a missing binary', async () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'gh-missing-'));
+    const previousPath = process.env['PATH'];
+    process.env['PATH'] = emptyDir;
 
-    expect(run.exitCode).toBe(0);
-    expect(run.stdout).toContain('gh version');
-    expect(run.stderr).toBe('');
+    try {
+      const run = await processGh.run(['--version']);
+
+      expect(run.exitCode).toBe(127);
+      expect(run.stdout).toBe('');
+      expect(run.stderr).toContain('ENOENT');
+    } finally {
+      process.env['PATH'] = previousPath;
+    }
   });
 });

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { engine } from './engine.ts';
-import { fakeDeps, fakeRuntime } from './fakes.ts';
+import { fakeDeps, fakeRuntime, type FakeTracker } from './fakes.ts';
 import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession } from './session.ts';
@@ -183,6 +183,14 @@ export default flow;
     const { deps, tracker } = fakeDeps({ workspaceRoot: root, sessionsRoot });
 
     await runSession(deps, { repo: 'claimed', issueNumber: 4 });
+
+    function isFakeTracker(value: unknown): value is FakeTracker {
+      return typeof value == 'object' && value != null && 'calls' in value;
+    }
+
+    if (!isFakeTracker(tracker)) {
+      throw new Error('expected the default FakeTracker with call recording');
+    }
 
     expect(tracker.calls.claimed).toEqual(['claimed#4']);
   });

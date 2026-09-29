@@ -102,14 +102,19 @@ function toIssue(repo: string, raw: Record<string, unknown>): Issue {
 }
 
 /**
- * `Blocked by #N` bodies name their blockers inline; every referenced number blocks. The
- * regex is deliberately loose — a false positive blocks an issue (fail-safe), a false
- * negative would double-run against a live dependency.
+ * `Blocked by #N` lines name their blockers ("Blocked by #1, #2"); every number on such a
+ * line blocks. A bare `#N` reference ("see #45", "Closes #7") is not a blocker — the
+ * match is anchored to the phrase so cross-references never hide an issue. Missing a real
+ * blocker line only loses the guard on repos whose bodies use another phrasing (the
+ * spec's blocked convention is exactly this line format).
  */
 function blockedByFromBody(body: string) {
-  return [...body.matchAll(/#(\d+)/g)]
-    .map((match) => Number(match[1]))
-    .filter((number) => Number.isInteger(number) && number > 0);
+  const blockedLines = body.matchAll(/blocked by([^\n]*)/gi);
+  const numbers = [...blockedLines].flatMap((line) =>
+    [...(line[1]?.matchAll(/#(\d+)/g) ?? [])].map((match) => Number(match[1])),
+  );
+
+  return numbers.filter((number) => Number.isInteger(number) && number > 0);
 }
 
 function expectOk(label: string, run: GhRun) {
@@ -167,6 +172,13 @@ export function ghTracker(runner: GhRunner): Tracker {
       return toIssue(repo, JSON.parse(run.stdout) as Record<string, unknown>);
     },
     claim: async (issue) => {
+      // Exclusivity: a claim attempt on an already-claimed issue refuses here, so the
+      // direct-run path (`getIssue` → `claim`) gets the same double-session guard the
+      // `listReady` filter gives the queue fetch.
+      if (issue.labels.includes(CLAIMED_LABEL)) {
+        throw new Error(`issue #${issue.number} already claimed (${CLAIMED_LABEL})`);
+      }
+
       const labeled = await runner.run([
         'issue',
         'edit',
