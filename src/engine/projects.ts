@@ -42,31 +42,18 @@ function deriveName(url: string) {
  * the registration record. `wx` keeps owner edits intact on a re-register of a partial
  * directory — a slot already on disk is that owner's content, not scaffolding to clobber.
  */
-const SLOTS: readonly { name: string; body: string }[] = [
+/** The slot files seeded into a new project's directory, read once at module load. */
+const SLOTS = [
   {
     name: 'flow.ts',
-    // A plain-object default export, no imports: a seeded flow must load against any home
-    // (the record's acceptance is `run` working with no manual step), and importing the
-    // engine's defineFlow would pin the home to a full seraphim checkout. loadFlow
-    // schema-checks this shape at the load edge anyway; defineFlow buys only typecheck,
-    // which the owner adds back the moment they import it for their own edits.
-    body: `export default {
-  config: {
-    agent: 'pi',
-    model: 'pi/latest',
-    skills: [],
-    sandbox: 'docker',
-    caps: { maxTurns: 10, wallClockMs: 600000 },
+    body: await readFile(new URL('./templates/flow.ts', import.meta.url), 'utf8'),
   },
-  run: async (ctx) => {
-    await ctx.run('implement the issue');
+  {
+    name: 'Dockerfile',
+    body: await readFile(new URL('./templates/Dockerfile', import.meta.url), 'utf8'),
   },
-};
-`,
-  },
-  { name: 'Dockerfile', body: 'FROM node:26\n' },
-  { name: '.env', body: '' },
-];
+  { name: '.env', body: await readFile(new URL('./templates/env', import.meta.url), 'utf8') },
+] as const;
 
 export type Registration = {
   readonly record: ProjectRecord;
@@ -133,9 +120,8 @@ export async function registerProject(
   }
 
   // A slot already on disk is the owner's content — skip it, never clobber (wx).
-  const seeded = (await Promise.all(SLOTS.map((slot) => seedSlot(dir, repo, slot)))).filter(
-    (artifact) => artifact != null,
-  );
+  const written = await Promise.all(SLOTS.map((slot) => seedSlot(dir, repo, slot)));
+  const seeded = written.filter((artifact) => artifact != null);
 
   if (seeded.length < SLOTS.length) {
     const error = new Error(`could not seed the project directory ${dir}`);
@@ -153,21 +139,6 @@ export async function registerProject(
   return success({ record, reactivated: existing.success, artifacts: seeded });
 }
 
-/** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
-async function requireRegistered(home: string, repo: string) {
-  const read = await readRecord(projectPath(home, repo));
-
-  if (read.success || !isMissing(read.error)) {
-    return read;
-  }
-
-  const error = new Error(
-    `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
-  );
-
-  return failure(error);
-}
-
 /** Matches the Node fs error code on an error — ENOENT (missing) and EEXIST (exists) callers. */
 function isErrorCode(error: unknown, code: string) {
   return error instanceof Error && 'code' in error && error.code == code;
@@ -183,6 +154,21 @@ export async function loadProject(home: string, repo: string) {
   return requireRegistered(home, repo);
 }
 
+/** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
+async function requireRegistered(home: string, repo: string) {
+  const read = await readRecord(projectPath(home, repo));
+
+  if (read.success || !isMissing(read.error)) {
+    return read;
+  }
+
+  const error = new Error(
+    `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
+  );
+
+  return failure(error);
+}
+
 /** Marks one project inactive in place — the record stays, nothing is deleted. */
 export async function deactivateProject(home: string, repo: string) {
   const read = await requireRegistered(home, repo);
@@ -196,7 +182,13 @@ export async function deactivateProject(home: string, repo: string) {
     return failure(error);
   }
 
-  return writeRecord(projectPath(home, repo), { ...read.data, state: 'inactive' });
+  const record: ProjectRecord = {
+    repo: read.data.repo,
+    remote: read.data.remote,
+    state: 'inactive',
+  };
+
+  return writeRecord(projectPath(home, repo), record);
 }
 
 /** All registered projects, repo order. Corrupt records are skipped, never fatal. */
