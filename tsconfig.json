@@ -19,5 +19,6 @@
     "rewriteRelativeImportExtensions": false,
     "erasableSyntaxOnly": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/engine/templates"]
 }
