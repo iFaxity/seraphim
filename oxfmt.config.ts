@@ -41,6 +41,6 @@ export default defineConfig({
     '**/pnpm-lock.yaml',
     '**/*.tsbuildinfo',
     '.agents/**',
-    'src/engine/templates/**',
+    'templates/**',
   ],
 });

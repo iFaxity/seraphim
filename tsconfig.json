@@ -20,5 +20,5 @@
     "erasableSyntaxOnly": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/engine/templates"]
+  "exclude": ["templates/project"]
 }
