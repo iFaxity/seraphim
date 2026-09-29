@@ -133,18 +133,9 @@ export async function registerProject(
   }
 
   // A slot already on disk is the owner's content — skip it, never clobber (wx).
-  const seeded = (
-    await Promise.all(
-      SLOTS.map(async (slot) => {
-        const wrote = await tryCatch(writeFile(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }));
-
-        return wrote.success ||
-          (wrote.error instanceof Error && 'code' in wrote.error && wrote.error.code == 'EEXIST')
-          ? `projects/${repo}/${slot.name}`
-          : null;
-      }),
-    )
-  ).filter((artifact) => artifact != null);
+  const seeded = (await Promise.all(SLOTS.map((slot) => seedSlot(dir, repo, slot)))).filter(
+    (artifact) => artifact != null,
+  );
 
   if (seeded.length < SLOTS.length) {
     const error = new Error(`could not seed the project directory ${dir}`);
@@ -177,9 +168,14 @@ async function requireRegistered(home: string, repo: string) {
   return failure(error);
 }
 
-/** The absent-file case: everything else (corrupt record, unreadable dir) keeps its error. */
+/** Matches the Node fs error code on an error — ENOENT (missing) and EEXIST (exists) callers. */
+function isErrorCode(error: unknown, code: string) {
+  return error instanceof Error && 'code' in error && error.code == code;
+}
+
+/** The absent-file case of isErrorCode: everything else (corrupt record, bad dir) keeps its error. */
 function isMissing(error: unknown) {
-  return error instanceof Error && 'code' in error && error.code == 'ENOENT';
+  return isErrorCode(error, 'ENOENT');
 }
 
 /** Loads one project record. An absent record fails fast naming the register fix. */
@@ -216,7 +212,7 @@ export async function listProjects(home: string) {
   const listed = await Promise.all(
     dirs.data
       .filter((entry) => entry.isDirectory())
-      .map(async (entry) => await readRecord(`${root}/${entry.name}`)),
+      .map((entry) => readRecord(`${root}/${entry.name}`)),
   );
   const records = listed
     .filter((read) => read.success)
@@ -249,13 +245,35 @@ async function readRecord(dir: string) {
     : failure(new Error(`invalid project record in ${dir}: ${parsed.error.message}`));
 }
 
+/**
+ * Seeds one slot into the project directory. Yields the artifact path whether the slot was
+ * written or already existed — an owner-edited file is kept, never clobbered (`wx`).
+ */
+async function seedSlot(
+  dir: string,
+  repo: string,
+  slot: { readonly name: string; readonly body: string },
+) {
+  const wrote = await tryCatch(writeFile(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }));
+
+  if (wrote.success || isErrorCode(wrote.error, 'EEXIST')) {
+    return `projects/${repo}/${slot.name}`;
+  }
+
+  throw wrote.error;
+}
+
 /** Persists one record atomically: temp file then rename, so readers never see a torn row. */
 async function writeRecord(dir: string, record: ProjectRecord) {
-  const write = await tryCatch(
-    writeFile(`${dir}/${RECORD_FILE}.tmp`, `${JSON.stringify(record, null, 2)}\n`).then(() =>
-      rename(`${dir}/${RECORD_FILE}.tmp`, `${dir}/${RECORD_FILE}`),
-    ),
-  );
+  const write = await tryCatch(persistAtomically(dir, JSON.stringify(record, null, 2)));
 
   return write.success ? success(record) : write;
+}
+
+/** Writes the record to a temp file, then renames it into place in one filesystem-visible step. */
+async function persistAtomically(dir: string, body: string) {
+  const tmpPath = `${dir}/${RECORD_FILE}.tmp`;
+
+  await writeFile(tmpPath, `${body}\n`);
+  await rename(tmpPath, `${dir}/${RECORD_FILE}`);
 }
