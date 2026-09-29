@@ -29,6 +29,12 @@ export type PullRequest = {
  * (claim on pickup) and `openDraftPr` are the kernel's only writes; everything else reads.
  */
 export type Tracker = {
+  /**
+   * Open issues the work queue may pull, already minus blocked (ADR-0003: a dumb
+   * non-agent fetch — triage judgment never reaches the agent) and minus claimed ones —
+   * the double-session guard: a claimed issue is invisible to the second fetch.
+   */
+  readonly listReady: (repo: string) => Promise<readonly Issue[]>;
   readonly getIssue: (repo: string, issueNumber: number) => Promise<Issue>;
   readonly claim: (issue: Issue) => Promise<void>;
   readonly openDraftPr: (input: {
