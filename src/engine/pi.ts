@@ -6,7 +6,7 @@ import { type AgentRuntime, type TurnResult } from './seams.ts';
 import { failure, success, type Result } from '../lib/result.ts';
 
 /**
- * The real pi/omp adapter behind the `AgentRuntime` seam (issue #4): launches the `omp` CLI
+ * The real pi/omp adapter behind the `AgentRuntime` seam: launches the `omp` CLI
  * headlessly in the session worktree, one turn per `run`, and parses omp's `--mode json`
  * event stream into the seam's markdown transcript. omp's per-turn flags are fixed here —
  * no session files, no extensions, tool calls auto-approved: the whole stack is AFK and the
@@ -44,11 +44,38 @@ const OmpMessageEndSchema = z.object({
     .passthrough(),
 });
 
+/** The turn-end event, where headless omp reports why the turn stopped. */
+const OmpTurnEndSchema = z.object({
+  type: z.literal('turn_end'),
+  message: z
+    .object({
+      stopReason: z.string(),
+      errorMessage: z.string().nullish(),
+    })
+    .passthrough(),
+});
+
 /**
- * Resolves the seam's exit state from an omp exit code: 0 completed, anything else a
- * failure. Cap exhaustion is decided before this — it overlays any code the child reports.
+ * Classifies one finished turn over its exit code and structured stop signal. Headless
+ * omp caps its own `--max-time` budget in-process: the child exits 0 (deadline fired
+ * before a turn started) or 1 (mid-turn), and the `turn_end` event carries
+ * `stopReason: "aborted"` with "Deadline exceeded" — the runtime-side cap observable the
+ * seam's `cap-hit` maps to. A null exit code (killed by signal) is a failed stop, not a
+ * cap: nothing in it indicates the wall-clock budget was the cause.
  */
-function exitForCode(code: number | null): TurnResult['exitState'] {
+export function classifyTurn(
+  code: number | null,
+  turnEnds: readonly { readonly stopReason: string; readonly errorMessage: string | null }[],
+): TurnResult['exitState'] {
+  const cappedByOmp = turnEnds.some(
+    (turn) =>
+      turn.stopReason == 'aborted' && (turn.errorMessage ?? '').includes('Deadline exceeded'),
+  );
+
+  if (cappedByOmp) {
+    return 'cap-hit';
+  }
+
   if (code == 0) {
     return 'completed';
   }
@@ -122,10 +149,13 @@ export function parseTranscript(stdout: string) {
 
 /**
  * Launches one omp turn and awaits the child. The wall-clock budget rides on the child's
- * own `--max-time` so a tiny cap ends the session cleanly inside the runtime (issue #4:
- * caps demonstrably fire against the real runtime); the kernel's pre/post gates in
- * `runSession` remain the outer boundary and the seam stays unextended. `maxTimeMs` arrives
- * already resolved by the composition root — this function owns no cap policy.
+ * own `--max-time` so a tiny cap ends the session cleanly inside the runtime; the kernel's
+ * pre/post gates in `runSession` remain the outer boundary and the seam stays unextended.
+ * `maxTimeMs` arrives already resolved by the composition root — no cap policy here.
+ * stdout is buffered whole and decoded once: a multibyte character split across chunks
+ * must not become replacement characters in the transcript. stderr rides along so a
+ * non-streaming failure (model not found, auth error) lands in the transcript instead of
+ * the void, and gets drained so a chatty child cannot stall on pipe backpressure.
  */
 function runOmpTurn(input: {
   readonly cwd: string;
@@ -142,29 +172,92 @@ function runOmpTurn(input: {
     String(Math.ceil(input.maxTimeMs / 1000)),
   ];
   const child = spawn('omp', args, { cwd: input.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-  const stdout: string[] = [];
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  const turnEnds: { stopReason: string; errorMessage: string | null }[] = [];
 
-  child.stdout.on('data', (chunk: Buffer) => stdout.push(String(chunk)));
+  child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+  // omp exits early on an invalid model or auth failure; the closing write then fails
+  // with EPIPE, and the failure itself is reported through 'error'/'close' — not worth
+  // crashing the host process over.
+  child.stdin.on('error', () => {});
   child.on('error', (error) => resolve(failure(error)));
   child.on('close', (code) => {
-    const transcript = parseTranscript(stdout.join(''));
-    // Degradation recorded on #3/#4: omp's headless stream has no structured per-turn
-    // signal, so `--max-time` expiring is the one runtime-side cap observable — mapped
-    // to the seam's `cap-hit` rather than a faked turn signal. A null code means the
-    // child died without an exit (signal/kill), which is likewise a capped stop.
-    const capHit = code === null || code === 42;
-    const exitState: TurnResult['exitState'] = capHit ? 'cap-hit' : exitForCode(code);
+    const rawStdout = Buffer.concat(stdout).toString('utf8');
+    // Turn stops ride the same JSON stream as the transcript; a capped or errored stop
+    // is classified from them, then omitted from the transcript body (the record keeps
+    // complete messages, not stop bookkeeping).
+    for (const line of rawStdout.split('\n')) {
+      const trimmed = line.trim();
 
-    resolve(
-      success({
-        exitState,
-        transcript: capHit ? `${transcript}\n\n> wall-clock cap hit (omp --max-time)` : transcript,
-      }),
+      if (trimmed === '') {
+        continue;
+      }
+
+      const message = OmpTurnEndSchema.safeParse(safeJson(trimmed));
+
+      if (message.success) {
+        turnEnds.push({
+          stopReason: message.data.message.stopReason,
+          errorMessage: message.data.message.errorMessage ?? null,
+        });
+      }
+    }
+
+    const exitState = classifyTurn(code, turnEnds);
+    const transcript = appendTranscriptNotes(
+      parseTranscript(rawStdout),
+      exitState,
+      stderrNote(stderr, exitState),
     );
+
+    resolve(success({ exitState, transcript }));
   });
   child.stdin.end(input.prompt);
 
   return promise;
+}
+
+/**
+ * Parses JSON on the trust boundary, yielding null for anything unparseable — callers
+ * degrade (verbatim line, schema-miss) instead of throwing.
+ */
+function safeJson(line: string): unknown {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+/** The failure detail a non-completed turn carries under its transcript. */
+function stderrNote(stderr: readonly Buffer[], exitState: TurnResult['exitState']) {
+  const collected = Buffer.concat(stderr).toString('utf8').trim();
+
+  return collected === '' || exitState == 'completed' ? null : collected;
+}
+
+/**
+ * Caps and launch failures note themselves at the transcript's end, so the receipt
+ * explains the stop a reader can see in the manifest; a clean completion stays pure.
+ */
+function appendTranscriptNotes(
+  transcript: string,
+  exitState: TurnResult['exitState'],
+  stderr: string | null,
+) {
+  const notes: string[] = [];
+
+  if (exitState == 'cap-hit') {
+    notes.push('> wall-clock cap hit (omp --max-time)');
+  }
+
+  if (stderr !== null) {
+    notes.push(`> stderr:\n${stderr}`);
+  }
+
+  return notes.length === 0 ? transcript : `${transcript}\n\n${notes.join('\n\n')}`;
 }
 
 /**
@@ -176,13 +269,23 @@ function cappedMaxTimeMs(maxTimeMs: number) {
 }
 
 /**
- * The real pi runtime adapter. `claude` reports unavailable (issue #4 notes: the enum
- * already declares it; selection fails fast in the kernel without a type change).
- * `maxTimeMs` is the runtime-side wall-clock stop the composition root derives from the
- * flow's declared cap; availability reads the `omp` binary on PATH synchronously.
+ * The real pi runtime adapter. `claude` reports unavailable — the enum already declares
+ * it and selection fails fast in the kernel without a type change. `maxTimeMs` is the
+ * runtime-side wall-clock stop the composition root derives from the flow's declared cap;
+ * availability probes the `omp` binary synchronously, memoized per adapter instance so a
+ * single transient probe failure cannot latch the whole process into "unavailable".
  */
 export function piRuntime(input?: { readonly maxTimeMs?: number }): AgentRuntime {
   const maxTimeMs = cappedMaxTimeMs(input?.maxTimeMs ?? Number.POSITIVE_INFINITY);
+  let available: boolean | null = null;
+
+  function ompAvailable() {
+    available ??= Boolean(
+      spawnSync('omp', ['--version'], { stdio: 'ignore', timeout: 10_000 }).status == 0,
+    );
+
+    return available;
+  }
 
   return {
     available: (agent) => {
@@ -207,18 +310,4 @@ export function piRuntime(input?: { readonly maxTimeMs?: number }): AgentRuntime
         : { exitState: 'failed' as const, transcript: `omp launch failed: ${String(turn.error)}` };
     },
   };
-}
-
-/**
- * Availability check: `omp` exists as an executable on PATH. Memoized per adapter — a
- * runtime is constructed once per composition-root wiring, not per turn.
- */
-let cachedAvailable: boolean | null = null;
-
-function ompAvailable() {
-  cachedAvailable ??= Boolean(
-    spawnSync('omp', ['--version'], { stdio: 'ignore', timeout: 10_000 }).status == 0,
-  );
-
-  return cachedAvailable;
 }

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseTranscript } from './pi.ts';
+import { classifyTurn, parseTranscript } from './pi.ts';
 
 /**
- * Tests for the omp `--mode json` transcript parsing and exit-state mapping (issue #4).
- * The fixtures are recorded omp event lines — the adapter is driven by the seam, so the
- * parser's contract is tested directly instead of launching the real binary.
+ * Tests for the omp `--mode json` transcript parsing and turn classification. The fixtures
+ * are recorded omp event lines — the adapter is driven by the seam, so the parser and the
+ * stop-classifier are tested directly instead of launching the real binary.
  */
 
 /** One complete user message_end event, as omp emits for the prompt echo. */
@@ -66,5 +66,39 @@ describe('parseTranscript', () => {
     // section — only complete messages become transcript prose.
     expect(transcript).toContain('message_update');
     expect(transcript).not.toMatch(/### user[\s\S]*Hi\b/);
+  });
+});
+
+describe('classifyTurn', () => {
+  /** A capped stop: omp aborts the turn in-process when --max-time fires. */
+  const cappedStop = { stopReason: 'aborted', errorMessage: 'Deadline exceeded' };
+  const erroredStop = { stopReason: 'aborted', errorMessage: 'Model not found: x' };
+  const cleanStop = { stopReason: 'stop', errorMessage: null };
+
+  it('maps an aborted Deadline-exceeded stop to cap-hit regardless of exit code', () => {
+    expect(classifyTurn(1, [cappedStop])).toBe('cap-hit');
+    expect(classifyTurn(0, [cappedStop])).toBe('cap-hit');
+  });
+
+  it('maps a clean stop with exit 0 to completed', () => {
+    expect(classifyTurn(0, [cleanStop])).toBe('completed');
+  });
+
+  it('maps mid-turn failure (nonzero exit, no cap signal) to failed', () => {
+    expect(classifyTurn(1, [erroredStop])).toBe('failed');
+    expect(classifyTurn(1, [])).toBe('failed');
+  });
+
+  it('treats a signal kill (null exit) as failed, never cap-hit', () => {
+    expect(classifyTurn(null, [cleanStop])).toBe('failed');
+  });
+
+  it('ignores aborted stops whose error is not the deadline', () => {
+    expect(classifyTurn(1, [{ stopReason: 'aborted', errorMessage: 'Tool failed' }])).toBe(
+      'failed',
+    );
+    expect(classifyTurn(1, [{ stopReason: 'error', errorMessage: 'Deadline exceeded' }])).toBe(
+      'failed',
+    );
   });
 });
