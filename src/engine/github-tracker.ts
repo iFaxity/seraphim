@@ -53,30 +53,48 @@ function boundedCapture() {
   };
 }
 
+/**
+ * A `GhRunner` that authenticates every call with a fixed token via the `GH_TOKEN`
+ * environment variable — `gh`'s documented non-interactive auth override, tried before
+ * its login-state fallback. Same argv shape as `processGh`; the token env is the only
+ * difference.
+ */
+export function tokenGhRunner(token: string): GhRunner {
+  return {
+    run: (args) => runGh(args, { GH_TOKEN: token }),
+  };
+}
+
 /** The production runner: one `gh` CLI invocation per `run` call, full argv passthrough. */
 export const processGh: GhRunner = {
-  run: async (args) => {
-    const child = spawn('gh', [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout = boundedCapture();
-    const stderr = boundedCapture();
-
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
-    child.stderr?.on('data', (chunk) => stderr.push(chunk));
-
-    // 'error' (binary missing/unspawnable) and 'close' (normal exit) are mutually exclusive
-    // completions; whichever fires first resolves.
-    const withResolvers = Promise.withResolvers<{ exitCode: number; error?: string }>();
-    child.once('error', (error: NodeJS.ErrnoException) =>
-      withResolvers.resolve({ exitCode: CLI_NOT_FOUND, error: error.message }),
-    );
-    child.once('close', (code) => withResolvers.resolve({ exitCode: code ?? CLI_NOT_FOUND }));
-
-    const outcome = await withResolvers.promise;
-    const stderrText = stderr.text() || (outcome.error ?? '');
-
-    return { exitCode: outcome.exitCode, stdout: stdout.text(), stderr: stderrText };
-  },
+  run: async (args) => runGh(args),
 };
+
+/** Internal variant the token factory drives; `env` merges over the parent's environment. */
+async function runGh(args: readonly string[], extraEnv?: Record<string, string>): Promise<GhRun> {
+  const child = spawn('gh', [...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+  });
+  const stdout = boundedCapture();
+  const stderr = boundedCapture();
+
+  child.stdout?.on('data', (chunk) => stdout.push(chunk));
+  child.stderr?.on('data', (chunk) => stderr.push(chunk));
+
+  // 'error' (binary missing/unspawnable) and 'close' (normal exit) are mutually exclusive
+  // completions; whichever fires first resolves.
+  const withResolvers = Promise.withResolvers<{ exitCode: number; error?: string }>();
+  child.once('error', (error: NodeJS.ErrnoException) =>
+    withResolvers.resolve({ exitCode: CLI_NOT_FOUND, error: error.message }),
+  );
+  child.once('close', (code) => withResolvers.resolve({ exitCode: code ?? CLI_NOT_FOUND }));
+
+  const outcome = await withResolvers.promise;
+  const stderrText = stderr.text() || (outcome.error ?? '');
+
+  return { exitCode: outcome.exitCode, stdout: stdout.text(), stderr: stderrText };
+}
 
 /**
  * Normalizes one `gh --json` issue object into the seam's forge-agnostic `Issue`. Labels
