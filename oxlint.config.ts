@@ -33,5 +33,5 @@ export default defineConfig({
     // Promise — style
     'promise/avoid-new': 'error',
   },
-  ignorePatterns: ['node_modules', 'dist/**', '**/*.md', 'src/engine/templates/**'],
+  ignorePatterns: ['node_modules', 'dist/**', '**/*.md', 'templates/**'],
 });

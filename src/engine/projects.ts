@@ -46,13 +46,16 @@ function deriveName(url: string) {
 const SLOTS = [
   {
     name: 'flow.ts',
-    body: await readFile(new URL('./templates/flow.ts', import.meta.url), 'utf8'),
+    body: await readFile(new URL('../../templates/project/flow.ts', import.meta.url), 'utf8'),
   },
   {
     name: 'Dockerfile',
-    body: await readFile(new URL('./templates/Dockerfile', import.meta.url), 'utf8'),
+    body: await readFile(new URL('../../templates/project/Dockerfile', import.meta.url), 'utf8'),
   },
-  { name: '.env', body: await readFile(new URL('./templates/env', import.meta.url), 'utf8') },
+  {
+    name: '.env',
+    body: await readFile(new URL('../../templates/project/env', import.meta.url), 'utf8'),
+  },
 ] as const;
 
 export type Registration = {
