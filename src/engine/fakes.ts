@@ -141,7 +141,7 @@ export function fakeGit(defaultBranch = 'main') {
 
 export function fakeDeps(
   overrides?: Partial<{
-    readonly runtime: FakeRuntime;
+    readonly runtime: FakeRuntime | AgentRuntime;
     readonly tracker: FakeTracker | Tracker;
     readonly sandbox: FakeSandbox | Sandbox;
     readonly git: FakeGit | Git;
@@ -159,21 +159,24 @@ export function fakeDeps(
   const sessionsRoot = overrides?.sessionsRoot ?? '/tmp/seraphim-fake-sessions';
   const runtimeDelayMs = overrides?.runtimeDelayMs ?? 0;
 
-  // Simulated latency wraps the inner runtime's run rather than mutating it (its `run` is
-  // readonly): a fresh record-bearing object with the delayed dispatch.
+  // A real `AgentRuntime` override (e.g. the pi adapter at the composition root) passes
+  // through as-is; only the recording fake gets the simulated-latency wrap, and the
+  // returned record keeps the FakeRuntime surface so tests keep `runtime.prompts`.
+  const passthrough: FakeRuntime = { prompts: [], transcript: [], ...inner };
+  const fake = 'prompts' in inner && 'transcript' in inner ? (inner as FakeRuntime) : passthrough;
   const runtime: FakeRuntime =
     runtimeDelayMs > 0
       ? {
-          ...inner,
+          ...fake,
           run: (input) => {
             const { promise, resolve } = Promise.withResolvers<TurnResult>();
 
-            setTimeout(() => resolve(inner.run(input)), runtimeDelayMs);
+            setTimeout(() => resolve(fake.run(input)), runtimeDelayMs);
 
             return promise;
           },
         }
-      : inner;
+      : fake;
 
   return {
     deps: {

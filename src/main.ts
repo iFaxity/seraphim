@@ -8,6 +8,7 @@ import { gitAdapter, processGit } from './engine/git.ts';
 import { githubApi } from './engine/github-api.ts';
 import { ghTracker } from './engine/github-tracker.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
+import { piRuntime } from './engine/pi.ts';
 import { type Deps } from './engine/session.ts';
 import { readEnvFile } from './lib/env-file.ts';
 import { failure, success, type Result } from './lib/result.ts';
@@ -28,9 +29,11 @@ export async function main(argv: readonly string[], deps?: Deps) {
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams — the Docker sandbox,
- * the git CLI, and the GitHub tracker are real; the agent runtime remains faked until its
- * adapter ships. Tracker auth: `GH_TOKEN` from the seraphim-home `.env`.
+ * Composition root: builds the real `Deps` from the engine's seams. All four adapters are
+ * now real — the Docker sandbox, the git CLI, the GitHub tracker, and the pi/omp agent
+ * runtime. The runtime's wall-clock stop is bounded by the composition root: per-session
+ * flow caps are kernel-gated in `runSession`, so this bound only stops a runaway child
+ * omp process. Tracker auth: `GH_TOKEN` from the seraphim-home `.env`.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
@@ -42,6 +45,7 @@ function composeDeps() {
     tracker,
     sandbox: dockerSandbox({ projectsRoot, docker: cliDocker }),
     git: gitAdapter(processGit),
+    runtime: piRuntime({ maxTimeMs: 30 * 60_000 }),
     workspaceRoot: home,
     sessionsRoot: join(home, 'sessions'),
   }).deps;
