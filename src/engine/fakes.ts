@@ -1,6 +1,7 @@
 import {
   type AgentRuntime,
   type Git,
+  type Issue,
   type Sandbox,
   type Tracker,
   type TurnResult,
@@ -14,15 +15,26 @@ import {
  */
 
 export type FakeTracker = Tracker & {
-  readonly calls: { readonly claimed: readonly string[]; readonly prsOpened: readonly string[] };
+  readonly calls: {
+    readonly claimed: readonly string[];
+    readonly prsOpened: readonly string[];
+    readonly listed: readonly string[];
+  };
+  /** Seeds what `listReady` reports so tests script the queue's intake view. */
+  readonly seed: (issues: readonly (Issue & { ready?: boolean })[]) => void;
 };
 
 export function fakeTracker(): FakeTracker {
   const claimed: string[] = [];
   const prsOpened: string[] = [];
+  const listed: string[] = [];
+  let ready: readonly Issue[] = [];
 
   return {
-    calls: { claimed, prsOpened },
+    calls: { claimed, prsOpened, listed },
+    seed: (issues) => {
+      ready = issues.filter((issue) => issue.ready !== false);
+    },
     getIssue: (repo, issueNumber) =>
       Promise.resolve({
         repo,
@@ -32,6 +44,11 @@ export function fakeTracker(): FakeTracker {
         labels: ['ready-for-agent'],
         blockedBy: [],
       }),
+    listReady: (repo) => {
+      listed.push(repo);
+
+      return Promise.resolve(ready);
+    },
     claim: (issue) => {
       claimed.push(`${issue.repo}#${issue.number}`);
 
