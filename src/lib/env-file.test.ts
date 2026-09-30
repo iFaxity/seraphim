@@ -18,11 +18,19 @@ describe('parseEnvFile', () => {
     expect(parsed.size).toBe(2);
   });
 
-  it('strips an optional export prefix and trims whitespace around keys and values', () => {
-    const parsed = parseEnvFile(asFile(['export KEY=value', '  SPACED  =  spaced value  ']));
+  it('trims whitespace around keys and values, with or without a closing space', () => {
+    const parsed = parseEnvFile(asFile(['  SPACED  =  spaced value  ', 'TIGHT=tight']));
 
-    expect(parsed.get('KEY')).toBe('value');
     expect(parsed.get('SPACED')).toBe('spaced value');
+    expect(parsed.get('TIGHT')).toBe('tight');
+  });
+
+  it('does not support the shell export prefix — the key stays unparsed as written', () => {
+    const parsed = parseEnvFile(asFile(['export KEY=value']));
+
+    expect(parsed.has('KEY')).toBe(false);
+    // The line has a separator, so the raw first segment before `=` becomes the key.
+    expect(parsed.get('export KEY')).toBe('value');
   });
 
   it('unquotes single and double quoted values, honoring escapes in doubles', () => {
