@@ -1,4 +1,4 @@
-import { type Issue, type PullRequest, type Tracker } from './seams.ts';
+import { type Issue, type Tracker } from './seams.ts';
 
 /**
  * The real `Tracker` adapter over the GitHub REST API — plain `fetch`, no `gh` CLI and no
@@ -44,7 +44,7 @@ export type RestRequester = {
 };
 
 /** The production requester factory: native `fetch` with the bearer token in the header. */
-export function fetchRest(token: string): RestRequester {
+export function fetchRest(token: string) {
   return {
     request: async (call) => {
       const response = await fetch(call.url, {
@@ -68,7 +68,7 @@ export function fetchRest(token: string): RestRequester {
         nextUrl: next,
       };
     },
-  };
+  } satisfies RestRequester;
 }
 
 /**
@@ -77,7 +77,7 @@ export function fetchRest(token: string): RestRequester {
  * issue on GitHub) which carry a `pull_request` key — those are filtered at the call
  * site, so only true issues reach the kernel.
  */
-function toIssue(repo: string, raw: Record<string, unknown>): Issue {
+function toIssue(repo: string, raw: Record<string, unknown>) {
   const body = typeof raw['body'] == 'string' ? raw['body'] : '';
   const labelNames = (Array.isArray(raw['labels']) ? raw['labels'] : [])
     .filter((label): label is Record<string, unknown> => typeof label == 'object' && label != null)
@@ -135,7 +135,7 @@ function issuesUrl(repo: string, suffix = '') {
  * the list; the claim dance (label + comment) and the draft-PR create are the adapter's
  * only writes. Every URL is repo-scoped — no ambient repository context.
  */
-export function ghTracker(requester: RestRequester): Tracker {
+export function ghTracker(requester: RestRequester) {
   return {
     listReady: async (repo) => {
       const ready: Issue[] = [];
@@ -213,13 +213,12 @@ export function ghTracker(requester: RestRequester): Tracker {
       // The created PR returns its own JSON — state, number, html_url direct from the
       // forge, no URL scraping.
       const pr = JSON.parse(response.body) as Record<string, unknown>;
-      const result: PullRequest = {
+
+      return {
         url: typeof pr['html_url'] == 'string' ? pr['html_url'] : '',
         number: Number(pr['number']),
         state: 'draft' as const,
       };
-
-      return result;
     },
-  };
+  } satisfies Tracker;
 }
