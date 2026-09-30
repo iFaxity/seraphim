@@ -1,13 +1,14 @@
+import { z } from 'zod';
+
+import { API_ROOT, issuesUrl, requestJson, type RestRequester } from './rest.ts';
 import { type Issue, type Tracker } from './seams.ts';
 
 /**
- * The real `Tracker` adapter over the GitHub REST API — plain `fetch`, no `gh` CLI and no
- * SDK dependency in the kernel (ADR-0003: adapters are ingest-only and normalize to one
- * uniform format — forge specifics end here, the kernel never branches on a backend).
- * Auth is one personal-access token from the manually provisioned `~/.seraphim/.env`.
+ * The real `Tracker` adapter over the GitHub REST API (ADR-0003: adapters are ingest-only
+ * and normalize to one uniform format — forge specifics end here, the kernel never branches
+ * on a backend). The transport (`rest.ts`) JSON-validates every response at the forge
+ * boundary; the schemas below are that validation's contract.
  */
-
-const API_ROOT = 'https://api.github.com';
 
 /** Page size for issue listing — one request covers all but huge repos; paging follows. */
 const PAGE_SIZE = 100;
@@ -19,80 +20,31 @@ export const CLAIMED_LABEL = 'in-progress';
 const CLAIM_COMMENT =
   'Claimed by a seraphim session — a worktree branch is being cut for this issue.';
 
-/** One completed REST call, as the adapter branches on it. */
-export type RestResponse = {
-  readonly status: number;
-  readonly body: string;
-  /** URL to the next page when the response paginates, per the RFC 5988 `Link` header. */
-  readonly nextUrl: null | string;
-};
-
-/** One outgoing REST call: method, fully-qualified URL, JSON-able body when writing. */
-export type RestCall = {
-  readonly method: 'GET' | 'POST';
-  readonly url: string;
-  readonly body?: string;
-};
+/** The GitHub REST label object: at minimum a name; color/description aren't consumed. */
+export const GitHubLabelSchema = z.object({
+  name: z.string(),
+});
 
 /**
- * The transport surface the adapter drives. Injected so tests script responses instead of
- * hitting the network; auth is fixed at construction (token lives in the closure), so
- * tests never need to know how the bearer header is formed.
+ * The GitHub issue object, reduced to the fields the adapter consumes — plus
+ * `pull_request?: unknown`, present exactly when the entry is a PR (GitHub's issues
+ * endpoints return both): the discriminating key for `isTrueIssue`'s read filter.
  */
-export type RestRequester = {
-  readonly request: (call: RestCall) => Promise<RestResponse>;
-};
+export const GitHubIssueSchema = z.object({
+  number: z.number(),
+  title: z.string(),
+  body: z.string().nullable(),
+  labels: z.array(GitHubLabelSchema),
+  pull_request: z.unknown().optional(),
+});
 
-/** The production requester factory: native `fetch` with the bearer token in the header. */
-export function fetchRest(token: string) {
-  return {
-    request: async (call) => {
-      const response = await fetch(call.url, {
-        method: call.method,
-        headers: {
-          'Accept': 'application/vnd.github+json',
-          'Authorization': `Bearer ${token}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        body: call.method == 'POST' ? call.body : undefined,
-      });
-      // Pagination follows the RFC 5988 Link header — parsing `rel="next"` beats
-      // URL-building because the API embeds a per-request cursor (`after=`) the client
-      // must not re-derive.
-      const link = response.headers.get('link') ?? '';
-      const next = /<([^>]*)>;\s*rel="next"/.exec(link)?.[1] ?? null;
-
-      return {
-        status: response.status,
-        body: await response.text(),
-        nextUrl: next,
-      };
-    },
-  } satisfies RestRequester;
-}
-
-/**
- * Normalizes one REST issue object into the seam's forge-agnostic `Issue`. Labels come
- * back as `{ name }` objects; the issues list also contains PR entries (every PR is an
- * issue on GitHub) which carry a `pull_request` key — those are filtered at the call
- * site, so only true issues reach the kernel.
- */
-function toIssue(repo: string, raw: Record<string, unknown>) {
-  const body = typeof raw['body'] == 'string' ? raw['body'] : '';
-  const labelNames = (Array.isArray(raw['labels']) ? raw['labels'] : [])
-    .filter((label): label is Record<string, unknown> => typeof label == 'object' && label != null)
-    .map((label) => (typeof label['name'] == 'string' ? label['name'] : ''))
-    .filter(Boolean);
-
-  return {
-    repo,
-    number: Number(raw['number']),
-    title: typeof raw['title'] == 'string' ? raw['title'] : '',
-    body,
-    labels: labelNames,
-    blockedBy: blockedByFromBody(body),
-  };
-}
+/** The created-PR response, reduced to what the seam's `PullRequest` carries. Draft is
+ * checked by the schema so a non-draft create response fails validation loudly. */
+export const GitHubPullSchema = z.object({
+  number: z.number(),
+  html_url: z.string(),
+  draft: z.boolean(),
+});
 
 /**
  * `Blocked by #N` lines name their blockers ("Blocked by #1, #2"); every number on such a
@@ -110,24 +62,35 @@ function blockedByFromBody(body: string) {
   return numbers.filter((number) => Number.isInteger(number) && number > 0);
 }
 
-/** Issue list/GET bodies carry `pull_request` when the entry is a PR — GitHub quirk that the issues endpoints return both; filtered so the kernel sees only issues. */
-function isTrueIssue(raw: Record<string, unknown>) {
-  return !('pull_request' in raw);
+/**
+ * Normalizes one schema-validated GitHub issue into the seam's forge-agnostic `Issue`.
+ * The schema has handled malformed fields; this maps only, it does not guard.
+ */
+function toIssue(repo: string, raw: z.infer<typeof GitHubIssueSchema>): Issue {
+  const body = raw.body ?? '';
+
+  return {
+    repo,
+    number: raw.number,
+    title: raw.title,
+    body,
+    labels: raw.labels.map((label) => label.name),
+    blockedBy: blockedByFromBody(body),
+  };
 }
 
-function expectOk(label: string, response: RestResponse) {
-  if (response.status >= 300) {
-    const detail = response.body.trim() || `HTTP ${response.status}`;
-
-    throw new Error(`${label}: ${detail}`);
-  }
-
-  return response;
+/** GitHub's issues list (and single GET) return PR entries too; only true issues pass. */
+function isTrueIssue(raw: z.infer<typeof GitHubIssueSchema>) {
+  return raw.pull_request == null;
 }
 
-/** Composes one issues-endpoint URL with an optional suffix; repo-scoped, never ambient. */
-function issuesUrl(repo: string, suffix = '') {
-  return `${API_ROOT}/repos/${repo}/issues${suffix}`;
+/**
+ * One issues-list page as its own function: the awaited call's type is stated once here,
+ * which keeps the pagination loop's `nextUrl = page.nextUrl` assignment from feeding the
+ * await's inference back into itself (TS7022).
+ */
+function fetchIssuePage(requester: RestRequester, url: string) {
+  return requestJson(requester, z.array(GitHubIssueSchema), { method: 'GET', url });
 }
 
 /**
@@ -144,31 +107,35 @@ export function ghTracker(requester: RestRequester) {
       // Full pagination: no silent truncation. Claimed and blocked are the two skip
       // rules the "ready" contract is.
       while (nextUrl != null) {
-        const response = expectOk(
-          'issue list failed',
-          await requester.request({ method: 'GET', url: nextUrl }),
-        );
-        const batch = (JSON.parse(response.body) as Record<string, unknown>[])
-          .filter(isTrueIssue)
-          .map((raw) => toIssue(repo, raw));
+        const fetched = await fetchIssuePage(requester, nextUrl);
+
+        if (!fetched.success) {
+          throw new Error(`issue list failed: ${fetched.error.message}`);
+        }
+
+        const issues = fetched.data.filter(isTrueIssue).map((raw) => toIssue(repo, raw));
 
         ready.push(
-          ...batch.filter(
+          ...issues.filter(
             (issue) => !issue.labels.includes(CLAIMED_LABEL) && issue.blockedBy.length === 0,
           ),
         );
-        nextUrl = response.nextUrl;
+        nextUrl = fetched.nextUrl;
       }
 
       return ready;
     },
     getIssue: async (repo, issueNumber) => {
-      const response = expectOk(
-        `issue read failed (#${issueNumber})`,
-        await requester.request({ method: 'GET', url: issuesUrl(repo, `/${issueNumber}`) }),
-      );
+      const read = await requestJson(requester, GitHubIssueSchema, {
+        method: 'GET',
+        url: issuesUrl(repo, `/${issueNumber}`),
+      });
 
-      return toIssue(repo, JSON.parse(response.body) as Record<string, unknown>);
+      if (!read.success) {
+        throw new Error(`issue read failed (#${issueNumber}): ${read.error.message}`);
+      }
+
+      return toIssue(repo, read.data);
     },
     claim: async (issue) => {
       // Exclusivity: a claim attempt on an already-claimed issue refuses here, so the
@@ -178,45 +145,52 @@ export function ghTracker(requester: RestRequester) {
         throw new Error(`issue #${issue.number} already claimed (${CLAIMED_LABEL})`);
       }
 
-      const label = await requester.request({
+      const labeled = await requestJson(requester, z.unknown(), {
         method: 'POST',
         url: issuesUrl(issue.repo, `/${issue.number}/labels`),
         body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
       });
-      expectOk(`issue claim failed (#${issue.number})`, label);
 
-      const commented = await requester.request({
+      if (!labeled.success) {
+        throw new Error(`issue claim failed (#${issue.number}): ${labeled.error.message}`);
+      }
+
+      const commented = await requestJson(requester, z.unknown(), {
         method: 'POST',
         url: issuesUrl(issue.repo, `/${issue.number}/comments`),
         body: JSON.stringify({ body: CLAIM_COMMENT }),
       });
-      expectOk(`issue claim comment failed (#${issue.number})`, commented);
+
+      if (!commented.success) {
+        throw new Error(
+          `issue claim comment failed (#${issue.number}): ${commented.error.message}`,
+        );
+      }
     },
     openDraftPr: async (input) => {
       // PR creation is skill-driven inside flows; the adapter supplies only the forge
       // effect. Base stays the forge default; `Closes #N` in the body is the forge-native
       // issue link — no watcher, no extra adapter method.
-      const response = expectOk(
-        'draft PR creation failed',
-        await requester.request({
-          method: 'POST',
-          url: `${API_ROOT}/repos/${input.repo}/pulls`,
-          body: JSON.stringify({
-            title: input.title,
-            head: input.branch,
-            draft: true,
-            body: input.body,
-          }),
+      const created = await requestJson(requester, GitHubPullSchema, {
+        method: 'POST',
+        url: `${API_ROOT}/repos/${input.repo}/pulls`,
+        body: JSON.stringify({
+          title: input.title,
+          head: input.branch,
+          draft: true,
+          body: input.body,
         }),
-      );
+      });
 
-      // The created PR returns its own JSON — state, number, html_url direct from the
-      // forge, no URL scraping.
-      const pr = JSON.parse(response.body) as Record<string, unknown>;
+      if (!created.success) {
+        throw new Error(`draft PR creation failed: ${created.error.message}`);
+      }
 
+      // The created-PR response carries the forge-native URL and number directly; the
+      // schema's `draft: true` expectation was already enforced by validation.
       return {
-        url: typeof pr['html_url'] == 'string' ? pr['html_url'] : '',
-        number: Number(pr['number']),
+        url: created.data.html_url,
+        number: created.data.number,
         state: 'draft' as const,
       };
     },

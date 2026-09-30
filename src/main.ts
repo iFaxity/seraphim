@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -6,9 +5,11 @@ import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { gitAdapter, processGit } from './engine/git.ts';
-import { fetchRest, ghTracker } from './engine/github-tracker.ts';
+import { ghTracker } from './engine/github-tracker.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
+import { fetchRest } from './engine/rest.ts';
 import { type Deps } from './engine/session.ts';
+import { readEnvFile } from './lib/env-file.ts';
 import { failure, success, type Result } from './lib/result.ts';
 
 /**
@@ -27,20 +28,14 @@ export async function main(argv: readonly string[], deps?: Deps) {
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams. v1 wires real adapters
- * as they land — the Docker sandbox, the git CLI, and the GitHub tracker are in; the agent
- * runtime remains faked until its adapter ships.
- *
- * Tracker auth, manually provisioned: one `.env` file in the seraphim home holding
- * `GH_TOKEN=<personal access token>` — the REST adapter's bearer credential and the same
- * env-var name, file shape, and value the project env slots feed the sandbox. No `.env`
- * with `GH_TOKEN` means tracker calls fail fast at the REST boundary with a 401; the
- * kernel surfaces that as a session step failure.
+ * Composition root: builds the real `Deps` from the engine's seams — the Docker sandbox,
+ * the git CLI, and the GitHub tracker are real; the agent runtime remains faked until its
+ * adapter ships. Tracker auth: `GH_TOKEN` from the seraphim-home `.env`.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
-  const token = readHomeEnvToken(home);
+  const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
   const tracker = ghTracker(fetchRest(token));
 
   return fakeDeps({
@@ -50,25 +45,6 @@ function composeDeps() {
     workspaceRoot: home,
     sessionsRoot: join(home, 'sessions'),
   }).deps;
-}
-
-/**
- * Parses only the home `.env`'s `GH_TOKEN` — not a general dotenv loader: the kernel stays
- * out of the business of importing whole env files into the host process, and other keys
- * in the file are the project env slots' concern, not the tracker adapter's.
- */
-function readHomeEnvToken(home: string) {
-  const envPath = join(home, '.env');
-
-  if (!existsSync(envPath)) {
-    return '';
-  }
-
-  const lines = readFileSync(envPath, 'utf8').split('\n');
-  const tokenLine = lines.find((line) => line.startsWith('GH_TOKEN=')) ?? '';
-  const token = tokenLine.slice('GH_TOKEN='.length).trim();
-
-  return token;
 }
 
 async function render(result: Result<Outcome>) {

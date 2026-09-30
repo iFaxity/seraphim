@@ -1,12 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  CLAIMED_LABEL,
-  fetchRest,
-  ghTracker,
-  type RestCall,
-  type RestRequester,
-} from './github-tracker.ts';
+import { CLAIMED_LABEL, ghTracker } from './github-tracker.ts';
+import { fetchRest, type RestCall, type RestRequester } from './rest.ts';
 
 /** A requester that always fails with the given status/body, for error-path tests. */
 function failingRequester(status: number, body: string) {
@@ -16,7 +11,7 @@ function failingRequester(status: number, body: string) {
 
       return { status, body, nextUrl: null };
     },
-  };
+  } satisfies RestRequester;
 }
 
 type ScriptedResponse = { status: number; body?: string; headers?: Record<string, string> };
@@ -151,11 +146,27 @@ describe('ghTracker listReady', () => {
     expect(ready[0]?.blockedBy).toEqual([]);
   });
 
-  it('fails through the REST error body when the API errors', async () => {
+  it('fails with a validation error when the body is not JSON', async () => {
+    const tracker = ghTracker(failingRequester(200, '<html>not json</html>'));
+
+    await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
+      'issue read failed (#3): response was not JSON',
+    );
+  });
+
+  it('fails with a validation error when the JSON is a foreign shape', async () => {
+    const tracker = ghTracker(failingRequester(200, JSON.stringify({ unexpected: true })));
+
+    await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
+      /issue read failed \(#3\): unexpected response shape/,
+    );
+  });
+
+  it('fails naming the auth failure when the API rejects the token', async () => {
     const tracker = ghTracker(failingRequester(401, '{"message":"Bad credentials"}'));
 
     await expect(tracker.listReady('owner/repo')).rejects.toThrow(
-      'issue list failed: {"message":"Bad credentials"}',
+      'issue list failed: auth failed (HTTP 401): {"message":"Bad credentials"}',
     );
   });
 });
@@ -217,7 +228,7 @@ describe('ghTracker claim', () => {
         labels: [],
         blockedBy: [],
       }),
-    ).rejects.toThrow('issue claim failed (#5): Validation Failed');
+    ).rejects.toThrow('issue claim failed (#5): HTTP 422: Validation Failed');
     expect(requester.calls).toHaveLength(1);
   });
 });
@@ -274,7 +285,7 @@ describe('ghTracker openDraftPr', () => {
         title: 't',
         body: '',
       }),
-    ).rejects.toThrow('draft PR creation failed: head branch not found');
+    ).rejects.toThrow('draft PR creation failed: HTTP 422: head branch not found');
   });
 });
 
