@@ -6,7 +6,7 @@ import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { gitAdapter, processGit } from './engine/git.ts';
-import { ghTracker, processGh, tokenGhRunner, type GhRunner } from './engine/github-tracker.ts';
+import { fetchRest, ghTracker } from './engine/github-tracker.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
 import { type Deps } from './engine/session.ts';
 import { failure, success, type Result } from './lib/result.ts';
@@ -32,15 +32,16 @@ export async function main(argv: readonly string[], deps?: Deps) {
  * runtime remains faked until its adapter ships.
  *
  * Tracker auth, manually provisioned: one `.env` file in the seraphim home holding
- * `GH_TOKEN=<personal access token>` — the same env-var name `gh` itself honors and the
- * same file shape the project env slots already use, so the host-side tracker calls and
- * the sandbox credential path read one source. No `.env` present means `gh` falls back to
- * its own login state (keyring); the file is the override, not a requirement.
+ * `GH_TOKEN=<personal access token>` — the REST adapter's bearer credential and the same
+ * env-var name, file shape, and value the project env slots feed the sandbox. No `.env`
+ * with `GH_TOKEN` means tracker calls fail fast at the REST boundary with a 401; the
+ * kernel surfaces that as a session step failure.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
-  const tracker = ghTracker(configuredGhRunner(home));
+  const token = readHomeEnvToken(home);
+  const tracker = ghTracker(fetchRest(token));
 
   return fakeDeps({
     tracker,
@@ -49,13 +50,6 @@ function composeDeps() {
     workspaceRoot: home,
     sessionsRoot: join(home, 'sessions'),
   }).deps;
-}
-
-/** The manual `GH_TOKEN` from `~/.seraphim/.env`, as a runner authenticating with it. */
-function configuredGhRunner(home: string): GhRunner {
-  const token = readHomeEnvToken(home);
-
-  return token ? tokenGhRunner(token) : processGh;
 }
 
 /**

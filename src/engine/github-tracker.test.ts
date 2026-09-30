@@ -1,153 +1,168 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import {
-  CLAIMED_LABEL,
-  ghTracker,
-  processGh,
-  tokenGhRunner,
-  type GhRunner,
-} from './github-tracker.ts';
+import { CLAIMED_LABEL, fetchRest, ghTracker, type RestRequester } from './github-tracker.ts';
 
-/** A runner that always fails with the given stderr, so error paths need no scripting. */
-function failingRunner(stderr: string): GhRunner {
+/** A requester that always fails with the given status/body, for error-path tests. */
+function failingRequester(status: number, body: string): RestRequester {
   return {
-    run: (args) => {
-      void args;
+    request: async (call) => {
+      void call;
 
-      return Promise.resolve({ exitCode: 1, stdout: '', stderr });
+      return { status, body, nextUrl: null };
     },
   };
 }
 
-/** A runner that records argv and replays scripted responses in call order. */
-function scriptedRunner(
-  responses: { exitCode: number; stdout?: string; stderr?: string }[],
-): GhRunner & { readonly calls: readonly (readonly string[])[] } {
-  const calls: string[][] = [];
+type ScriptedResponse = { status: number; body?: string; headers?: Record<string, string> };
+
+/** A requester that records calls and replays scripted responses in call order. */
+function scriptedRequester(
+  responses: readonly ScriptedResponse[],
+): RestRequester & { readonly calls: { method: string; url: string; body?: string }[] } {
+  const calls: { method: string; url: string; body?: string }[] = [];
   let index = 0;
 
   return {
     calls,
-    run: async (args) => {
-      calls.push([...args]);
-      const response = responses[index] ?? { exitCode: 0, stdout: '' };
+    request: async (call) => {
+      calls.push({ method: call.method, url: call.url, ...(call.body ? { body: call.body } : {}) });
+      const response = responses[index] ?? { status: 200, body: 'null' };
       index += 1;
 
       return {
-        exitCode: response.exitCode,
-        stdout: response.stdout ?? '',
-        stderr: response.stderr ?? '',
+        status: response.status,
+        body: response.body ?? '',
+        nextUrl:
+          response.headers?.['link'] != null ? nextFromLink(response.headers['link'] ?? '') : null,
       };
     },
   };
 }
 
+/** Extracts the `rel="next"` URL the way the production fetch requester does. */
+function nextFromLink(link: string) {
+  return /<([^>]*)>;\s*rel="next"/.exec(link)?.[1] ?? null;
+}
+
+/** One REST issue object in the shape GitHub returns. */
+function restIssue(
+  number: number,
+  overrides?: Partial<{
+    title: string;
+    body: string;
+    labels: readonly string[];
+    pull_request: object;
+  }>,
+) {
+  return {
+    number,
+    title: overrides?.title ?? `Issue #${number}`,
+    body: overrides?.body ?? '',
+    labels: (overrides?.labels ?? []).map((name) => ({ name })),
+    ...(overrides?.pull_request ? { pull_request: overrides.pull_request } : {}),
+  };
+}
+
 describe('ghTracker listReady', () => {
-  it('returns open, unclaimed, unblocked issues as the ready set', async () => {
-    const runner = scriptedRunner([
+  it('returns open, unclaimed, unblocked true issues as the ready set', async () => {
+    const requester = scriptedRequester([
       {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          { number: 7, title: 'ready issue', body: 'do it', labels: [{ name: 'ready-for-agent' }] },
-          { number: 8, title: 'claimed issue', body: '', labels: [{ name: CLAIMED_LABEL }] },
-          {
-            number: 9,
-            title: 'blocked issue',
-            body: 'Blocked by #7',
-            labels: [{ name: 'ready-for-agent' }],
-          },
+        status: 200,
+        body: JSON.stringify([
+          restIssue(7, { labels: ['ready-for-agent'] }),
+          restIssue(8, { labels: [CLAIMED_LABEL] }),
+          restIssue(9, { body: 'Blocked by #7', labels: ['ready-for-agent'] }),
+          restIssue(21, { pull_request: { url: 'pr' } }),
         ]),
       },
     ]);
-    const tracker = ghTracker(runner);
+    const tracker = ghTracker(requester);
 
     const ready = await tracker.listReady('owner/repo');
 
     expect(ready.map((issue) => issue.number)).toEqual([7]);
-    expect(ready[0]?.title).toBe('ready issue');
+    expect(ready[0]?.title).toBe('Issue #7');
     expect(ready[0]?.blockedBy).toEqual([]);
-    expect(runner.calls[0]).toEqual([
-      'issue',
-      'list',
-      '--repo',
-      'owner/repo',
-      '--state',
-      'open',
-      '--json',
-      'number,title,body,labels',
-      '--limit',
-      '200',
-    ]);
+    expect(requester.calls[0]?.url).toBe(
+      'https://api.github.com/repos/owner/repo/issues?state=open&per_page=100',
+    );
+    expect(requester.calls[0]?.method).toBe('GET');
   });
 
-  it('skips issues blocked by any referenced number parsed from the body', async () => {
-    const runner = scriptedRunner([
+  it('follows the paging cursor until the last page has no next link', async () => {
+    const lastPageUrl = 'https://api.github.com/repositories/1/issues?after=CUR&page=2';
+    const requester = scriptedRequester([
       {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          { number: 3, title: 'multi', body: 'some text\nBlocked by #1, #2', labels: [] },
-        ]),
+        status: 200,
+        body: JSON.stringify([restIssue(1)]),
+        headers: { link: `<${lastPageUrl}>; rel="next"` },
+      },
+      { status: 200, body: JSON.stringify([restIssue(2)]) },
+    ]);
+    const tracker = ghTracker(requester);
+
+    const ready = await tracker.listReady('owner/repo');
+
+    expect(ready.map((issue) => issue.number)).toEqual([1, 2]);
+    expect(requester.calls[1]?.url).toBe(lastPageUrl);
+    expect(requester.calls).toHaveLength(2);
+  });
+
+  it('skips issues with a Blocked by line and reports the parsed blockers on getIssue', async () => {
+    const listRequester = scriptedRequester([
+      {
+        status: 200,
+        body: JSON.stringify([restIssue(3, { body: 'some text\nBlocked by #1, #2' })]),
       },
     ]);
 
-    const tracker = ghTracker(runner);
-    const ready = await tracker.listReady('owner/repo');
+    const ready = await ghTracker(listRequester).listReady('owner/repo');
 
     expect(ready).toEqual([]);
 
-    const viewRunner = scriptedRunner([
-      {
-        exitCode: 0,
-        stdout: JSON.stringify({
-          number: 3,
-          title: 'multi',
-          body: 'some text\nBlocked by #1, #2',
-          labels: [],
-        }),
-      },
+    const viewRequester = scriptedRequester([
+      { status: 200, body: JSON.stringify(restIssue(3, { body: 'some text\nBlocked by #1, #2' })) },
     ]);
-    const issue = await ghTracker(viewRunner).getIssue('owner/repo', 3);
+    const issue = await ghTracker(viewRequester).getIssue('owner/repo', 3);
 
     expect(issue.blockedBy).toEqual([1, 2]);
   });
 
   it('treats bare issue references as links, not blockers', async () => {
-    const runner = scriptedRunner([
+    const requester = scriptedRequester([
       {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          {
-            number: 20,
-            title: 'mentions but not blocked',
+        status: 200,
+        body: JSON.stringify([
+          restIssue(20, {
             body: 'Duplicate of #12, see #45 for context.\nCloses #7.',
-            labels: [],
-          },
+            title: 'mentions but not blocked',
+          }),
         ]),
       },
     ]);
 
-    const ready = await ghTracker(runner).listReady('owner/repo');
+    const ready = await ghTracker(requester).listReady('owner/repo');
 
     expect(ready.map((issue) => issue.number)).toEqual([20]);
     expect(ready[0]?.blockedBy).toEqual([]);
   });
 
-  it('fails through the gh stderr when the CLI errors', async () => {
-    const tracker = ghTracker(failingRunner('gh: auth required'));
+  it('fails through the REST error body when the API errors', async () => {
+    const tracker = ghTracker(failingRequester(401, '{"message":"Bad credentials"}'));
 
     await expect(tracker.listReady('owner/repo')).rejects.toThrow(
-      'issue list failed: gh: auth required',
+      'issue list failed: {"message":"Bad credentials"}',
     );
   });
 });
 
 describe('ghTracker claim', () => {
   it('adds the claim label and posts the claim comment', async () => {
-    const runner = scriptedRunner([{ exitCode: 0 }, { exitCode: 0 }]);
-    const tracker = ghTracker(runner);
+    const requester = scriptedRequester([
+      { status: 200, body: '[]' },
+      { status: 201, body: '{}' },
+    ]);
+    const tracker = ghTracker(requester);
 
     await tracker.claim({
       repo: 'owner/repo',
@@ -158,15 +173,19 @@ describe('ghTracker claim', () => {
       blockedBy: [],
     });
 
-    expect(runner.calls[0]?.slice(0, 3)).toEqual(['issue', 'edit', '12']);
-    expect(runner.calls[0]?.slice(-2)).toEqual(['--add-label', CLAIMED_LABEL]);
-    expect(runner.calls[1]?.slice(0, 3)).toEqual(['issue', 'comment', '12']);
-    expect(runner.calls[1]?.at(-2)).toBe('--body');
+    expect(requester.calls[0]?.url).toBe(
+      'https://api.github.com/repos/owner/repo/issues/12/labels',
+    );
+    expect(requester.calls[0]?.body).toBe(JSON.stringify({ labels: [CLAIMED_LABEL] }));
+    expect(requester.calls[1]?.url).toBe(
+      'https://api.github.com/repos/owner/repo/issues/12/comments',
+    );
+    expect(JSON.parse(requester.calls[1]?.body ?? '{}').body).toContain('Claimed by a seraphim');
   });
 
   it('refuses to claim an issue already carrying the claim label', async () => {
-    const runner = scriptedRunner([]);
-    const tracker = ghTracker(runner);
+    const requester = scriptedRequester([]);
+    const tracker = ghTracker(requester);
 
     await expect(
       tracker.claim({
@@ -178,12 +197,12 @@ describe('ghTracker claim', () => {
         blockedBy: [],
       }),
     ).rejects.toThrow('issue #9 already claimed (in-progress)');
-    expect(runner.calls).toEqual([]);
+    expect(requester.calls).toEqual([]);
   });
 
   it('aborts the comment half when labeling fails', async () => {
-    const runner = scriptedRunner([{ exitCode: 1, stderr: 'label missing' }]);
-    const tracker = ghTracker(runner);
+    const requester = scriptedRequester([{ status: 422, body: 'Validation Failed' }]);
+    const tracker = ghTracker(requester);
 
     await expect(
       tracker.claim({
@@ -194,17 +213,25 @@ describe('ghTracker claim', () => {
         labels: [],
         blockedBy: [],
       }),
-    ).rejects.toThrow('issue claim failed (#5): label missing');
-    expect(runner.calls).toHaveLength(1);
+    ).rejects.toThrow('issue claim failed (#5): Validation Failed');
+    expect(requester.calls).toHaveLength(1);
   });
 });
 
 describe('ghTracker openDraftPr', () => {
-  it('creates a draft PR and parses number plus url from the forge response', async () => {
-    const runner = scriptedRunner([
-      { exitCode: 0, stdout: 'https://github.com/owner/repo/pull/41\n' },
+  it('creates a draft PR and reads number plus url from the forge response', async () => {
+    const requester = scriptedRequester([
+      {
+        status: 201,
+        body: JSON.stringify({
+          number: 41,
+          html_url: 'https://github.com/owner/repo/pull/41',
+          state: 'open',
+          draft: true,
+        }),
+      },
     ]);
-    const tracker = ghTracker(runner);
+    const tracker = ghTracker(requester);
 
     const pr = await tracker.openDraftPr({
       repo: 'owner/repo',
@@ -226,13 +253,14 @@ describe('ghTracker openDraftPr', () => {
       number: 41,
       state: 'draft',
     });
-    expect(runner.calls[0]?.slice(0, 2)).toEqual(['pr', 'create']);
-    expect(runner.calls[0]).toContain('--draft');
-    expect(runner.calls[0]).toContain('--head');
+    expect(requester.calls[0]?.method).toBe('POST');
+    expect(requester.calls[0]?.url).toBe('https://api.github.com/repos/owner/repo/pulls');
+    expect(JSON.parse(requester.calls[0]?.body ?? '{}').draft).toBe(true);
+    expect(JSON.parse(requester.calls[0]?.body ?? '{}').head).toBe('seraphim/owner/repo/12-173');
   });
 
   it('propagates a failed create as an error naming the operation', async () => {
-    const tracker = ghTracker(failingRunner('head branch not found'));
+    const tracker = ghTracker(failingRequester(422, 'head branch not found'));
 
     await expect(
       tracker.openDraftPr({
@@ -246,34 +274,14 @@ describe('ghTracker openDraftPr', () => {
   });
 });
 
-describe('tokenGhRunner', () => {
-  it('authenticates subprocesses with GH_TOKEN in the inherited environment', async () => {
-    const runner = tokenGhRunner('gho_testtoken');
-    const run = await runner.run(['auth', 'status']);
+describe('fetchRest', () => {
+  // `fetch` to a URL with no DNS entry: the requester's promise rejects and the caller's
+  // error boundary converts it — the transport never swallows network failure.
+  it('rejects on unreachable hosts, letting the caller report the failure', async () => {
+    const requester = fetchRest('gho_dummytoken');
 
-    // A real gh with a bogus token reports the auth failure through GH_TOKEN, not the
-    // keyring — proving the env var reached the subprocess and took precedence.
-    expect(run.exitCode).not.toBe(127);
-    expect(/[Tt]oken|auth/i.test(run.stderr + run.stdout)).toBe(true);
-  });
-});
-
-describe('processGh', () => {
-  // `PATH` pointing at an empty directory: spawn fails with ENOENT and the runner must
-  // convert it into CLI_NOT_FOUND rather than crash the process on the 'error' event.
-  it('reports CLI_NOT_FOUND with the spawn error as stderr for a missing binary', async () => {
-    const emptyDir = mkdtempSync(join(tmpdir(), 'gh-missing-'));
-    const previousPath = process.env['PATH'];
-    process.env['PATH'] = emptyDir;
-
-    try {
-      const run = await processGh.run(['--version']);
-
-      expect(run.exitCode).toBe(127);
-      expect(run.stdout).toBe('');
-      expect(run.stderr).toContain('ENOENT');
-    } finally {
-      process.env['PATH'] = previousPath;
-    }
+    await expect(
+      requester.request({ method: 'GET', url: 'https://api.github.invalid/repos/o/r/issues' }),
+    ).rejects.toThrow();
   });
 });
