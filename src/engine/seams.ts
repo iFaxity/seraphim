@@ -30,9 +30,8 @@ export type PullRequest = {
  */
 export type Tracker = {
   /**
-   * Open issues the work queue may pull, already minus blocked (ADR-0003: a dumb
-   * non-agent fetch — triage judgment never reaches the agent) and minus claimed ones —
-   * the double-session guard: a claimed issue is invisible to the second fetch.
+   * Open issues ready for pickup — minus claimed (the double-session guard) and minus
+   * blocked (`Blocked by #N` lines; ADR-0003: a dumb non-agent fetch).
    */
   readonly listReady: (repo: string) => Promise<readonly Issue[]>;
   readonly getIssue: (repo: string, issueNumber: number) => Promise<Issue>;
