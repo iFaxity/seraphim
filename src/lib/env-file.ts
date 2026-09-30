@@ -1,10 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 
 /**
- * Parses one dotenv-style env file: `KEY=value` per line, `#` comments, blank lines,
- * optional `export ` prefix, optional single/double quoting on the value. The only file
- * shape this module knows; callers own locating the file and merging keys into
- * `process.env` (the kernel keeps the file's variables explicit — no bulk import).
+ * Parses one dotenv-style env file: `KEY=value` per line, whole-line and inline `#`
+ * comments, blank lines, single/double quoting on the value. The `export ` shell prefix
+ * is deliberately not supported — these files are ours, not shell scripts. Callers own
+ * locating the file and which keys they read (no bulk import into `process.env`).
  */
 export function parseEnvFile(content: string) {
   const entries = new Map<string, string>();
@@ -18,17 +18,14 @@ export function parseEnvFile(content: string) {
       continue;
     }
 
-    // Strip a leading `export ` so shell-style files parse; the variable name itself is
-    // everything before the first `=`.
-    const withoutExport = trimmed.startsWith('export ') ? trimmed.slice('export '.length) : trimmed;
-    const separator = withoutExport.indexOf('=');
+    const separator = trimmed.indexOf('=');
 
     if (separator <= 0) {
       continue;
     }
 
-    const key = withoutExport.slice(0, separator).trim();
-    const rawValue = withoutExport.slice(separator + 1).trim();
+    const key = trimmed.slice(0, separator).trim();
+    const rawValue = trimmed.slice(separator + 1).trim();
     const value = unquote(stripInlineComment(rawValue));
 
     if (key.length > 0) {
