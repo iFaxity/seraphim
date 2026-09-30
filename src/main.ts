@@ -57,7 +57,7 @@ function composeDeps() {
  * out of the business of importing whole env files into the host process, and other keys
  * in the file are the project env slots' concern, not the tracker adapter's.
  */
-function readHomeEnvToken(home: string): string {
+function readHomeEnvToken(home: string) {
   const envPath = join(home, '.env');
 
   if (!existsSync(envPath)) {

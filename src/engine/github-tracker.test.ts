@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
-import { CLAIMED_LABEL, fetchRest, ghTracker, type RestRequester } from './github-tracker.ts';
+import {
+  CLAIMED_LABEL,
+  fetchRest,
+  ghTracker,
+  type RestCall,
+  type RestRequester,
+} from './github-tracker.ts';
 
 /** A requester that always fails with the given status/body, for error-path tests. */
-function failingRequester(status: number, body: string): RestRequester {
+function failingRequester(status: number, body: string) {
   return {
-    request: async (call) => {
+    request: async (call: RestCall) => {
       void call;
 
       return { status, body, nextUrl: null };
@@ -16,9 +22,7 @@ function failingRequester(status: number, body: string): RestRequester {
 type ScriptedResponse = { status: number; body?: string; headers?: Record<string, string> };
 
 /** A requester that records calls and replays scripted responses in call order. */
-function scriptedRequester(
-  responses: readonly ScriptedResponse[],
-): RestRequester & { readonly calls: { method: string; url: string; body?: string }[] } {
+function scriptedRequester(responses: readonly ScriptedResponse[]) {
   const calls: { method: string; url: string; body?: string }[] = [];
   let index = 0;
 
@@ -36,7 +40,7 @@ function scriptedRequester(
           response.headers?.['link'] != null ? nextFromLink(response.headers['link'] ?? '') : null,
       };
     },
-  };
+  } satisfies RestRequester & { readonly calls: typeof calls };
 }
 
 /** Extracts the `rel="next"` URL the way the production fetch requester does. */
