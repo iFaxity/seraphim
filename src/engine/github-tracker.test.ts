@@ -1,44 +1,68 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
-import { githubApi } from './github-api.ts';
+import { githubApi, type GithubClient } from './github-api.ts';
 import { CLAIMED_LABEL, ghTracker } from './github-tracker.ts';
-import { type HttpCall, type HttpTransport } from './http.ts';
 
-/** A transport that always replies with the given status/body, for error-path tests. */
-function failingTransport(status: number, body: string) {
-  return {
-    request: async (call: HttpCall) => {
-      void call;
+import { failure, success } from '../lib/result.ts';
 
-      return new Response(body, { status });
-    },
-  } satisfies HttpTransport;
+/** A scripted client outcome: a forge reply, or a thrown transport error. */
+type ScriptedOutcome =
+  | { readonly status: number; readonly body: string; readonly headers?: Record<string, string> }
+  | Error;
+
+/** A client that always fails, for error-path tests. */
+function failingClient(error: Error) {
+  return { json: async () => failure(error) } satisfies GithubClient;
 }
 
-type ScriptedResponse = { status: number; body?: string; headers?: Record<string, string> };
-
-/** A transport that records calls and replays scripted responses in call order. */
-function scriptedTransport(responses: readonly ScriptedResponse[]) {
+/** A client that records calls and replays scripted outcomes in call order. */
+function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
   const calls: { method: string; url: string; body?: string }[] = [];
   let index = 0;
 
   return {
     calls,
-    request: async (call) => {
+    json: async (schema, call) => {
       calls.push({
         method: call.method,
         url: call.url,
         ...('body' in call ? { body: call.body } : {}),
       });
-      const response = responses[index] ?? { status: 200, body: 'null' };
+      const outcome = outcomes[index] ?? { status: 200, body: 'null' };
       index += 1;
 
-      return new Response(response.body ?? '', {
-        status: response.status,
-        headers: response.headers,
+      if (outcome instanceof Error) {
+        return failure(outcome);
+      }
+
+      // The real client gates statuses before schema validation; mirror that here so the
+      // adapter sees the same failures the forge path produces.
+      if (outcome.status >= 300) {
+        return failure(new Error(`HTTP ${outcome.status}: ${outcome.body.trim()}`));
+      }
+
+      let parsed: unknown;
+
+      try {
+        parsed = JSON.parse(outcome.body);
+      } catch (ex) {
+        return failure(new Error(`response was not JSON: ${String(ex)}`));
+      }
+
+      const validated = schema.safeParse(parsed);
+
+      if (!validated.success) {
+        return failure(new Error(`unexpected response shape: ${validated.error.message}`));
+      }
+
+      return success({
+        status: outcome.status,
+        data: validated.data,
+        headers: new Headers(outcome.headers),
       });
     },
-  } satisfies HttpTransport & { readonly calls: typeof calls };
+  } satisfies GithubClient & { readonly calls: typeof calls };
 }
 
 /** One REST issue object in the shape GitHub returns. */
@@ -62,7 +86,7 @@ function restIssue(
 
 describe('ghTracker listReady', () => {
   it('returns open, unclaimed, unblocked true issues as the ready set', async () => {
-    const requester = scriptedTransport([
+    const requester = scriptedClient([
       {
         status: 200,
         body: JSON.stringify([
@@ -88,7 +112,7 @@ describe('ghTracker listReady', () => {
 
   it('follows the paging cursor until the last page has no next link', async () => {
     const lastPageUrl = 'https://api.github.com/repositories/1/issues?after=CUR&page=2';
-    const requester = scriptedTransport([
+    const requester = scriptedClient([
       {
         status: 200,
         body: JSON.stringify([restIssue(1)]),
@@ -106,7 +130,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('skips issues with a Blocked by line and reports the parsed blockers on getIssue', async () => {
-    const listRequester = scriptedTransport([
+    const listRequester = scriptedClient([
       {
         status: 200,
         body: JSON.stringify([restIssue(3, { body: 'some text\nBlocked by #1, #2' })]),
@@ -117,7 +141,7 @@ describe('ghTracker listReady', () => {
 
     expect(ready).toEqual([]);
 
-    const viewRequester = scriptedTransport([
+    const viewRequester = scriptedClient([
       { status: 200, body: JSON.stringify(restIssue(3, { body: 'some text\nBlocked by #1, #2' })) },
     ]);
     const issue = await ghTracker(viewRequester).getIssue('owner/repo', 3);
@@ -126,7 +150,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('treats bare issue references as links, not blockers', async () => {
-    const requester = scriptedTransport([
+    const requester = scriptedClient([
       {
         status: 200,
         body: JSON.stringify([
@@ -145,7 +169,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('fails with a validation error when the body is not JSON', async () => {
-    const tracker = ghTracker(failingTransport(200, '<html>not json</html>'));
+    const tracker = ghTracker(failingClient(new Error('response was not JSON: unexpected token')));
 
     await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
       'issue read failed (#3): response was not JSON',
@@ -153,7 +177,9 @@ describe('ghTracker listReady', () => {
   });
 
   it('fails with a validation error when the JSON is a foreign shape', async () => {
-    const tracker = ghTracker(failingTransport(200, JSON.stringify({ unexpected: true })));
+    const tracker = ghTracker(
+      failingClient(new Error('unexpected response shape: missing "number"')),
+    );
 
     await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
       /issue read failed \(#3\): unexpected response shape/,
@@ -161,7 +187,9 @@ describe('ghTracker listReady', () => {
   });
 
   it('fails naming the auth failure when the API rejects the token', async () => {
-    const tracker = ghTracker(failingTransport(401, '{"message":"Bad credentials"}'));
+    const tracker = ghTracker(
+      failingClient(new Error('auth failed (HTTP 401): {"message":"Bad credentials"}')),
+    );
 
     await expect(tracker.listReady('owner/repo')).rejects.toThrow(
       'issue list failed: auth failed (HTTP 401): {"message":"Bad credentials"}',
@@ -171,7 +199,7 @@ describe('ghTracker listReady', () => {
 
 describe('ghTracker claim', () => {
   it('adds the claim label and posts the claim comment', async () => {
-    const requester = scriptedTransport([
+    const requester = scriptedClient([
       { status: 200, body: '[]' },
       { status: 201, body: '{}' },
     ]);
@@ -197,7 +225,7 @@ describe('ghTracker claim', () => {
   });
 
   it('refuses to claim an issue already carrying the claim label', async () => {
-    const requester = scriptedTransport([]);
+    const requester = scriptedClient([]);
     const tracker = ghTracker(requester);
 
     await expect(
@@ -214,7 +242,7 @@ describe('ghTracker claim', () => {
   });
 
   it('aborts the comment half when labeling fails', async () => {
-    const requester = scriptedTransport([{ status: 422, body: '{"message":"Validation Failed"}' }]);
+    const requester = scriptedClient([{ status: 422, body: '{"message":"Validation Failed"}' }]);
     const tracker = ghTracker(requester);
 
     await expect(
@@ -233,7 +261,7 @@ describe('ghTracker claim', () => {
 
 describe('ghTracker openDraftPr', () => {
   it('creates a draft PR and reads number plus url from the forge response', async () => {
-    const requester = scriptedTransport([
+    const requester = scriptedClient([
       {
         status: 201,
         body: JSON.stringify({
@@ -273,7 +301,9 @@ describe('ghTracker openDraftPr', () => {
   });
 
   it('propagates a failed create as an error naming the operation', async () => {
-    const tracker = ghTracker(failingTransport(422, '{"message":"head branch not found"}'));
+    const tracker = ghTracker(
+      failingClient(new Error('HTTP 422: {"message":"head branch not found"}')),
+    );
 
     await expect(
       tracker.openDraftPr({
@@ -288,14 +318,21 @@ describe('ghTracker openDraftPr', () => {
 });
 
 describe('githubApi', () => {
-  // `fetch` to a URL with no DNS entry: the transport's promise rejects and the caller's
-  // error boundary converts it — the transport never swallows network failure.
-  it('rejects on unreachable hosts, letting the caller report the failure', async () => {
-    const transport = githubApi('gho_dummytoken');
+  // `fetch` to a URL with no DNS entry: the helper's promise rejects and the client wraps
+  // it as a `request failed` Result — the client never lets a network error escape raw.
+  it('maps unreachable hosts into a request-failed Result', async () => {
+    const client = githubApi('gho_dummytoken');
 
-    await expect(
-      transport.request({ method: 'GET', url: 'https://api.github.invalid/repos/o/r/issues' }),
-    ).rejects.toThrow();
+    const outcome = await client.json(z.unknown(), {
+      method: 'GET',
+      url: 'https://api.github.invalid/repos/o/r/issues',
+    });
+
+    expect(outcome.success).toBe(false);
+
+    if (!outcome.success) {
+      expect(outcome.error.message).toMatch(/^request failed: /);
+    }
   });
 
   it('sends the bearer token, GitHub headers, and a body only for writes', async () => {
@@ -314,10 +351,11 @@ describe('githubApi', () => {
       return new Response('{}', { status: 200 });
     };
     try {
-      const transport = githubApi('gho_dummytoken');
+      const client = githubApi('gho_dummytoken');
+      const schema = z.object({});
 
-      await transport.request({ method: 'GET', url: 'https://api.test/repos/o/r/issues' });
-      await transport.request({
+      await client.json(schema, { method: 'GET', url: 'https://api.test/repos/o/r/issues' });
+      await client.json(schema, {
         method: 'POST',
         url: 'https://api.test/repos/o/r/labels',
         body: '{"labels":["x"]}',

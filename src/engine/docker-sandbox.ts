@@ -46,7 +46,7 @@ const MAX_STREAM_BYTES = 10 * 1024 * 1024;
  * must exist on disk (it becomes the bind-mount source). The runner passes argv as an array
  * to `spawn` without a shell, so no element can inject a second command.
  */
-export function dockerSandbox(options: DockerSandboxOptions): Sandbox {
+export function dockerSandbox(options: DockerSandboxOptions) {
   const { projectsRoot, docker } = options;
 
   return {
@@ -157,7 +157,7 @@ export function dockerSandbox(options: DockerSandboxOptions): Sandbox {
         stderr: run.stderr,
       };
     },
-  };
+  } satisfies Sandbox;
 }
 
 /** Repo names compose asset paths and image tags — anything path-shaped is a caller bug. */

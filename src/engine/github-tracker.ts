@@ -1,13 +1,12 @@
 import { z } from 'zod';
 
-import { API_ROOT, issuesUrl, nextLink } from './github-api.ts';
-import { requestJson, type HttpTransport } from './http.ts';
+import { API_ROOT, issuesUrl, nextLink, type GithubClient } from './github-api.ts';
 import { type Issue, type Tracker } from './seams.ts';
 
 /**
  * The real `Tracker` adapter over the GitHub REST API (ADR-0003: adapters are ingest-only
  * and normalize to one uniform format — forge specifics end here, the kernel never branches
- * on a backend). Responses are JSON-validated at the forge boundary (`http.ts`); the
+ * on a backend). Responses are JSON-validated at the forge boundary (`github-api.ts`); the
  * schemas below are that validation's contract.
  */
 
@@ -67,7 +66,7 @@ function blockedByFromBody(body: string) {
  * Normalizes one schema-validated GitHub issue into the seam's forge-agnostic `Issue`.
  * The schema has handled malformed fields; this maps only, it does not guard.
  */
-function toIssue(repo: string, raw: z.infer<typeof GitHubIssueSchema>): Issue {
+function toIssue(repo: string, raw: z.infer<typeof GitHubIssueSchema>) {
   const body = raw.body ?? '';
 
   return {
@@ -87,11 +86,11 @@ function isTrueIssue(raw: z.infer<typeof GitHubIssueSchema>) {
 
 /**
  * One issues-list page: its own function so the awaited call's type is stated once, which
- * keeps the pagination loop's `nextUrl = page.nextUrl` assignment from feeding the await's
- * inference back into itself (TS7022).
+ * keeps the pagination loop's `nextUrl = nextLink(page.headers)` assignment from feeding
+ * the await's inference back into itself (TS7022).
  */
-function fetchIssuePage(transport: HttpTransport, url: string) {
-  return requestJson(transport, z.array(GitHubIssueSchema), { method: 'GET', url });
+function fetchIssuePage(client: GithubClient, url: string) {
+  return client.json(z.array(GitHubIssueSchema), { method: 'GET', url });
 }
 
 /**
@@ -99,7 +98,7 @@ function fetchIssuePage(transport: HttpTransport, url: string) {
  * the list; the claim dance (label + comment) and the draft-PR create are the adapter's
  * only writes. Every URL is repo-scoped — no ambient repository context.
  */
-export function ghTracker(transport: HttpTransport) {
+export function ghTracker(client: GithubClient) {
   return {
     listReady: async (repo) => {
       const ready: Issue[] = [];
@@ -108,7 +107,7 @@ export function ghTracker(transport: HttpTransport) {
       // Full pagination: no silent truncation. Claimed and blocked are the two skip
       // rules the "ready" contract is.
       while (nextUrl != null) {
-        const fetched = await fetchIssuePage(transport, nextUrl);
+        const fetched = await fetchIssuePage(client, nextUrl);
 
         if (!fetched.success) {
           throw new Error(`issue list failed: ${fetched.error.message}`);
@@ -128,7 +127,7 @@ export function ghTracker(transport: HttpTransport) {
       return ready;
     },
     getIssue: async (repo, issueNumber) => {
-      const read = await requestJson(transport, GitHubIssueSchema, {
+      const read = await client.json(GitHubIssueSchema, {
         method: 'GET',
         url: issuesUrl(repo, `/${issueNumber}`),
       });
@@ -147,7 +146,7 @@ export function ghTracker(transport: HttpTransport) {
         throw new Error(`issue #${issue.number} already claimed (${CLAIMED_LABEL})`);
       }
 
-      const labeled = await requestJson(transport, z.unknown(), {
+      const labeled = await client.json(z.unknown(), {
         method: 'POST',
         url: issuesUrl(issue.repo, `/${issue.number}/labels`),
         body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
@@ -157,7 +156,7 @@ export function ghTracker(transport: HttpTransport) {
         throw new Error(`issue claim failed (#${issue.number}): ${labeled.error.message}`);
       }
 
-      const commented = await requestJson(transport, z.unknown(), {
+      const commented = await client.json(z.unknown(), {
         method: 'POST',
         url: issuesUrl(issue.repo, `/${issue.number}/comments`),
         body: JSON.stringify({ body: CLAIM_COMMENT }),
@@ -173,7 +172,7 @@ export function ghTracker(transport: HttpTransport) {
       // PR creation is skill-driven inside flows; the adapter supplies only the forge
       // effect. Base stays the forge default; `Closes #N` in the body is the forge-native
       // issue link — no watcher, no extra adapter method.
-      const created = await requestJson(transport, GitHubPullSchema, {
+      const created = await client.json(GitHubPullSchema, {
         method: 'POST',
         url: `${API_ROOT}/repos/${input.repo}/pulls`,
         body: JSON.stringify({

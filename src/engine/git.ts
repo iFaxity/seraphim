@@ -65,13 +65,13 @@ function boundedCapture() {
   };
 }
 
-function gitFailure(label: string, run: GitRun): Error {
+function gitFailure(label: string, run: GitRun) {
   const detail = run.stderr.trim() || run.stdout.trim() || `git exited ${run.exitCode}`;
 
   return new Error(`${label}: ${detail}`);
 }
 
-export function expectOk(label: string, run: GitRun): GitRun {
+export function expectOk(label: string, run: GitRun) {
   if (run.exitCode != 0) {
     throw gitFailure(label, run);
   }
@@ -83,7 +83,7 @@ export function expectOk(label: string, run: GitRun): GitRun {
  * Real `Git` adapter. Every operation maps one git invocation to `void` (the receipt-visible
  * state is the filesystem, not git's stdout) except `defaultBranch`, which reads `origin/HEAD`.
  */
-export function gitAdapter(runner: GitRunner): Git {
+export function gitAdapter(runner: GitRunner) {
   return {
     defaultBranch: async (repoPath) => {
       // `--short` yields `origin/<branch>`; the seam's contract is the branch name (the fake
@@ -129,5 +129,5 @@ export function gitAdapter(runner: GitRunner): Git {
       const run = await runner.run(['ls-remote', '--heads', url]);
       expectOk('remote not reachable', run);
     },
-  };
+  } satisfies Git;
 }
