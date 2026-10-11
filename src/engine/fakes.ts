@@ -24,7 +24,7 @@ export type FakeTracker = Tracker & {
   readonly seed: (ready: readonly Issue[]) => void;
 };
 
-export function fakeTracker(): FakeTracker {
+export function fakeTracker() {
   const claimed: string[] = [];
   const prsOpened: string[] = [];
   const listed: string[] = [];
@@ -63,7 +63,7 @@ export function fakeTracker(): FakeTracker {
         state: 'draft' as const,
       });
     },
-  };
+  } satisfies FakeTracker;
 }
 
 export type FakeRuntime = AgentRuntime & {
@@ -71,9 +71,7 @@ export type FakeRuntime = AgentRuntime & {
   readonly transcript: readonly string[];
 };
 
-export function fakeRuntime(
-  exitState: 'completed' | 'failed' | 'cap-hit' = 'completed',
-): FakeRuntime {
+export function fakeRuntime(exitState: 'completed' | 'failed' | 'cap-hit' = 'completed') {
   const prompts: string[] = [];
   const transcript: string[] = [];
 
@@ -89,14 +87,14 @@ export function fakeRuntime(
 
       return Promise.resolve({ exitState, transcript: `transcript of: ${input.prompt}` });
     },
-  };
+  } satisfies FakeRuntime;
 }
 
 export type FakeSandbox = Sandbox & {
   readonly executed: readonly string[];
 };
 
-export function fakeSandbox(): FakeSandbox {
+export function fakeSandbox() {
   const executed: string[] = [];
   return {
     executed,
@@ -106,7 +104,7 @@ export function fakeSandbox(): FakeSandbox {
 
       return Promise.resolve({ command: input.command, exitCode: 0, stdout: '', stderr: '' });
     },
-  };
+  } satisfies FakeSandbox;
 }
 
 export type FakeGit = Git & {
@@ -118,7 +116,7 @@ export type FakeGit = Git & {
   }[];
 };
 
-export function fakeGit(defaultBranch = 'main'): FakeGit {
+export function fakeGit(defaultBranch = 'main') {
   const clones: FakeGit['clones'] = [];
   const worktrees: FakeGit['worktrees'] = [];
 
@@ -138,7 +136,7 @@ export function fakeGit(defaultBranch = 'main'): FakeGit {
       return Promise.resolve();
     },
     probeRemote: () => Promise.resolve(),
-  };
+  } satisfies FakeGit;
 }
 
 export function fakeDeps(
