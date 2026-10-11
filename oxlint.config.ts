@@ -16,6 +16,17 @@ export default defineConfig({
     'import/no-duplicates': 'error',
     'import/consistent-type-specifier-style': ['warn', 'prefer-inline'],
     // TypeScript — correctness
+    'typescript/no-restricted-types': [
+      'error',
+      {
+        types: {
+          // Contracts are named at the owning module (see ts-no-return-type rule); opaque
+          // ReturnType<typeof fn> coupling is never wanted.
+          ReturnType: 'Name the type at the module that owns the value instead.',
+          InstanceType: 'Name the type at the module that owns the value instead.',
+        },
+      },
+    ],
     'typescript/no-require-imports': 'error',
     'typescript/no-explicit-any': 'error',
     'typescript/no-confusing-non-null-assertion': 'error',
