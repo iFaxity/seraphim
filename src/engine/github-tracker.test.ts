@@ -1,46 +1,44 @@
 import { describe, expect, it } from 'vitest';
 
+import { githubApi } from './github-api.ts';
 import { CLAIMED_LABEL, ghTracker } from './github-tracker.ts';
-import { fetchRest, type RestCall, type RestRequester } from './rest.ts';
+import { type HttpCall, type HttpTransport } from './http.ts';
 
-/** A requester that always fails with the given status/body, for error-path tests. */
-function failingRequester(status: number, body: string) {
+/** A transport that always replies with the given status/body, for error-path tests. */
+function failingTransport(status: number, body: string) {
   return {
-    request: async (call: RestCall) => {
+    request: async (call: HttpCall) => {
       void call;
 
-      return { status, body, nextUrl: null };
+      return new Response(body, { status });
     },
-  } satisfies RestRequester;
+  } satisfies HttpTransport;
 }
 
 type ScriptedResponse = { status: number; body?: string; headers?: Record<string, string> };
 
-/** A requester that records calls and replays scripted responses in call order. */
-function scriptedRequester(responses: readonly ScriptedResponse[]) {
+/** A transport that records calls and replays scripted responses in call order. */
+function scriptedTransport(responses: readonly ScriptedResponse[]) {
   const calls: { method: string; url: string; body?: string }[] = [];
   let index = 0;
 
   return {
     calls,
     request: async (call) => {
-      calls.push({ method: call.method, url: call.url, ...(call.body ? { body: call.body } : {}) });
+      calls.push({
+        method: call.method,
+        url: call.url,
+        ...('body' in call ? { body: call.body } : {}),
+      });
       const response = responses[index] ?? { status: 200, body: 'null' };
       index += 1;
 
-      return {
+      return new Response(response.body ?? '', {
         status: response.status,
-        body: response.body ?? '',
-        nextUrl:
-          response.headers?.['link'] != null ? nextFromLink(response.headers['link'] ?? '') : null,
-      };
+        headers: response.headers,
+      });
     },
-  } satisfies RestRequester & { readonly calls: typeof calls };
-}
-
-/** Extracts the `rel="next"` URL the way the production fetch requester does. */
-function nextFromLink(link: string) {
-  return /<([^>]*)>;\s*rel="next"/.exec(link)?.[1] ?? null;
+  } satisfies HttpTransport & { readonly calls: typeof calls };
 }
 
 /** One REST issue object in the shape GitHub returns. */
@@ -64,7 +62,7 @@ function restIssue(
 
 describe('ghTracker listReady', () => {
   it('returns open, unclaimed, unblocked true issues as the ready set', async () => {
-    const requester = scriptedRequester([
+    const requester = scriptedTransport([
       {
         status: 200,
         body: JSON.stringify([
@@ -90,7 +88,7 @@ describe('ghTracker listReady', () => {
 
   it('follows the paging cursor until the last page has no next link', async () => {
     const lastPageUrl = 'https://api.github.com/repositories/1/issues?after=CUR&page=2';
-    const requester = scriptedRequester([
+    const requester = scriptedTransport([
       {
         status: 200,
         body: JSON.stringify([restIssue(1)]),
@@ -108,7 +106,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('skips issues with a Blocked by line and reports the parsed blockers on getIssue', async () => {
-    const listRequester = scriptedRequester([
+    const listRequester = scriptedTransport([
       {
         status: 200,
         body: JSON.stringify([restIssue(3, { body: 'some text\nBlocked by #1, #2' })]),
@@ -119,7 +117,7 @@ describe('ghTracker listReady', () => {
 
     expect(ready).toEqual([]);
 
-    const viewRequester = scriptedRequester([
+    const viewRequester = scriptedTransport([
       { status: 200, body: JSON.stringify(restIssue(3, { body: 'some text\nBlocked by #1, #2' })) },
     ]);
     const issue = await ghTracker(viewRequester).getIssue('owner/repo', 3);
@@ -128,7 +126,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('treats bare issue references as links, not blockers', async () => {
-    const requester = scriptedRequester([
+    const requester = scriptedTransport([
       {
         status: 200,
         body: JSON.stringify([
@@ -147,7 +145,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('fails with a validation error when the body is not JSON', async () => {
-    const tracker = ghTracker(failingRequester(200, '<html>not json</html>'));
+    const tracker = ghTracker(failingTransport(200, '<html>not json</html>'));
 
     await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
       'issue read failed (#3): response was not JSON',
@@ -155,7 +153,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('fails with a validation error when the JSON is a foreign shape', async () => {
-    const tracker = ghTracker(failingRequester(200, JSON.stringify({ unexpected: true })));
+    const tracker = ghTracker(failingTransport(200, JSON.stringify({ unexpected: true })));
 
     await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
       /issue read failed \(#3\): unexpected response shape/,
@@ -163,7 +161,7 @@ describe('ghTracker listReady', () => {
   });
 
   it('fails naming the auth failure when the API rejects the token', async () => {
-    const tracker = ghTracker(failingRequester(401, '{"message":"Bad credentials"}'));
+    const tracker = ghTracker(failingTransport(401, '{"message":"Bad credentials"}'));
 
     await expect(tracker.listReady('owner/repo')).rejects.toThrow(
       'issue list failed: auth failed (HTTP 401): {"message":"Bad credentials"}',
@@ -173,7 +171,7 @@ describe('ghTracker listReady', () => {
 
 describe('ghTracker claim', () => {
   it('adds the claim label and posts the claim comment', async () => {
-    const requester = scriptedRequester([
+    const requester = scriptedTransport([
       { status: 200, body: '[]' },
       { status: 201, body: '{}' },
     ]);
@@ -199,7 +197,7 @@ describe('ghTracker claim', () => {
   });
 
   it('refuses to claim an issue already carrying the claim label', async () => {
-    const requester = scriptedRequester([]);
+    const requester = scriptedTransport([]);
     const tracker = ghTracker(requester);
 
     await expect(
@@ -216,7 +214,7 @@ describe('ghTracker claim', () => {
   });
 
   it('aborts the comment half when labeling fails', async () => {
-    const requester = scriptedRequester([{ status: 422, body: 'Validation Failed' }]);
+    const requester = scriptedTransport([{ status: 422, body: '{"message":"Validation Failed"}' }]);
     const tracker = ghTracker(requester);
 
     await expect(
@@ -228,14 +226,14 @@ describe('ghTracker claim', () => {
         labels: [],
         blockedBy: [],
       }),
-    ).rejects.toThrow('issue claim failed (#5): HTTP 422: Validation Failed');
+    ).rejects.toThrow('issue claim failed (#5): HTTP 422: {"message":"Validation Failed"}');
     expect(requester.calls).toHaveLength(1);
   });
 });
 
 describe('ghTracker openDraftPr', () => {
   it('creates a draft PR and reads number plus url from the forge response', async () => {
-    const requester = scriptedRequester([
+    const requester = scriptedTransport([
       {
         status: 201,
         body: JSON.stringify({
@@ -275,7 +273,7 @@ describe('ghTracker openDraftPr', () => {
   });
 
   it('propagates a failed create as an error naming the operation', async () => {
-    const tracker = ghTracker(failingRequester(422, 'head branch not found'));
+    const tracker = ghTracker(failingTransport(422, '{"message":"head branch not found"}'));
 
     await expect(
       tracker.openDraftPr({
@@ -285,18 +283,53 @@ describe('ghTracker openDraftPr', () => {
         title: 't',
         body: '',
       }),
-    ).rejects.toThrow('draft PR creation failed: HTTP 422: head branch not found');
+    ).rejects.toThrow('draft PR creation failed: HTTP 422: {"message":"head branch not found"}');
   });
 });
 
-describe('fetchRest', () => {
-  // `fetch` to a URL with no DNS entry: the requester's promise rejects and the caller's
+describe('githubApi', () => {
+  // `fetch` to a URL with no DNS entry: the transport's promise rejects and the caller's
   // error boundary converts it — the transport never swallows network failure.
   it('rejects on unreachable hosts, letting the caller report the failure', async () => {
-    const requester = fetchRest('gho_dummytoken');
+    const transport = githubApi('gho_dummytoken');
 
     await expect(
-      requester.request({ method: 'GET', url: 'https://api.github.invalid/repos/o/r/issues' }),
+      transport.request({ method: 'GET', url: 'https://api.github.invalid/repos/o/r/issues' }),
     ).rejects.toThrow();
+  });
+
+  it('sends the bearer token, GitHub headers, and a body only for writes', async () => {
+    const calls: { method: string; headers: Headers; body: null | string }[] = [];
+    const realFetch = globalThis.fetch;
+
+    globalThis.fetch = async (_input, init) => {
+      const body = typeof init?.body == 'string' ? init.body : null;
+
+      calls.push({
+        method: init?.method ?? 'GET',
+        headers: new Headers(init?.headers),
+        body,
+      });
+
+      return new Response('{}', { status: 200 });
+    };
+    try {
+      const transport = githubApi('gho_dummytoken');
+
+      await transport.request({ method: 'GET', url: 'https://api.test/repos/o/r/issues' });
+      await transport.request({
+        method: 'POST',
+        url: 'https://api.test/repos/o/r/labels',
+        body: '{"labels":["x"]}',
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    expect(calls[0]?.headers.get('Authorization')).toBe('Bearer gho_dummytoken');
+    expect(calls[0]?.headers.get('Accept')).toBe('application/vnd.github+json');
+    expect(calls[0]?.headers.get('X-GitHub-Api-Version')).toBe('2022-11-28');
+    expect(calls[0]?.body).toBe(null);
+    expect(calls[1]?.body).toBe('{"labels":["x"]}');
   });
 });
