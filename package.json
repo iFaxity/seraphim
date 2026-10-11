@@ -8,6 +8,7 @@
   },
   "type": "module",
   "scripts": {
+    "check": "pnpm typecheck && pnpm lint && pnpm format-check && pnpm test",
     "commit": "commitlint --config commitlint.config.ts",
     "dev": "node bin/seraphim.js",
     "format": "oxfmt --config oxfmt.config.ts .",
