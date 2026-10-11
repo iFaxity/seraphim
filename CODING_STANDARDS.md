@@ -30,6 +30,10 @@ can't.
 - Expected failure the caller branches on → `Result`/`tryCatch` (`src/lib/result.ts`). Throw
   an `Error` subclass only for unexpected/propagating failure; `tryCatch` at the boundary
   converts it back into a `Result`.
+- Review check: a new discriminated type or helper shaped like a `Result` (`success: true`/
+  `success: false` arms, custom success/failure factories) is a finding — point it at
+  `src/lib/result.ts` (`Result`, `Success`, `Failure`, `success()`, `failure()`,
+  `tryCatch`) instead of reinventing it locally.
 
 ## Time
 
