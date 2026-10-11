@@ -16,19 +16,18 @@ export type HttpTransport = {
   readonly request: (call: HttpCall) => Promise<Response>;
 };
 
-/** A schema-checked success payload: HTTP status, validated data, and pagination cursor. */
+/** A schema-checked success payload: HTTP status, validated data, and response headers. */
 export type JsonPayload<T> = {
   readonly status: number;
   readonly data: T;
-  /** URL of the next page when the response paginates (RFC 5988 `Link`), else null. */
-  readonly nextUrl: null | string;
+  /** The response's headers, for the caller to interpret (e.g. `Link` pagination). */
+  readonly headers: Headers;
 };
 
 /**
  * One HTTP call as a `Result`: status gating (401/403 auth, 429 rate limit, 5xx forge
- * unavailable, other non-2xx), then `response.json()`, then the caller's schema. The next
- * URL rides the success payload — extraction happens here, after the body is read, since
- * only paginating calls carry a `Link` header.
+ * unavailable, other non-2xx), then `response.json()`, then the caller's schema. Headers
+ * pass through untouched — header semantics (pagination, rate limits) belong to the caller.
  */
 export async function requestJson<T>(
   transport: HttpTransport,
@@ -74,26 +73,5 @@ export async function requestJson<T>(
     return failure(new Error(`unexpected response shape: ${validated.error.message}`));
   }
 
-  return success({ status: response.status, data: validated.data, nextUrl: linkNext(response) });
-}
-
-/** The `rel="next"` target of a response's `Link` header, parsed without regex games. */
-function linkNext(response: Response) {
-  const header = response.headers.get('link');
-
-  if (header == null) {
-    return null;
-  }
-
-  for (const part of header.split(',')) {
-    const [target, ...params] = part.split(';');
-    const next = params.some((param) => param.trim() === 'rel="next"');
-    const url = URL.parse(target?.trim().slice(1, -1) ?? '');
-
-    if (next && url != null) {
-      return url.href;
-    }
-  }
-
-  return null;
+  return success({ status: response.status, data: validated.data, headers: response.headers });
 }

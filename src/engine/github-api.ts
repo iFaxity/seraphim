@@ -26,3 +26,28 @@ export function githubApi(token: string) {
 export function issuesUrl(repo: string, suffix = '') {
   return `${API_ROOT}/repos/${repo}/issues${suffix}`;
 }
+
+/**
+ * The `rel="next"` target of a GitHub response's `Link` header, parsed without regex
+ * games — split, match the `rel`, validate the target as a URL. `null` when the response
+ * doesn't paginate. Lives here because pagination-by-`Link` is a GitHub API convention.
+ */
+export function nextLink(headers: Headers) {
+  const header = headers.get('link');
+
+  if (header == null) {
+    return null;
+  }
+
+  for (const part of header.split(',')) {
+    const [target, ...params] = part.split(';');
+    const next = params.some((param) => param.trim() === 'rel="next"');
+    const url = URL.parse(target?.trim().slice(1, -1) ?? '');
+
+    if (next && url != null) {
+      return url.href;
+    }
+  }
+
+  return null;
+}
