@@ -5,9 +5,9 @@ import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { gitAdapter, processGit } from './engine/git.ts';
+import { githubApi } from './engine/github-api.ts';
 import { ghTracker } from './engine/github-tracker.ts';
 import { type Outcome, type SessionLine } from './engine/invocation.ts';
-import { fetchRest } from './engine/rest.ts';
 import { type Deps } from './engine/session.ts';
 import { readEnvFile } from './lib/env-file.ts';
 import { failure, success, type Result } from './lib/result.ts';
@@ -36,7 +36,7 @@ function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
   const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
-  const tracker = ghTracker(fetchRest(token));
+  const tracker = ghTracker(githubApi(token));
 
   return fakeDeps({
     tracker,
