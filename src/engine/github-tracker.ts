@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { API_ROOT, issuesUrl } from './github-api.ts';
+import { API_ROOT, issuesUrl, nextLink } from './github-api.ts';
 import { requestJson, type HttpTransport } from './http.ts';
 import { type Issue, type Tracker } from './seams.ts';
 
@@ -122,7 +122,7 @@ export function ghTracker(transport: HttpTransport) {
             (issue) => !issue.labels.includes(CLAIMED_LABEL) && issue.blockedBy.length === 0,
           ),
         );
-        nextUrl = page.nextUrl;
+        nextUrl = nextLink(page.headers);
       }
 
       return ready;
