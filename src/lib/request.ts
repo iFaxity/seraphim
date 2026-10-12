@@ -62,14 +62,14 @@ export async function request(options: RequestOptions) {
   const { url, ...opts } = options;
 
   const response = await fetch(url, opts);
-  const { ok, status, headers, text } = response;
+  const { ok, status, headers } = response;
 
   return {
     ok,
     headers,
     status,
-    text,
-    json(schema) {
+    text: () => response.text(),
+    json: (schema) => {
       const promise = response.json().then((data) => schema.parseAsync(data));
 
       return tryCatch(promise);

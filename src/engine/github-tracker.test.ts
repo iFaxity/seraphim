@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { githubApi, type GithubClient } from './github-api.ts';
+import { githubApi, type GitHubCall, type GitHubClient } from './github-api.ts';
 import { CLAIMED_LABEL, ghTracker } from './github-tracker.ts';
 
 import { failure, success } from '../lib/result.ts';
@@ -13,21 +13,21 @@ type ScriptedOutcome =
 
 /** A client that always fails, for error-path tests. */
 function failingClient(error: Error) {
-  return { json: async () => failure(error) } satisfies GithubClient;
+  return { json: async () => failure(error) } satisfies GitHubClient;
 }
 
 /** A client that records calls and replays scripted outcomes in call order. */
 function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
-  const calls: { method: string; url: string; body?: string }[] = [];
+  const calls: { method: string; url: string; body: string | null }[] = [];
   let index = 0;
 
   return {
     calls,
-    json: async (schema, call) => {
+    json: async <T>(call: GitHubCall<T>) => {
       calls.push({
         method: call.method,
         url: call.url,
-        ...('body' in call ? { body: call.body } : {}),
+        body: call.body,
       });
       const outcome = outcomes[index] ?? { status: 200, body: 'null' };
       index += 1;
@@ -50,7 +50,7 @@ function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
         return failure(new Error(`response was not JSON: ${String(ex)}`));
       }
 
-      const validated = schema.safeParse(parsed);
+      const validated = call.schema.safeParse(parsed);
 
       if (!validated.success) {
         return failure(new Error(`unexpected response shape: ${validated.error.message}`));
@@ -62,7 +62,7 @@ function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
         headers: new Headers(outcome.headers),
       });
     },
-  } satisfies GithubClient & { readonly calls: typeof calls };
+  } satisfies GitHubClient & { readonly calls: typeof calls };
 }
 
 /** One REST issue object in the shape GitHub returns. */
@@ -323,9 +323,11 @@ describe('githubApi', () => {
   it('maps unreachable hosts into a request-failed Result', async () => {
     const client = githubApi('gho_dummytoken');
 
-    const outcome = await client.json(z.unknown(), {
+    const outcome = await client.json({
       method: 'GET',
       url: 'https://api.github.invalid/repos/o/r/issues',
+      body: null,
+      schema: z.unknown(),
     });
 
     expect(outcome.success).toBe(false);
@@ -352,13 +354,18 @@ describe('githubApi', () => {
     };
     try {
       const client = githubApi('gho_dummytoken');
-      const schema = z.object({});
 
-      await client.json(schema, { method: 'GET', url: 'https://api.test/repos/o/r/issues' });
-      await client.json(schema, {
+      await client.json({
+        method: 'GET',
+        url: 'https://api.test/repos/o/r/issues',
+        body: null,
+        schema: z.object({}),
+      });
+      await client.json({
         method: 'POST',
         url: 'https://api.test/repos/o/r/labels',
         body: '{"labels":["x"]}',
+        schema: z.object({}),
       });
     } finally {
       globalThis.fetch = realFetch;
