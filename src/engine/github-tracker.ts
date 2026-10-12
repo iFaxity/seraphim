@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { API_ROOT, issuesUrl, nextLink, type GithubClient } from './github-api.ts';
+import { API_ROOT, issuesUrl, nextLink, type GitHubClient } from './github-api.ts';
 import { type Issue, type Tracker } from './seams.ts';
 
 /**
@@ -89,8 +89,8 @@ function isTrueIssue(raw: z.infer<typeof GitHubIssueSchema>) {
  * keeps the pagination loop's `nextUrl = nextLink(page.headers)` assignment from feeding
  * the await's inference back into itself (TS7022).
  */
-function fetchIssuePage(client: GithubClient, url: string) {
-  return client.json(z.array(GitHubIssueSchema), { method: 'GET', url });
+function fetchIssuePage(client: GitHubClient, url: string) {
+  return client.json({ method: 'GET', url, body: null, schema: z.array(GitHubIssueSchema) });
 }
 
 /**
@@ -98,7 +98,7 @@ function fetchIssuePage(client: GithubClient, url: string) {
  * the list; the claim dance (label + comment) and the draft-PR create are the adapter's
  * only writes. Every URL is repo-scoped — no ambient repository context.
  */
-export function ghTracker(client: GithubClient) {
+export function ghTracker(client: GitHubClient) {
   return {
     listReady: async (repo) => {
       const ready: Issue[] = [];
@@ -127,9 +127,11 @@ export function ghTracker(client: GithubClient) {
       return ready;
     },
     getIssue: async (repo, issueNumber) => {
-      const read = await client.json(GitHubIssueSchema, {
+      const read = await client.json({
         method: 'GET',
         url: issuesUrl(repo, `/${issueNumber}`),
+        body: null,
+        schema: GitHubIssueSchema,
       });
 
       if (!read.success) {
@@ -146,20 +148,22 @@ export function ghTracker(client: GithubClient) {
         throw new Error(`issue #${issue.number} already claimed (${CLAIMED_LABEL})`);
       }
 
-      const labeled = await client.json(z.unknown(), {
+      const labeled = await client.json({
         method: 'POST',
         url: issuesUrl(issue.repo, `/${issue.number}/labels`),
         body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
+        schema: z.unknown(),
       });
 
       if (!labeled.success) {
         throw new Error(`issue claim failed (#${issue.number}): ${labeled.error.message}`);
       }
 
-      const commented = await client.json(z.unknown(), {
+      const commented = await client.json({
         method: 'POST',
         url: issuesUrl(issue.repo, `/${issue.number}/comments`),
         body: JSON.stringify({ body: CLAIM_COMMENT }),
+        schema: z.unknown(),
       });
 
       if (!commented.success) {
@@ -172,7 +176,7 @@ export function ghTracker(client: GithubClient) {
       // PR creation is skill-driven inside flows; the adapter supplies only the forge
       // effect. Base stays the forge default; `Closes #N` in the body is the forge-native
       // issue link — no watcher, no extra adapter method.
-      const created = await client.json(GitHubPullSchema, {
+      const created = await client.json({
         method: 'POST',
         url: `${API_ROOT}/repos/${input.repo}/pulls`,
         body: JSON.stringify({
@@ -181,6 +185,7 @@ export function ghTracker(client: GithubClient) {
           draft: true,
           body: input.body,
         }),
+        schema: GitHubPullSchema,
       });
 
       if (!created.success) {

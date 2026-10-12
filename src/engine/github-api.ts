@@ -12,10 +12,16 @@ const GITHUB_HEADERS = {
   'X-GitHub-Api-Version': '2022-11-28',
 };
 
-/** One outgoing GitHub REST call — `GET` carries no body, writes carry a JSON string. */
-export type GitHubCall =
-  | { readonly method: 'GET'; readonly url: string }
-  | { readonly method: 'POST'; readonly url: string; readonly body: string };
+/**
+ * One outgoing GitHub REST call. The schema rides the call so the client stays
+ * one-parameter; fire-and-forget writes whose body is never read pass `z.unknown()`.
+ */
+export type GitHubCall<T = unknown> = {
+  readonly method: 'GET' | 'POST';
+  readonly url: string;
+  readonly schema: z.ZodType<T>;
+  readonly body: string | null;
+};
 
 /** A schema-checked success payload: HTTP status, validated data, and response headers. */
 export type JsonPayload<T> = {
@@ -32,19 +38,19 @@ export type JsonPayload<T> = {
  * response headers. The `request` helper does the fetch and the JSON/`zod` work; the
  * production `githubApi` adds GitHub's status semantics and auth.
  */
-export type GithubClient = {
-  readonly json: <T>(schema: z.ZodType<T>, call: GitHubCall) => AsyncResult<JsonPayload<T>>;
+export type GitHubClient = {
+  readonly json: <T>(call: GitHubCall<T>) => AsyncResult<JsonPayload<T>>;
 };
 
 export function githubApi(token: string) {
   return {
-    json: async <T>(schema: z.ZodType<T>, call: GitHubCall) => {
+    json: async <T>(call: GitHubCall<T>) => {
       const sent = await tryCatch(
         request({
           url: call.url,
           method: call.method,
           headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-          ...(call.method == 'POST' ? { body: call.body } : {}),
+          ...(call.body == null ? {} : { body: call.body }),
         }),
       );
 
@@ -55,10 +61,16 @@ export function githubApi(token: string) {
       const response = sent.data;
       const { status, headers } = response;
 
+      // Non-2xx bodies are read as text for the error message; a body can only be
+      // consumed once, so the schema parse below stays exclusive to the 2xx path.
+      const failureWith = async (prefix: string) => {
+        const body = await response.text();
+
+        return failure(new Error(`${prefix}${body.trim()}`));
+      };
+
       if (status == 401 || status == 403) {
-        return failure(
-          new Error(`auth failed (HTTP ${status}): ${(await response.text()).trim()}`),
-        );
+        return await failureWith(`auth failed (HTTP ${status}): `);
       }
 
       if (status == 429) {
@@ -66,28 +78,26 @@ export function githubApi(token: string) {
       }
 
       if (status >= 500) {
-        return failure(
-          new Error(`forge unavailable (HTTP ${status}): ${(await response.text()).trim()}`),
-        );
+        return await failureWith(`forge unavailable (HTTP ${status}): `);
       }
 
       if (status >= 300) {
-        return failure(new Error(`HTTP ${status}: ${(await response.text()).trim()}`));
+        return await failureWith(`HTTP ${status}: `);
       }
 
-      const parsed = await response.json(z.unknown());
+      const contentType = headers.get('content-type');
+
+      if (contentType == null || !contentType.includes('json')) {
+        return failure(new Error(`response was not JSON (content-type: ${contentType ?? 'none'})`));
+      }
+
+      const parsed = await response.json(call.schema);
 
       if (!parsed.success) {
-        return failure(new Error(`response was not JSON: ${String(parsed.error)}`));
+        return failure(new Error(`unexpected response shape: ${String(parsed.error)}`));
       }
 
-      const validated = schema.safeParse(parsed.data);
-
-      if (!validated.success) {
-        return failure(new Error(`unexpected response shape: ${validated.error.message}`));
-      }
-
-      return success({ status, data: validated.data, headers });
+      return success({ status, data: parsed.data, headers });
     },
   };
 }
