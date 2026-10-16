@@ -63,11 +63,11 @@ export function githubApi(token: string) {
 
       // Non-2xx bodies are read as text for the error message; a body can only be
       // consumed once, so the schema parse below stays exclusive to the 2xx path.
-      const failureWith = async (prefix: string) => {
+      async function failureWith(prefix: string) {
         const body = await response.text();
 
         return failure(new Error(`${prefix}${body.trim()}`));
-      };
+      }
 
       if (status == 401 || status == 403) {
         return await failureWith(`auth failed (HTTP ${status}): `);
