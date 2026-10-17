@@ -1,3 +1,6 @@
+import { join } from 'node:path';
+
+import { type DockerRunner } from './docker-sandbox.ts';
 import {
   type AgentRuntime,
   type Git,
@@ -114,15 +117,21 @@ export type FakeGit = Git & {
     readonly baseBranch: string;
     readonly path: string;
   }[];
+  readonly removedWorktrees: readonly string[];
+  readonly removedBranches: readonly string[];
 };
 
 export function fakeGit(defaultBranch = 'main') {
   const clones: FakeGit['clones'] = [];
   const worktrees: FakeGit['worktrees'] = [];
+  const removedWorktrees: string[] = [];
+  const removedBranches: string[] = [];
 
   return {
     clones,
     worktrees,
+    removedWorktrees,
+    removedBranches,
     defaultBranch: () => Promise.resolve(defaultBranch),
     cloneIfMissing: (path, url) => {
       clones.push({ path, url });
@@ -132,6 +141,16 @@ export function fakeGit(defaultBranch = 'main') {
     pull: () => Promise.resolve(),
     createWorktree: (input) => {
       worktrees.push({ branch: input.branch, baseBranch: input.baseBranch, path: input.path });
+
+      return Promise.resolve();
+    },
+    removeWorktree: (input) => {
+      removedWorktrees.push(input.path);
+
+      return Promise.resolve();
+    },
+    deleteBranch: (input) => {
+      removedBranches.push(input.branch);
 
       return Promise.resolve();
     },
@@ -147,6 +166,8 @@ export function fakeDeps(
     readonly git: FakeGit | Git;
     readonly workspaceRoot: string;
     readonly sessionsRoot: string;
+    readonly poolRoot: string;
+    readonly docker: DockerRunner;
     /** Simulated runtime latency per turn, so tests can exercise clock-based caps. */
     readonly runtimeDelayMs: number;
   }>,
@@ -157,6 +178,12 @@ export function fakeDeps(
   const git = overrides?.git ?? fakeGit();
   const workspaceRoot = overrides?.workspaceRoot ?? '/tmp/seraphim-fake';
   const sessionsRoot = overrides?.sessionsRoot ?? '/tmp/seraphim-fake-sessions';
+  const poolRoot = overrides?.poolRoot ?? join(workspaceRoot, 'skills');
+  // An offline docker: every image listing comes back empty, so prune's image arm stays inert
+  // in the fakes unless a test scripts a runner.
+  const docker = overrides?.docker ?? {
+    run: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }),
+  };
   const runtimeDelayMs = overrides?.runtimeDelayMs ?? 0;
 
   // A real `AgentRuntime` override (e.g. the pi adapter at the composition root) has no
@@ -190,6 +217,8 @@ export function fakeDeps(
       git: git as FakeGit,
       workspaceRoot,
       sessionsRoot,
+      poolRoot,
+      docker,
     },
     runtime,
     tracker,
