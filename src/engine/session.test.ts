@@ -292,7 +292,7 @@ export default flow;
     model: 'test-model',
     skills: ['implement'],
     sandbox: 'docker',
-    caps: { maxTurns: 100, wallClockMs: 1 },
+    caps: { maxTurns: 100, wallClockMs: 500 },
   },
   run: async (ctx) => {
     await ctx.run('slow turn');
@@ -306,7 +306,9 @@ export default flow;
     const { deps, runtime, git } = fakeDeps({
       workspaceRoot: root,
       sessionsRoot,
-      runtimeDelayMs: 50,
+      // Wide margins so the race cannot flip on machine speed: setup reliably finishes
+      // inside the wall clock, and the fake turn reliably outlives it.
+      runtimeDelayMs: 2000,
     });
 
     const result = await runSession(deps, { repo: 'overshoot', issueNumber: 22 });
