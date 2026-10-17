@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 
 import { expectOk, gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
