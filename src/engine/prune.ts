@@ -30,6 +30,10 @@ export type PruneImage = {
   readonly tag: string;
   /** Why it is stale — an unregistered project or a changed Dockerfile/lockfile hash. */
   readonly reason: string;
+  /** The image's repository name — the project directory the image was built for. */
+  readonly repo: string;
+  /** True when a registered project owns this repository name, false for strays. */
+  readonly claimed: boolean;
 };
 
 /** The full eligibility listing `seraphim prune` presents for confirmation. */
@@ -209,6 +213,8 @@ async function staleImages(workspaceRoot: string, docker: DockerRunner) {
     }
   }
 
+  const projectRepos = new Set(projects.data.projects.map((project) => project.repo));
+
   return listed.stdout
     .split('\n')
     .map((line) => line.trim())
@@ -221,6 +227,8 @@ async function staleImages(workspaceRoot: string, docker: DockerRunner) {
         reason: hashlessRepos.has(repo)
           ? 'project registered but has no Dockerfile — its cached images are unrebuildable'
           : 'no registered project content-hash names this tag',
+        repo,
+        claimed: hashlessRepos.has(repo) || projectRepos.has(repo),
       };
     });
 }

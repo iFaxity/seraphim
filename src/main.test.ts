@@ -7,7 +7,7 @@ import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { main } from './main.ts';
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 describe('engine', () => {
   it('parses empty argv as the top-level help view', async () => {
@@ -41,12 +41,22 @@ describe('engine', () => {
   });
 
   it('reports unimplemented commands as an outcome, not prose', async () => {
-    const result = await engine(['gc']);
+    const result = await engine(['tick']);
 
     expect(result.success).toBe(true);
 
     if (result.success) {
-      expect(result.data).toEqual({ kind: 'unimplemented', command: 'gc' });
+      expect(result.data).toEqual({ kind: 'unimplemented', command: 'tick' });
+    }
+  });
+
+  it('reports prune without an engine home as an error naming the fix', async () => {
+    const result = await engine(['prune']);
+
+    expect(result.success).toBe(true);
+
+    if (result.success) {
+      expect(result.data).toMatchObject({ kind: 'error', message: /no engine home/ });
     }
   });
 
@@ -68,7 +78,7 @@ describe('cli rendering', () => {
   it('renders the command table for empty argv', async () => {
     const out = await main([]);
 
-    ['run', 'status', 'gc', 'tick', 'help'].forEach((name) => {
+    ['run', 'status', 'prune', 'tick', 'help'].forEach((name) => {
       expect(out).toContain(name);
     });
   });
@@ -142,5 +152,105 @@ describe('status listing', () => {
     const json = await main(['status', '--json'], deps);
 
     expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });
+  });
+});
+
+describe('prune rendering', () => {
+  let root: string;
+
+  afterAll(async () => {
+    if (root) {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  function depsFor() {
+    return fakeDeps({ workspaceRoot: root, sessionsRoot: join(root, 'sessions') }).deps;
+  }
+
+  async function seedCompletedSession() {
+    const dir = join(root, 'sessions', 'demo', '1-1000');
+
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'manifest.json'),
+      JSON.stringify({
+        repo: 'demo',
+        issueNumber: 1,
+        flow: 'demo',
+        agent: 'pi',
+        model: 'm',
+        state: 'completed',
+        branch: 'seraphim/demo/1-1000',
+        worktreePath: join(root, 'worktrees', 'demo', '1-1000'),
+        startedAt: 1000,
+        endedAt: 2000,
+        prUrl: 'https://example.invalid/pr/1',
+        capHit: null,
+        caps: { maxTurns: 10, wallClockMs: 60000 },
+        turns: [],
+      }),
+    );
+
+    return dir;
+  }
+
+  it('renders an empty prune plan as nothing eligible', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
+
+    expect(await main(['prune'], depsFor())).toBe('nothing eligible for cleanup');
+  });
+
+  it('renders the plan and refuses deletion without a TTY confirmation', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
+    const dir = await seedCompletedSession();
+
+    const result = await main(['prune'], depsFor());
+
+    expect(result).toContain('└─ #1 —');
+    expect(result).toContain('nothing deleted: rerun with --confirm');
+    // The non-interactive listing must not have deleted the receipt.
+    expect(await readFile(join(dir, 'manifest.json'), 'utf8')).toContain('"completed"');
+  });
+
+  it('deletes with --confirm and renders the removal summary', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
+    const dir = await seedCompletedSession();
+
+    const result = await main(['prune', '--confirm'], depsFor());
+
+    expect(result).toContain('prune removed');
+    await expect(readFile(join(dir, 'manifest.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('groups stale images under their project in the tree', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
+    const deps = depsFor();
+    deps.docker = {
+      run: async (args) =>
+        args[0] == 'images'
+          ? {
+              exitCode: 0,
+              stdout: ['seraphim/live:aaa', 'seraphim/live:bbb', 'seraphim/cache:ccc'].join('\n'),
+              stderr: '',
+            }
+          : { exitCode: 0, stdout: args.join(' '), stderr: '' },
+    };
+
+    const result = await main(['prune'], deps);
+
+    expect(result).toContain('(unclaimed images)');
+    expect(result).toContain('stale images — reclaimable cache ×3 tag(s)');
+    expect(result).not.toContain('aaa');
+  });
+
+  it('rejects invalid prune flags with a clean error', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
+
+    expect(await main(['prune', '--wat'], depsFor())).toBe(
+      "error: invalid prune arguments: Unknown option '--wat'",
+    );
   });
 });
