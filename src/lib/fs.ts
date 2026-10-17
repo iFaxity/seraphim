@@ -7,3 +7,8 @@ export async function fileExists(path: string) {
     () => false,
   );
 }
+
+/** Matches the Node fs error code on an error — ENOENT (missing) and EEXIST (exists) callers. */
+export function isFsErrorCode(error: unknown, code: string) {
+  return error instanceof Error && 'code' in error && error.code == code;
+}
