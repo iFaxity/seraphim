@@ -2,6 +2,16 @@ import { spawn } from 'node:child_process';
 
 import { type Git } from './seams.ts';
 
+import { stat } from 'node:fs/promises';
+
+/** True when the path exists and is a directory — prune's idempotence check for worktrees. */
+async function directoryExists(path: string) {
+  return stat(path).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
+}
+
 /** Per-stream output cap: clone/ls-remote output is diagnostics only, never retained wholesale. */
 const MAX_STREAM_BYTES = 10 * 1024 * 1024;
 
@@ -124,6 +134,27 @@ export function gitAdapter(runner: GitRunner) {
       ];
       const run = await runner.run(args, input.repoPath);
       expectOk('worktree creation failed', run);
+    },
+    removeWorktree: async (input) => {
+      // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
+      if (!(await directoryExists(input.path))) {
+        return;
+      }
+
+      const run = await runner.run(['worktree', 'remove', '--force', input.path], input.repoPath);
+      expectOk('worktree removal failed', run);
+    },
+    deleteBranch: async (input) => {
+      const listing = await runner.run(['branch', '--list', input.branch], input.repoPath);
+      expectOk('branch listing failed', listing);
+
+      // An already-deleted branch is nothing to delete — prune stays idempotent on a rerun.
+      if (listing.stdout.trim() === '') {
+        return;
+      }
+
+      const run = await runner.run(['branch', '-D', input.branch], input.repoPath);
+      expectOk('branch deletion failed', run);
     },
     probeRemote: async (url) => {
       const run = await runner.run(['ls-remote', '--heads', url]);

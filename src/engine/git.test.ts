@@ -1,6 +1,10 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vite-plus/test';
 
 import { expectOk, gitAdapter, type GitRun, type GitRunner } from './git.ts';
+
+import { mkdtemp } from 'node:fs/promises';
 
 /** Scripts git's behavior per invocation pattern — the same seam the docker adapter fakes. */
 function fakeRunner(script: (args: readonly string[]) => GitRun): GitRunner & {
@@ -151,5 +155,74 @@ describe('expectOk', () => {
     expect(expectOk('clone failed', run(0, 'ok'))).toEqual(run(0, 'ok'));
     expect(() => expectOk('clone failed', run(1, '', 'boom'))).toThrow('clone failed: boom');
     expect(() => expectOk('clone failed', run(3))).toThrow('clone failed: git exited 3');
+  });
+});
+
+describe('gitAdapter.removeWorktree', () => {
+  it('runs worktree remove --force in the repo when the directory exists', async () => {
+    const worktree = await mkdtemp(join(tmpdir(), 'seraphim-git-wt-'));
+    const runner = fakeRunner(() => run(0));
+    const git = gitAdapter(runner);
+
+    await git.removeWorktree({ repoPath: '/repos/widgets', path: worktree });
+
+    expect(runner.invocations).toEqual([['worktree', 'remove', '--force', worktree]]);
+  });
+
+  it('skips the git call entirely when the worktree directory is already gone', async () => {
+    const runner = fakeRunner(() => run(0));
+    const git = gitAdapter(runner);
+
+    // A plain missing path — removeWorktree consults the filesystem before git.
+    await git.removeWorktree({ repoPath: '/repos/widgets', path: '/no/such/dir' });
+
+    expect(runner.invocations).toEqual([]);
+  });
+
+  it('surfaces git failures with diagnostics', async () => {
+    const worktree = await mkdtemp(join(tmpdir(), 'seraphim-git-wt-'));
+    const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
+
+    await expect(
+      git.removeWorktree({ repoPath: '/repos/widgets', path: worktree }),
+    ).rejects.toThrow(/worktree removal failed.*main working tree/s);
+  });
+});
+
+describe('gitAdapter.deleteBranch', () => {
+  it('deletes with -D after confirming the branch exists', async () => {
+    const runner = fakeRunner((args) =>
+      args[0] == 'branch' && args[1] == '--list' ? run(0, '  seraphim/widgets/7-1\n') : run(0),
+    );
+    const git = gitAdapter(runner);
+
+    await git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
+
+    expect(runner.invocations).toEqual([
+      ['branch', '--list', 'seraphim/widgets/7-1'],
+      ['branch', '-D', 'seraphim/widgets/7-1'],
+    ]);
+  });
+
+  it('skips the deletion when the branch no longer exists', async () => {
+    const runner = fakeRunner(() => run(0, ''));
+    const git = gitAdapter(runner);
+
+    await git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
+
+    expect(runner.invocations).toEqual([['branch', '--list', 'seraphim/widgets/7-1']]);
+  });
+
+  it('surfaces git failures with diagnostics', async () => {
+    const runner = fakeRunner((args) =>
+      args[1] == '--list'
+        ? run(0, '  seraphim/widgets/7-1\n')
+        : run(1, '', 'error: not fully merged'),
+    );
+    const git = gitAdapter(runner);
+
+    await expect(
+      git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),
+    ).rejects.toThrow(/branch deletion failed.*not fully merged/s);
   });
 });
