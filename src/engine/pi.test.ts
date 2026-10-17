@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 
 import { classifyTurn, parseTranscript, piRuntime } from './pi.ts';
 import { type SandboxExec } from './seams.ts';

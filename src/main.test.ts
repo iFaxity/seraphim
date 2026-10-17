@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';

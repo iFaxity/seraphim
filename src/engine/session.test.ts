@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine.ts';
 import { fakeDeps, fakeRuntime, type FakeTracker } from './fakes.ts';
