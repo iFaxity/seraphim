@@ -1,4 +1,5 @@
 import { type ProjectRecord } from './projects.ts';
+import { type PrunePlan } from './prune.ts';
 import { type SessionListing, type SessionState } from './receipts.ts';
 
 import { toEpochMs } from '../lib/time.ts';
@@ -10,7 +11,7 @@ export type CommandName =
   | 'list'
   | 'deactivate'
   | 'status'
-  | 'gc'
+  | 'prune'
   | 'tick'
   | 'help';
 
@@ -58,6 +59,16 @@ export type Outcome =
       readonly projects: readonly ProjectRecord[];
       readonly skipped: number;
       readonly json: boolean;
+    }
+  | {
+      readonly kind: 'prune-plan';
+      readonly plan: PrunePlan;
+      readonly json: boolean;
+    }
+  | {
+      readonly kind: 'prune-done';
+      readonly removed: PrunePlan;
+      readonly failed: readonly string[];
     };
 
 /** One listed session, as `status` reports it (the manifest row, presentation-free). */

@@ -8,7 +8,7 @@ const KNOWN: readonly CommandName[] = [
   'list',
   'deactivate',
   'status',
-  'gc',
+  'prune',
   'tick',
   'help',
 ];

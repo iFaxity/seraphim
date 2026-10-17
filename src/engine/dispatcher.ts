@@ -8,6 +8,7 @@ import {
   toSessionLine,
 } from './invocation.ts';
 import { deactivateProject, listProjects, registerProject } from './projects.ts';
+import { planPrune, runPrune } from './prune.ts';
 import { listSessions, sessionRelDir } from './receipts.ts';
 import { runSession, type Deps } from './session.ts';
 
@@ -204,10 +205,54 @@ const COMMANDS: readonly {
     },
   },
   {
-    name: 'gc',
+    name: 'prune',
     summary: 'confirm-then-delete worktrees and sessions',
-    usage: 'gc',
-    handler: notImplemented('gc'),
+    usage: 'prune [--json] [--confirm]',
+    handler: async (deps, args) => {
+      const parsed = tryCatch(() =>
+        parseArgs({
+          args: [...args],
+          options: {
+            json: { type: 'boolean', default: false },
+            confirm: { type: 'boolean', default: false },
+          },
+          allowPositionals: false,
+          strict: true,
+        }),
+      );
+
+      if (!parsed.success) {
+        return { kind: 'error', message: `invalid prune arguments: ${parsed.error.message}` };
+      }
+
+      if (!deps) {
+        return noDepsError();
+      }
+
+      // Deletion runs over a freshly computed plan: the operator confirmed the listing, and
+      // the executor re-derives eligibility so nothing deleted in between is touched twice.
+      const planned = await planPrune(deps);
+
+      if (!planned.success) {
+        return { kind: 'error', message: planned.error.message };
+      }
+
+      if (!parsed.data.values['confirm']) {
+        return {
+          kind: 'prune-plan',
+          plan: planned.data,
+          json: parsed.data.values['json'] === true,
+        };
+      }
+
+      const done = await runPrune(deps, planned.data);
+
+      if (!done.success) {
+        return { kind: 'error', message: done.error.message };
+      }
+
+      return { kind: 'prune-done', removed: done.data.removed, failed: done.data.failed };
+    },
   },
   {
     name: 'tick',

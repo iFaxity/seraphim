@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 
+import { type DockerRunner } from './docker-sandbox.ts';
 import { loadFlow } from './flow.ts';
 import { loadProject } from './projects.ts';
 import {
@@ -11,6 +12,7 @@ import {
   sessionRelDir,
 } from './receipts.ts';
 import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
+import { checkDeclaredSkills, stageSkills } from './skills.ts';
 
 import { fileExists } from '../lib/fs.ts';
 import { failure, tryCatch } from '../lib/result.ts';
@@ -48,6 +50,10 @@ export type Deps = {
   readonly git: Git;
   readonly workspaceRoot: string;
   readonly sessionsRoot: string;
+  /** The curated skill pool the kernel enforces declarations against and stages from. */
+  readonly poolRoot: string;
+  /** The docker CLI runner prune reuses for stale-image listing and untagging. */
+  readonly docker: DockerRunner;
 };
 
 /**
@@ -89,6 +95,14 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   if (!flow.success) {
     return flow;
+  }
+
+  // Declaration enforcement before any effect: a flow naming a skill the pool does not
+  // have stops here, before a claim, a clone, or a worktree exists (story 15, fail-fast).
+  const skills = await checkDeclaredSkills(deps.poolRoot, flow.data.config.skills);
+
+  if (!skills.success) {
+    return skills;
   }
 
   const preflight = await checkPreflight(deps, input.repo);
@@ -172,6 +186,23 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return worktree;
   }
 
+  // Declared skills land in the worktree at the runtime's project-level skills path before
+  // any turn runs, so the agent session discovers them without global installation
+  // (story 16). The worktree is host filesystem here; the sandbox bind-mounts it at /workspace.
+  const staged = await step(
+    stageSkills({
+      poolRoot: deps.poolRoot,
+      worktreePath,
+      agent: flow.data.config.agent,
+      declared: flow.data.config.skills,
+    }),
+    'skill staging failed',
+  );
+
+  if (!staged.success) {
+    return staged;
+  }
+
   const turns: Turn[] = [];
   const logs: string[] = [];
   const transcripts: TranscriptFile[] = [];
@@ -211,10 +242,26 @@ export async function runSession(deps: Deps, input: SessionInput) {
     log: (message: string) => {
       logs.push(message);
     },
-    sh: (command: readonly string[]) =>
-      deps.sandbox
-        .exec({ repo: input.repo, worktreePath, command })
-        .then((executed) => executed.exitCode),
+    sh: async (command: readonly string[]) => {
+      const executed = await deps.sandbox.exec({
+        repo: input.repo,
+        worktreePath,
+        command,
+      });
+
+      // Gate output rides the session log: a red exit code with no captured output is a
+      // diagnosis dead end for a human taking over (prototype friction, story 32).
+      const detail = [executed.stdout, executed.stderr]
+        .map((stream) => stream.trim())
+        .filter((stream) => stream !== '')
+        .join('\n');
+
+      logs.push(
+        `gate: ${command.join(' ')} → exit ${executed.exitCode}${detail ? `\n${detail}` : ''}`,
+      );
+
+      return executed.exitCode;
+    },
     tracker: {
       openDraftPr: (prInput: { readonly title: string; readonly body: string }) =>
         deps.tracker

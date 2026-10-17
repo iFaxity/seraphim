@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine.ts';
-import { fakeDeps, fakeRuntime, type FakeTracker } from './fakes.ts';
+import { fakeDeps, fakeRuntime, fakeSandbox, type FakeTracker } from './fakes.ts';
 import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession } from './session.ts';
@@ -37,8 +37,20 @@ export default flow;
 `,
   );
   await writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n');
+  await seedSkillPool(root);
 
   return projectDir;
+}
+
+/** Seeds one pool skill so the default flow declaration (`skills: ['implement']`) passes. */
+async function seedSkillPool(root: string, name = 'implement') {
+  const skillDir = join(root, 'skills', name);
+
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, 'SKILL.md'),
+    '---\nname: implement\ndescription: non-interactive implementation skill\n---\n\nImplement the issue.\n',
+  );
 }
 
 let root: string;
@@ -640,6 +652,123 @@ export default flow;
     }
 
     expect(result.data.manifest.state).toBe('completed');
+  });
+
+  it('stages declared skills into the worktree at the runtime project path before the flow runs', async () => {
+    await seedProject(root, 'staging');
+    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+
+    // The flow sees the staged skill through the worktree the sandbox mounts.
+    const projectDir = join(root, 'projects', 'staging');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
+  run: async (ctx) => {
+    const { readFile } = await import('node:fs/promises');
+    const skill = await readFile(ctx.worktreePath + '/.omp/skills/implement/SKILL.md', 'utf8');
+
+    if (!skill.includes('non-interactive implementation skill')) {
+      throw new Error('declared skill was not staged into the worktree');
+    }
+  },
+};
+
+export default flow;
+`,
+    );
+
+    const result = await runSession(deps, { repo: 'staging', issueNumber: 12 });
+
+    // The flow itself asserts the staged SKILL.md's content through the worktree path —
+    // a completed session means the runtime-visible staging path held the skill.
+    expect(result.success).toBe(true);
+  });
+
+  it('fails fast on a skill the pool does not have, before any tracker claim', async () => {
+    const projectDir = await seedProject(root, 'noskill');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['nonexistent'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
+  run: async (ctx) => {},
+};
+
+export default flow;
+`,
+    );
+
+    const { deps, tracker, git } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const fake = tracker as FakeTracker;
+
+    const result = await runSession(deps, { repo: 'noskill', issueNumber: 13 });
+
+    expect(result.success).toBe(false);
+
+    if (!result.success) {
+      expect(result.error.message).toContain('nonexistent');
+      expect(result.error.message).toMatch(/pool/);
+    }
+
+    expect(fake.calls.claimed).toEqual([]);
+    expect(git.worktrees).toEqual([]);
+  });
+
+  it('rides gate output into the session log so a red gate is diagnosable', async () => {
+    const projectDir = await seedProject(root, 'gatelog');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
+  run: async (ctx) => {
+    await ctx.sh(['pnpm', 'lint']);
+  },
+};
+
+export default flow;
+`,
+    );
+
+    const base = fakeSandbox();
+    const deps = fakeDeps({
+      workspaceRoot: root,
+      sessionsRoot,
+      sandbox: {
+        ...base,
+        exec: async (input) => ({
+          ...(await base.exec(input)),
+          exitCode: 1,
+          stdout: '',
+          stderr: 'oops: the lint failed',
+        }),
+      },
+    }).deps;
+
+    const result = await runSession(deps, { repo: 'gatelog', issueNumber: 9 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    const log = await readFile(
+      join(
+        sessionDir(
+          sessionsRoot,
+          sessionRelDir('gatelog', 9, toEpochMs(result.data.manifest.startedAt)),
+        ),
+        'flow.log',
+      ),
+      'utf8',
+    );
+
+    expect(log).toContain('pnpm lint');
+    expect(log).toContain('exit 1');
+    expect(log).toContain('the lint failed');
   });
 });
 
