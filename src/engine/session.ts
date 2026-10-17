@@ -256,6 +256,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
       // non-interactive contract, flows stay prompt-pure.
       const turn = await tryCatch(
         deps.runtime.run({
+          repo: input.repo,
           cwd: worktreePath,
           prompt: `${AFK_PREAMBLE}\n\n${prompt}`,
           model: flow.data.config.model,

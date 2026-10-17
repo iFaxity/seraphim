@@ -30,22 +30,24 @@ export async function main(argv: readonly string[], deps?: Deps) {
 
 /**
  * Composition root: builds the real `Deps` from the engine's seams — the Docker sandbox,
- * the git CLI, the GitHub tracker, and the pi/omp agent runtime are all real adapters.
- * The runtime's wall-clock stop is bounded here: per-session flow caps are kernel-gated
- * in `runSession`, so this bound only stops a runaway child omp process. Tracker auth:
- * `GH_TOKEN` from the seraphim-home `.env`.
+ * the git CLI, the GitHub tracker, and the pi agent runtime are all real adapters. The
+ * runtime launches turns through the sandbox's own exec: the model CLI, its tool calls,
+ * and its credentials all run inside the project image, with the per-turn wall-clock
+ * stop derived here (per-session flow caps stay kernel-gated in `runSession`). Tracker
+ * auth: `GH_TOKEN` from the seraphim-home `.env`.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
   const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
   const tracker = ghTracker(githubApi(token));
+  const sandbox = dockerSandbox({ projectsRoot, docker: cliDocker });
 
   return fakeDeps({
     tracker,
-    sandbox: dockerSandbox({ projectsRoot, docker: cliDocker }),
+    sandbox,
     git: gitAdapter(processGit),
-    runtime: piRuntime({ maxTimeMs: 30 * 60_000 }),
+    runtime: piRuntime({ maxTimeMs: 30 * 60_000, exec: sandbox.exec }),
     workspaceRoot: home,
     sessionsRoot: join(home, 'sessions'),
   }).deps;

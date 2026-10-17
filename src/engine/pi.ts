@@ -1,20 +1,17 @@
-import { spawn, spawnSync } from 'node:child_process';
 import { z } from 'zod';
 
-import { type AgentRuntime, type TurnResult } from './seams.ts';
-
-import { failure, success, type Result } from '../lib/result.ts';
+import { type Sandbox, type SandboxExec, type AgentRuntime, type TurnResult } from './seams.ts';
 
 /**
- * The real pi adapter behind the `AgentRuntime` seam: launches the pi CLI (upstream name
- * `pi`, packaged on some systems as `omp`) headlessly in the session worktree, one turn
- * per `run`, and parses its `--mode json` event stream into the seam's markdown
- * transcript. Per-turn flags are fixed here — no session files, no extensions, tool calls
- * auto-approved: the whole stack is AFK and the transcript must come from the child's
- * stdout, not from a resumable session store. The model string is the CLI's own
+ * The real pi adapter behind the `AgentRuntime` seam: turns run inside the project's
+ * sandbox image (via the `Sandbox` seam's exec) — the model CLI, its tool calls, and its
+ * credentials all stay in the container, and binary resolution is trivially "whatever the
+ * image installed". Per-turn flags are fixed here — no session files, no extensions, tool
+ * calls auto-approved: the whole stack is AFK and the transcript must come from the
+ * command's stdout, not from a resumable session store. The model string is the CLI's own
  * fuzzy-match form, including its `provider/model` pattern — flow configs route to a
- * provider by naming it there ("ollama-cloud/...", "opencode/..."); provider credentials
- * stay in the CLI's ambient auth, never in this adapter.
+ * provider by naming it there ("ollama-cloud/...", "opencode/..."); the provider key
+ * arrives through the project's `env` slot, never through this adapter.
  */
 const PI_PRINT_FLAGS = [
   '--mode',
@@ -75,8 +72,8 @@ const OmpTurnEndSchema = z.object({
 });
 
 /**
- * The turn-end shape the classifier consumes: stop reason plus omp's error text, null
- * when the stop carried none.
+ * The turn-end shape the classifier consumes: stop reason plus the CLI's error text,
+ * null when the stop carried none.
  */
 type TurnEnd = { readonly stopReason: string; readonly errorMessage: string | null };
 
@@ -84,11 +81,11 @@ type TurnEnd = { readonly stopReason: string; readonly errorMessage: string | nu
  * Classifies one finished turn over its exit code and structured stop signal. Headless
  * omp caps its own `--max-time` budget in-process: the child exits 0 (deadline fired
  * before a turn started) or 1 (mid-turn), and the `turn_end` event carries
- * `stopReason: "aborted"` with omp's deadline message — the runtime-side cap observable
+ * `stopReason: "aborted"` with the deadline message — the runtime-side cap observable
  * the seam's `cap-hit` maps to. The message is matched case-insensitively on the
- * "deadline" cause, not omp's full phrasing, so minor wording drift keeps classifying.
- * A null exit code (killed by signal) is a failed stop, not a cap: nothing in it
- * indicates the wall-clock budget was the cause.
+ * "deadline" cause, not the CLI's full phrasing, so minor wording drift keeps
+ * classifying. A null exit code (killed by signal) is a failed stop, not a cap: nothing
+ * in it indicates the wall-clock budget was the cause.
  */
 export function classifyTurn(code: number | null, turnEnds: readonly TurnEnd[]) {
   const cappedByOmp =
@@ -147,11 +144,11 @@ function safeJson(line: string): unknown {
 }
 
 /**
- * Parses one omp `--mode json --print` stdout into transcript markdown. omp emits one JSON
+ * Parses one turn's captured stdout into transcript markdown. The CLI emits one JSON
  * object per line; a line that fails schema or JSON parse is preserved verbatim so
  * diagnostics never lose data to format drift — including stop-bookkeeping events, which
  * is why a capped transcript still shows its raw `turn_end` line. An empty stream still
- * yields a nonempty body — the receipt's transcript file must exist even when the child
+ * yields a nonempty body — the receipt's transcript file must exist even when the turn
  * said nothing.
  */
 export function parseTranscript(stdout: string) {
@@ -192,31 +189,22 @@ function collectTurnEnds(rawStdout: string) {
 }
 
 /**
- * Launches one omp turn and awaits the child. The wall-clock budget rides on the child's
- * own `--max-time` so a tiny cap ends the session cleanly inside the runtime; the kernel's
- * pre/post gates in `runSession` remain the outer boundary and the seam stays unextended.
- * `maxTimeMs` arrives already resolved by the composition root — no cap policy here.
- * The prompt rides as the positional MESSAGES argument: a stdin-fed prompt is unreliable
- * in print mode (the user message echoes, then the agent can end without turning). The
- * kernel's AFK preamble prefixes every prompt, so a leading `@` (file-reference syntax)
- * cannot occur in practice; no shell is involved (spawn without shell), so the prompt
- * cannot inject a second command.
- * stdout is buffered whole and decoded once: a multibyte character split across chunks
- * must not become replacement characters in the transcript. stderr rides along so a
- * non-streaming failure (model not found, auth error) lands in the transcript instead of
- * the void, and gets drained so a chatty child cannot stall on pipe backpressure.
+ * Composes the turn command for one invocation: the flow's model routed through the
+ * CLI's fuzzy match, the wall-clock budget as the CLI's own in-process stop (a tiny cap
+ * ends the session cleanly inside the container), and the prompt as the positional
+ * MESSAGES argument — a stdin-fed prompt is unreliable in print mode (the user message
+ * echoes, then the agent can end without turning). The kernel's AFK preamble prefixes
+ * every prompt, so a leading `@` (file-reference syntax) cannot occur in practice; the
+ * command runs without a shell, so the prompt cannot inject a second command.
  */
-function runOmpTurn(
-  binary: string,
-  input: {
-    readonly cwd: string;
-    readonly prompt: string;
-    readonly model: string;
-    readonly maxTimeMs: number;
-  },
-) {
-  const { promise, resolve } = Promise.withResolvers<Result<TurnResult>>();
-  const args = [
+function turnCommand(input: {
+  readonly binary: string;
+  readonly prompt: string;
+  readonly model: string;
+  readonly maxTimeMs: number;
+}) {
+  return [
+    input.binary,
     ...PI_PRINT_FLAGS,
     '--model',
     input.model,
@@ -224,89 +212,61 @@ function runOmpTurn(
     String(Math.ceil(input.maxTimeMs / 1000)),
     input.prompt,
   ];
-  const child = spawn(binary, args, { cwd: input.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-
-  child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-  child.on('error', (error) => resolve(failure(error)));
-  child.on('close', (code) => {
-    const rawStdout = Buffer.concat(stdout).toString('utf8');
-    const exitState = classifyTurn(code, collectTurnEnds(rawStdout));
-    const stderrDetail = Buffer.concat(stderr).toString('utf8').trim();
-    // A failed stop keeps the child's stderr under the parsed stream — on those turns
-    // stdout often carries no message at all, and the failure text is the only
-    // diagnostic. Completions stay pure: omp's stdout already is the record.
-    const transcript =
-      exitState == 'failed' && stderrDetail !== ''
-        ? `${parseTranscript(rawStdout)}\n\n> stderr:\n${stderrDetail}`
-        : parseTranscript(rawStdout);
-
-    resolve(success({ exitState, transcript }));
-  });
-
-  return promise;
 }
 
 /**
- * Resolves the pi CLI binary once per adapter: an explicit env override wins, then the
- * upstream name, then the `omp` package name — same program, two distribution names.
+ * Maps one sandbox-executed turn onto the seam's result. stdout is decoded whole, so a
+ * multibyte character split across capture chunks must not become replacement characters
+ * in the transcript. A failed stop keeps the container's stderr under the parsed stream —
+ * on those turns stdout often carries no message at all, and the failure text is the only
+ * diagnostic; completions stay pure, the stdout already is the record.
  */
-function resolvePiBinary() {
-  if (process.env['SERAPHIM_PI_BIN'] != null && process.env['SERAPHIM_PI_BIN'] !== '') {
-    return process.env['SERAPHIM_PI_BIN'];
-  }
+function toTurnResult(executed: SandboxExec): TurnResult {
+  const exitState = classifyTurn(
+    executed.exitCode == 0 ? 0 : executed.exitCode,
+    collectTurnEnds(executed.stdout),
+  );
+  const stderrDetail = executed.stderr.trim();
+  const transcript =
+    exitState == 'failed' && stderrDetail !== ''
+      ? `${parseTranscript(executed.stdout)}\n\n> stderr:\n${stderrDetail}`
+      : parseTranscript(executed.stdout);
 
-  function onPath(name: string) {
-    return spawnSync(name, ['--version'], { stdio: 'ignore', timeout: 10_000 }).status == 0;
-  }
-
-  if (onPath('pi')) {
-    return 'pi';
-  }
-
-  if (onPath('omp')) {
-    return 'omp';
-  }
-
-  return null;
+  return { exitState, transcript };
 }
 
 /**
- * The real pi runtime adapter. `claude` reports unavailable — the enum already declares
- * it and selection fails fast in the kernel without a type change. `maxTimeMs` is the
- * runtime-side wall-clock stop the composition root derives from the flow's declared cap
- * (required: a wall-clock budget is a flow-level fact, and a silent default would be a
- * hidden budget). The CLI binary is resolved once per adapter instance and the probe
- * memoized, so a single transient failure cannot latch the whole process into
- * "unavailable".
+ * The real pi runtime adapter: sandbox-backed. `maxTimeMs` is the runtime-side
+ * wall-clock stop derived from the flow's declared cap (required: a wall-clock budget is
+ * a flow-level fact, and a silent default would be a hidden budget). `exec` is the
+ * sandbox seam's exec — the turn runs in the project image with the worktree mounted at
+ * /workspace and the project's env slot supplying the provider key. `binary` names the
+ * CLI as the project image installs it (upstream `pi`, packaged `omp`).
  */
-export function piRuntime(input: { readonly maxTimeMs: number }): AgentRuntime {
-  const maxTimeMs = input.maxTimeMs;
-  const binary = resolvePiBinary();
+export function piRuntime(input: {
+  readonly maxTimeMs: number;
+  readonly exec: Sandbox['exec'];
+  readonly binary?: string;
+}): AgentRuntime {
+  const binary = input.binary ?? 'omp';
 
   return {
-    available: (agent) => {
-      if (agent == 'claude') {
-        return false;
-      }
-
-      return binary !== null;
-    },
-    run: async (turnInput) => {
-      if (binary === null) {
-        return {
-          exitState: 'failed' as const,
-          transcript: 'pi CLI binary not found (tried $SERAPHIM_PI_BIN, pi, omp)',
-        };
-      }
-
-      const turn = await runOmpTurn(binary, { ...turnInput, maxTimeMs });
-
-      return turn.success
-        ? turn.data
-        : { exitState: 'failed' as const, transcript: `pi launch failed: ${String(turn.error)}` };
-    },
+    // Availability is decided by the sandbox image, not the host: a project whose image
+    // lacks the agent CLI fails in the turn with a clear transcript. The adapter itself
+    // is always usable, and `claude` has no adapter — selection fails fast in the kernel.
+    available: (agent) => agent != 'claude',
+    run: async (turnInput) =>
+      toTurnResult(
+        await input.exec({
+          repo: turnInput.repo,
+          worktreePath: turnInput.cwd,
+          command: turnCommand({
+            binary,
+            prompt: turnInput.prompt,
+            model: turnInput.model,
+            maxTimeMs: input.maxTimeMs,
+          }),
+        }),
+      ),
   };
 }

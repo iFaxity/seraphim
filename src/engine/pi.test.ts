@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyTurn, parseTranscript } from './pi.ts';
+import { classifyTurn, parseTranscript, piRuntime } from './pi.ts';
+import { type SandboxExec } from './seams.ts';
 
 /**
  * Tests for the omp `--mode json` transcript parsing and turn classification. The fixtures
@@ -123,5 +124,114 @@ describe('classifyTurn', () => {
     expect(classifyTurn(1, [{ stopReason: 'error', errorMessage: 'Deadline exceeded' }])).toBe(
       'failed',
     );
+  });
+});
+
+describe('piRuntime', () => {
+  /** A completed turn's stdout: user echo plus assistant reply, as the CLI emits it. */
+  const completedStdout = [
+    userEnd('say hi'),
+    assistantEnd('ready'),
+    '{"type":"turn_end","message":{"stopReason":"stop","errorMessage":null}}',
+  ].join('\n');
+
+  it('routes the turn through the sandbox exec with the composed command', async () => {
+    const execs: { repo: string; worktreePath: string; command: readonly string[] }[] = [];
+    const runtime = piRuntime({
+      maxTimeMs: 90_000,
+      binary: 'omp',
+      exec: async (input) => {
+        execs.push({ ...input });
+
+        return {
+          command: input.command,
+          exitCode: 0,
+          stdout: completedStdout,
+          stderr: '',
+        } satisfies SandboxExec;
+      },
+    });
+
+    const turn = await runtime.run({
+      repo: 'demo',
+      cwd: '/tmp/wt',
+      prompt: 'implement issue',
+      model: 'glm-5.3-flash',
+    });
+
+    expect(execs).toEqual([
+      {
+        repo: 'demo',
+        worktreePath: '/tmp/wt',
+        command: [
+          'omp',
+          '--mode',
+          'json',
+          '--print',
+          '--no-session',
+          '--no-extensions',
+          '--auto-approve',
+          '--model',
+          'glm-5.3-flash',
+          '--max-time',
+          '90',
+          'implement issue',
+        ],
+      },
+    ]);
+    expect(turn.exitState).toBe('completed');
+    expect(turn.transcript).toContain('### assistant\n\nready');
+  });
+
+  it('maps a deadline-aborted sandbox turn to cap-hit with the raw stop line kept', async () => {
+    const stdout = [
+      assistantEnd('partway'),
+      '{"type":"turn_end","message":{"stopReason":"aborted","errorMessage":"Deadline exceeded"}}',
+    ].join('\n');
+    const runtime = piRuntime({
+      maxTimeMs: 1_000,
+      exec: async (input) => ({ command: input.command, exitCode: 0, stdout, stderr: '' }),
+    });
+
+    const turn = await runtime.run({
+      repo: 'demo',
+      cwd: '/tmp/wt',
+      prompt: 'count forever',
+      model: 'm',
+    });
+
+    expect(turn.exitState).toBe('cap-hit');
+    expect(turn.transcript).toContain('partway');
+    expect(turn.transcript).toContain('"stopReason":"aborted"');
+  });
+
+  it('appends container stderr to a failed turn and keeps completions pure', async () => {
+    const failed = piRuntime({
+      maxTimeMs: 60_000,
+      exec: async (input) => ({
+        command: input.command,
+        exitCode: 1,
+        stdout: '',
+        stderr: 'Model not found: m',
+      }),
+    });
+    const failedTurn = await failed.run({ repo: 'demo', cwd: '/tmp/wt', prompt: 'p', model: 'm' });
+
+    expect(failedTurn.exitState).toBe('failed');
+    expect(failedTurn.transcript).toContain('> stderr:\nModel not found: m');
+
+    const clean = piRuntime({
+      maxTimeMs: 60_000,
+      exec: async (input) => ({
+        command: input.command,
+        exitCode: 0,
+        stdout: completedStdout,
+        stderr: 'harmless warning',
+      }),
+    });
+    const cleanTurn = await clean.run({ repo: 'demo', cwd: '/tmp/wt', prompt: 'p', model: 'm' });
+
+    expect(cleanTurn.exitState).toBe('completed');
+    expect(cleanTurn.transcript).not.toContain('harmless warning');
   });
 });

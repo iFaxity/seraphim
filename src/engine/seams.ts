@@ -83,14 +83,15 @@ export type TurnResult = {
 };
 
 /**
- * AgentRuntime seam: headless launch in a cwd with caps and transcript capture. Adapter
- * availability lives here — the kernel never branches on a backend name (ADR-0003); a
- * runtime that cannot drive an agent reports so through `available`. v1 ships no real
- * adapter; tests inject fakes.
+ * AgentRuntime seam: one agent turn in the session worktree, with caps and transcript
+ * capture. Adapter availability lives here — the kernel never branches on a backend name
+ * (ADR-0003); a runtime that cannot drive an agent reports so through `available`. The
+ * `repo` names the project whose sandbox image and env slot the turn runs against.
  */
 export type AgentRuntime = {
   readonly available: (agent: 'pi' | 'claude') => boolean;
   readonly run: (input: {
+    readonly repo: string;
     readonly cwd: string;
     readonly prompt: string;
     readonly model: string;
