@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { type Git } from './seams.ts';
 
+import { isFsErrorCode } from '../lib/fs.ts';
 import { failure, success, tryCatch } from '../lib/result.ts';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 
@@ -142,14 +143,9 @@ export async function registerProject(
   return success({ record, reactivated: existing.success, artifacts: seeded });
 }
 
-/** Matches the Node fs error code on an error — ENOENT (missing) and EEXIST (exists) callers. */
-function isErrorCode(error: unknown, code: string) {
-  return error instanceof Error && 'code' in error && error.code == code;
-}
-
-/** The absent-file case of isErrorCode: everything else (corrupt record, bad dir) keeps its error. */
+/** The absent-file case of isFsErrorCode: everything else (corrupt record, bad dir) keeps its error. */
 function isMissing(error: unknown) {
-  return isErrorCode(error, 'ENOENT');
+  return isFsErrorCode(error, 'ENOENT');
 }
 
 /** Loads one project record. An absent record fails fast naming the register fix. */
@@ -251,7 +247,7 @@ async function seedSlot(
 ) {
   const wrote = await tryCatch(writeFile(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }));
 
-  if (wrote.success || isErrorCode(wrote.error, 'EEXIST')) {
+  if (wrote.success || isFsErrorCode(wrote.error, 'EEXIST')) {
     return `projects/${repo}/${slot.name}`;
   }
 
