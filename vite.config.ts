@@ -84,6 +84,14 @@ export default defineConfig({
       // Promise — style
       'promise/avoid-new': 'error',
     },
-    ignorePatterns: ['node_modules', 'dist/**', '**/*.md', 'templates/**'],
+    ignorePatterns: [
+      'node_modules',
+      'dist/**',
+      '**/*.md',
+      'templates/**',
+      // Integration files sit outside the tsconfig include, so type-aware lint cannot
+      // resolve node types there; vitest supplies them at run time.
+      'integration/**',
+    ],
   },
 });
