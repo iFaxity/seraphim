@@ -112,6 +112,16 @@ export type Git = {
     readonly path: string;
     readonly baseBranch: string;
   }) => Promise<void>;
+  /** Removes one worktree directory (confirmed prune only — nothing else may delete one). */
+  readonly removeWorktree: (input: {
+    readonly repoPath: string;
+    readonly path: string;
+  }) => Promise<void>;
+  /** Deletes one branch (confirmed prune only, after its worktree is gone). */
+  readonly deleteBranch: (input: {
+    readonly repoPath: string;
+    readonly branch: string;
+  }) => Promise<void>;
   /**
    * Reachability check over the remote — registration's fail-fast on an unreachable URL.
    * Read-only (a ref-list ping), never a clone.

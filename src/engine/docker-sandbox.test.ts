@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vite-plus/test';
 
-import { cliDocker, dockerSandbox, type DockerRunner } from './docker-sandbox.ts';
+import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
 
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 
@@ -307,5 +307,13 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
     await countingSandbox.ensureImage('lockchange');
 
     expect(counting.builds).toHaveLength(2);
+  });
+});
+
+describe('imageTagFor', () => {
+  it('returns an empty tag when the project directory has no Dockerfile', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'seraphim-tagless-'));
+
+    expect(await imageTagFor(dir)).toBe('');
   });
 });

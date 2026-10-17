@@ -67,7 +67,7 @@ export function dockerSandbox(options: DockerSandboxOptions) {
         return failure(error);
       }
 
-      const tag = await imageTag(dir);
+      const tag = await imageTagFor(dir);
 
       // Cache probe first: an image already tagged for this exact content means no rebuild.
       const inspect = await docker.run(['image', 'inspect', '--format', '{{json .Id}}', tag]);
@@ -147,7 +147,7 @@ export function dockerSandbox(options: DockerSandboxOptions) {
 
       // The image named by the same content-hash scheme ensureImage builds — exec always
       // runs against the project's current image even if ensureImage wasn't called first.
-      const tag = await imageTag(dir);
+      const tag = await imageTagFor(dir);
 
       args.push(tag, ...input.command);
 
@@ -172,10 +172,17 @@ function validateRepoName(repo: string) {
 
 /**
  * The image tag from a sha256 over the Dockerfile plus every lockfile present — the spec's
- * "tagged by content hash over Dockerfile + lockfiles, rebuilt only on change".
+ * "tagged by content hash over Dockerfile + lockfiles, rebuilt only on change". Exported so
+ * prune computes "current" by the same scheme ensureImage builds under — the two can never
+ * disagree about which cache tags are live.
  */
-async function imageTag(dir: string) {
+export async function imageTagFor(dir: string) {
   const dockerfilePath = join(dir, 'Dockerfile');
+
+  if (!(await fileExists(dockerfilePath))) {
+    return '';
+  }
+
   const lockfilePaths = LOCKFILES.map((name) => join(dir, name));
   const paths = [dockerfilePath, ...lockfilePaths];
   const reads = paths.map((path) => readFile(path, 'utf8').catch(() => null));
