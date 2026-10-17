@@ -4,6 +4,10 @@
 
 Self-hosted agentic software factory: one orchestrator (the kernel) that clones, sandboxes, dispatches, and PRs across all repos its owner registers — see `.scratch/seraphim-v1/spec.md` for the full spec.
 
+## Worktrees
+
+All worktrees created in this repo go under `.agents/worktrees/<name>` (one flat folder, no nesting) — never siblings of the main checkout or any other location. Keep `.agents/` gitignored.
+
 ## Agent skills
 
 ### Issue tracker
