@@ -112,15 +112,15 @@ async function render(result: Result<Outcome>, deps: Deps) {
         return success('nothing eligible for cleanup');
       }
 
+      const tree = `prune plan — per project, nothing deleted until you confirm:\n\n${lines.join('\n\n')}`;
+
       // Confirm-then-delete (story 26): the plan is a question, not a decision. Only an
       // affirmative typed by the operator reaches the second pass that deletes.
       if (!process.stdin.isTTY) {
-        return success(
-          `${lines.join('\n')}\n\nnothing deleted: rerun with --confirm to delete these`,
-        );
+        return success(`${tree}\n\nnothing deleted: rerun with --confirm to delete these`);
       }
 
-      process.stdout.write(`${lines.join('\n')}\n\ndelete all of the above? [y/N] `);
+      process.stdout.write(`${tree}\n\ndelete all of the above? [y/N] `);
       const answer = await readLine();
 
       if (answer.trim().toLowerCase() !== 'y') {
@@ -136,12 +136,17 @@ async function render(result: Result<Outcome>, deps: Deps) {
         out.removed.sessions.length +
         out.removed.orphanWorktrees.length +
         out.removed.images.length;
+      const untagged = new Map<string, number>();
+      for (const image of out.removed.images) {
+        const name = image.tag.slice(0, image.tag.lastIndexOf(':'));
+        untagged.set(name, (untagged.get(name) ?? 0) + 1);
+      }
       const lines = [
         ...out.removed.sessions.map(
           (s) => `removed session ${s.repo}#${s.issueNumber} (${s.worktreePath})`,
         ),
         ...out.removed.orphanWorktrees.map((path) => `removed orphan worktree ${path}`),
-        ...out.removed.images.map((image) => `untagged stale image ${image.tag}`),
+        ...[...untagged].map(([name, count]) => `untagged stale images — ${name} ×${count}`),
         ...out.failed.map((detail) => `failed: ${detail}`),
       ];
 
@@ -187,7 +192,11 @@ async function render(result: Result<Outcome>, deps: Deps) {
   }
 }
 
-/** The confirmation listing: every removable item on one line, grouped by kind. */
+/**
+ * The confirmation listing as a project tree: one block per registered repo with everything
+ * removable under it, then strays. Indented rows use ascii pipes; each line names exactly
+ * what a confirmed prune deletes.
+ */
 function prunePlanLines(plan: {
   readonly sessions: readonly {
     readonly repo: string;
@@ -195,15 +204,57 @@ function prunePlanLines(plan: {
     readonly worktreePath: string;
   }[];
   readonly orphanWorktrees: readonly string[];
-  readonly images: readonly { readonly tag: string; readonly reason: string }[];
+  readonly images: readonly {
+    readonly tag: string;
+    readonly repo: string;
+    readonly claimed: boolean;
+  }[];
 }) {
-  return [
-    ...plan.sessions.map(
-      (session) => `session ${session.repo}#${session.issueNumber} — ${session.worktreePath}`,
-    ),
-    ...plan.orphanWorktrees.map((path) => `orphan worktree — ${path}`),
-    ...plan.images.map((image) => `stale image ${image.tag} (${image.reason})`),
-  ];
+  type Block = { sessions: string[]; orphans: string[]; imageTags: string[] };
+  const blocks = new Map<string, Block>();
+  function blockFor(name: string): Block {
+    let block = blocks.get(name);
+    if (!block) {
+      block = { sessions: [], orphans: [], imageTags: [] };
+      blocks.set(name, block);
+    }
+    return block;
+  }
+
+  for (const session of plan.sessions) {
+    blockFor(session.repo).sessions.push(`#${session.issueNumber} — ${session.worktreePath}`);
+  }
+  for (const path of plan.orphanWorktrees) {
+    // Worktree paths are <worktreesRoot>/<repo>/<id> — the repo segment groups them.
+    const segments = path.split('/');
+    const repo = segments[segments.indexOf('worktrees') + 1] ?? '(unknown)';
+    blockFor(repo).orphans.push(path);
+  }
+  for (const image of plan.images) {
+    const hash = image.tag.slice(image.tag.lastIndexOf(':') + 1);
+    blockFor(image.claimed ? image.repo : '(unclaimed images)').imageTags.push(hash);
+  }
+
+  const lines: string[] = [];
+  for (const [repo, block] of blocks) {
+    lines.push(repo);
+    const rows = [
+      ...(block.sessions.length > 0
+        ? [`sessions:\n${block.sessions.map((s) => `│ └─ ${s}`).join('\n')}`]
+        : []),
+      ...(block.orphans.length > 0
+        ? [`orphan worktrees:\n${block.orphans.map((p) => `│ └─ ${p}`).join('\n')}`]
+        : []),
+      ...(block.imageTags.length > 0
+        ? [`stale images — reclaimable cache ×${block.imageTags.length} tag(s)`]
+        : []),
+    ];
+    for (const [i, row] of rows.entries()) {
+      const last = i === rows.length - 1;
+      lines.push(row.replaceAll('\n│ ', last ? '\n   ' : '\n│ '));
+    }
+  }
+  return lines;
 }
 
 /** Reads one line from stdin — the interactive prune confirmation. Resolves on any keypress. */
