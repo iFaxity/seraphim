@@ -7,8 +7,8 @@ import { piRuntime } from '../src/engine/pi.ts';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
 /**
- * Real in-container verification, included only by vitest.live.config.ts (the
- * `test:live` script): builds a minimal project image with the omp CLI and runs the two
+ * Real in-container integration verification, included only by the integration tier config (
+ * `test:integration` script): builds a minimal project image with the omp CLI and runs the two
  * acceptance checks fakes cannot prove — transcript capture from a live containerized
  * turn, and a tiny wall-clock cap ending the session cleanly. The provider key must
  * exist in the project env slot (`env` beside the Dockerfile) under the name the model's
@@ -26,7 +26,7 @@ const DOCKERFILE = [
 ].join('\n');
 
 async function sandboxFor() {
-  const root = await mkdtemp(join(tmpdir(), 'seraphim-live-'));
+  const root = await mkdtemp(join(tmpdir(), 'seraphim-integration-'));
   const repo = 'live-probe';
   await mkdir(join(root, repo), { recursive: true });
   await writeFile(join(root, repo, 'Dockerfile'), DOCKERFILE);
@@ -51,7 +51,7 @@ async function sandboxFor() {
     await writeFile(join(root, repo, 'env'), `${sources.join('\n')}\n`);
   }
 
-  const cwd = await mkdtemp(join(tmpdir(), 'seraphim-live-wt-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'seraphim-integration-wt-'));
 
   return { sandbox: dockerSandbox({ projectsRoot: root, docker: cliDocker }), repo, cwd };
 }
