@@ -25,7 +25,7 @@ The primary dashboard view (post-v1): ready-now / blocked / running / awaiting-h
 _Avoid_: board (as the primary term), sprint view
 
 **`awaiting-human`**:
-Post-v1 session state of a PR'd session whose branch/worktree is retained pending human review decision — never gc-eligible while in this state.
+Post-v1 session state of a PR'd session whose branch/worktree is retained pending human review decision — never prune-eligible while in this state.
 _Avoid_: pr-open (ambiguous with running), done
 
 **Tracker**:
@@ -43,3 +43,15 @@ _Avoid_: log (the transcript is the log), record
 **Transcript**:
 The full conversation capture of agent turns within a session, saved per receipt.
 _Avoid_: session log, history
+
+**Skill pool**:
+The curated, factory-owned set of non-interactive skills (`<home>/skills`, one directory per skill) that flows enroll in by explicit declaration. The kernel stages declared skills into the worktree; nothing is implicitly loaded. Spawn/worktree skills are excluded — the kernel owns that layer.
+_Avoid_: skill registry, skill store
+
+**Orphan worktree**:
+A worktree directory under the worktrees root that no session manifest references — left behind by a crashed run and listed by `prune` as eligible.
+_Avoid_: dangling worktree, stray worktree
+
+**Stale image**:
+A `seraphim/*` sandbox image tag no registered project's current Dockerfile+lockfile content hash names. Reclaimable cache; `prune` untags it on confirmation.
+_Avoid_: dead image, unused image
