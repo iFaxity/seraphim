@@ -4,12 +4,12 @@ See `AGENTS.md` for architecture and `GLOSSARY.md` for domain vocabulary before 
 
 ## Setup
 
-Node version pinned in `.node-version`, pnpm only — version pinned in `package.json`'s
-`packageManager` field, resolved via `corepack enable`.
+Node version pinned in `.node-version`; dependencies managed by `vp` (Vite+ wraps the pinned
+pnpm from `package.json`'s `packageManager` field).
 
 ```bash
-pnpm install
-pnpm dev
+vp install
+vpr dev
 ```
 
 ## Branches
@@ -20,18 +20,17 @@ pnpm dev
 ## Before opening a PR
 
 ```bash
-pnpm typecheck
-pnpm lint
-pnpm format-check
-pnpm test
+vp run typecheck
+vp check
+vp test run
 ```
 
-The pre-commit hook (`lint-staged`) only covers staged files — run these on the full diff before
+The pre-commit hook (`vp staged`) only covers staged files — run these on the full diff before
 pushing. See `CODING_STANDARDS.md` for what CI doesn't check.
 
 ## Commits
 
-Conventional Commits, linted by `commitlint` (via the `commit-msg` husky hook): header ≤ 72 chars,
+Conventional Commits, linted by `commitlint` (via the `commit-msg` Vite+ hook): header ≤ 72 chars,
 no comma, subject ≥ 10 chars in `lower-case`/`camelCase`/`kebab-case`, body/footer lines ≤ 72
 chars.
 

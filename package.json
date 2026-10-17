@@ -8,7 +8,7 @@
   },
   "type": "module",
   "scripts": {
-    "check": "pnpm typecheck && pnpm lint && pnpm format-check && pnpm test",
+    "check": "vp run typecheck && vp check && vp test run",
     "commit": "commitlint --config commitlint.config.ts",
     "dev": "node bin/seraphim.js",
     "format": "vp fmt .",
