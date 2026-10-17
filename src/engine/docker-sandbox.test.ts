@@ -30,7 +30,7 @@ function countingDocker() {
   const builds: string[][] = [];
 
   async function run(args: readonly string[]) {
-    if (args[0] === 'build') {
+    if (args[0] === 'buildx' && args[1] === 'build') {
       builds.push([...args]);
     }
 
@@ -108,7 +108,7 @@ describe('dockerSandbox.ensureImage', () => {
         return { exitCode: 1, stdout: '', stderr: 'no such image' };
       }
 
-      if (args[0] === 'build') {
+      if (args[0] === 'buildx' && args[1] === 'build') {
         return { exitCode: 0, stdout: 'sha256:fedcba9876543210', stderr: '' };
       }
 
@@ -129,7 +129,9 @@ describe('dockerSandbox.ensureImage', () => {
 
     const build = docker.invocations[1] ?? [];
 
-    expect(build[0]).toBe('build');
+    expect(build[0]).toBe('buildx');
+    expect(build).toContain('build');
+    expect(build).toContain('--load');
     expect(build).toContain('-t');
     expect(build.at(-1)).toBe(join(projectsRoot, 'fresh'));
   });
@@ -141,7 +143,7 @@ describe('dockerSandbox.ensureImage', () => {
         return { exitCode: 1, stdout: '', stderr: 'no such image' };
       }
 
-      if (args[0] === 'build') {
+      if (args[0] === 'buildx' && args[1] === 'build') {
         return { exitCode: 1, stdout: '', stderr: 'pull access denied for no-such-base' };
       }
 
