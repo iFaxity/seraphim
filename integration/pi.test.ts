@@ -33,11 +33,9 @@ async function sandboxFor() {
 
   // The provider key rides the env-slot mechanism the sandbox mounts at exec time —
   // from this run's environment, or from a gitignored local file for convenience.
-  const sources = [
-    ...['OPENCODE_API_KEY', 'OLLAMA_API_KEY']
-      .filter((name) => process.env[name])
-      .map((name) => `${name}=${process.env[name]}`),
-  ];
+  const sources = ['OPENCODE_API_KEY', 'OLLAMA_API_KEY']
+    .filter((name) => process.env[name])
+    .map((name) => `${name}=${process.env[name]}`);
 
   if (sources.length === 0) {
     const local = await readFile(join(import.meta.dirname, '.env'), 'utf8').catch(() => null);
