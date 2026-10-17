@@ -159,24 +159,28 @@ export function fakeDeps(
   const sessionsRoot = overrides?.sessionsRoot ?? '/tmp/seraphim-fake-sessions';
   const runtimeDelayMs = overrides?.runtimeDelayMs ?? 0;
 
-  // A real `AgentRuntime` override (e.g. the pi adapter at the composition root) passes
-  // through as-is; only the recording fake gets the simulated-latency wrap, and the
-  // returned record keeps the FakeRuntime surface so tests keep `runtime.prompts`.
-  const passthrough: FakeRuntime = { prompts: [], transcript: [], ...inner };
-  const fake = 'prompts' in inner && 'transcript' in inner ? (inner as FakeRuntime) : passthrough;
+  // A real `AgentRuntime` override (e.g. the pi adapter at the composition root) has no
+  // recording surface to wrap, so it passes through shaped as a FakeRuntime with empty
+  // recordings; the real fake gets the simulated-latency wrap so tests keep
+  // `runtime.prompts`. The `in` checks narrow the union only structurally, not to the
+  // FakeRuntime alias — the cast names the intent.
+  const isFake = 'prompts' in inner && 'transcript' in inner;
+  const recording: FakeRuntime = isFake
+    ? (inner as FakeRuntime)
+    : { ...inner, prompts: [], transcript: [] };
   const runtime: FakeRuntime =
     runtimeDelayMs > 0
       ? {
-          ...fake,
+          ...recording,
           run: (input) => {
             const { promise, resolve } = Promise.withResolvers<TurnResult>();
 
-            setTimeout(() => resolve(fake.run(input)), runtimeDelayMs);
+            setTimeout(() => resolve(recording.run(input)), runtimeDelayMs);
 
             return promise;
           },
         }
-      : fake;
+      : recording;
 
   return {
     deps: {

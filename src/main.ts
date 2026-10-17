@@ -29,11 +29,11 @@ export async function main(argv: readonly string[], deps?: Deps) {
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams. All four adapters are
- * now real — the Docker sandbox, the git CLI, the GitHub tracker, and the pi/omp agent
- * runtime. The runtime's wall-clock stop is bounded by the composition root: per-session
- * flow caps are kernel-gated in `runSession`, so this bound only stops a runaway child
- * omp process. Tracker auth: `GH_TOKEN` from the seraphim-home `.env`.
+ * Composition root: builds the real `Deps` from the engine's seams — the Docker sandbox,
+ * the git CLI, the GitHub tracker, and the pi/omp agent runtime are all real adapters.
+ * The runtime's wall-clock stop is bounded here: per-session flow caps are kernel-gated
+ * in `runSession`, so this bound only stops a runaway child omp process. Tracker auth:
+ * `GH_TOKEN` from the seraphim-home `.env`.
  */
 function composeDeps() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
