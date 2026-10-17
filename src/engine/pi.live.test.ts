@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { cliDocker, dockerSandbox } from './docker-sandbox.ts';
 import { piRuntime } from './pi.ts';
 
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
 /**
  * Real in-container verification, opt-in behind `SERAPHIM_REAL_RUNTIME=1`: builds a
@@ -35,6 +35,27 @@ async function sandboxFor() {
   const repo = 'live-probe';
   await mkdir(join(root, repo), { recursive: true });
   await writeFile(join(root, repo, 'Dockerfile'), DOCKERFILE);
+
+  // The provider key rides the env-slot mechanism the sandbox mounts at exec time —
+  // from this run's environment, or from a gitignored local file for convenience.
+  const sources = [
+    ...['OPENCODE_API_KEY', 'OLLAMA_API_KEY']
+      .filter((name) => process.env[name])
+      .map((name) => `${name}=${process.env[name]}`),
+  ];
+
+  if (sources.length === 0) {
+    const local = await readFile('.scratch/live.env', 'utf8').catch(() => null);
+
+    if (local) {
+      sources.push(...local.split('\n').filter((line: string) => line.trim() !== ''));
+    }
+  }
+
+  if (sources.length > 0) {
+    await writeFile(join(root, repo, 'env'), `${sources.join('\n')}\n`);
+  }
+
   const cwd = await mkdtemp(join(tmpdir(), 'seraphim-live-wt-'));
 
   return { sandbox: dockerSandbox({ projectsRoot: root, docker: cliDocker }), repo, cwd };
@@ -52,7 +73,7 @@ live('pi runtime (real omp in container)', () => {
       repo,
       cwd,
       prompt: 'Do not run any tool. Reply with exactly the single word: ready',
-      model: 'glm-5.3-flash',
+      model: 'opencode-zen/glm-5.3-flash',
     });
 
     expect(turn.exitState).toBe('completed');
@@ -73,7 +94,7 @@ live('pi runtime (real omp in container)', () => {
         repo,
         cwd,
         prompt: 'Count from 1 to 1000000 in a bash loop. Take as long as needed.',
-        model: 'glm-5.3-flash',
+        model: 'opencode-zen/glm-5.3-flash',
       });
 
       expect(turn.exitState).toBe('cap-hit');
