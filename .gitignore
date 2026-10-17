@@ -3,4 +3,5 @@ dist/
 coverage/
 .scratch/
 *.tsbuildinfo
-live-test/.env
+.env
+.env.local
