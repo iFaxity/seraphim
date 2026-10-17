@@ -42,6 +42,12 @@ Registration seeds each project's central directory with three editable slots:
 Re-registering never clobbers edited slots; it only updates the record. Everything runs
 locally or on a server you own.
 
+## Skill pool
+
+`skills/` holds the curated global pool: non-interactive skills a flow declares in
+`config.skills` and the kernel stages into the worktree. Adding one is a directory plus a
+flow declaration — see `skills/README.md`.
+
 ## Development
 
 `pnpm install && pnpm dev` runs the CLI from source. For quality gates, PR and commit
