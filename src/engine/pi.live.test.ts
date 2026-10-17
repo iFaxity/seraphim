@@ -8,18 +8,14 @@ import { piRuntime } from './pi.ts';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
 /**
- * Real in-container verification, opt-in behind `SERAPHIM_REAL_RUNTIME=1`: builds a
- * minimal project image with the omp CLI and runs the two acceptance checks fakes cannot
- * prove — transcript capture from a live containerized turn, and a tiny wall-clock cap
- * ending the session cleanly. The provider key must exist in the project env slot (`env`
- * beside the Dockerfile) under the name the model's provider resolves to inside the
- * container (e.g. glm models resolve to `zai`, so `ZAI_API_KEY=…`) — without it the turn
- * fails with "No API key found" in the transcript. Skipped by default so the standard
- * suite stays hermetic.
+ * Real in-container verification, included only by vitest.live.config.ts (the
+ * `test:live` script): builds a minimal project image with the omp CLI and runs the two
+ * acceptance checks fakes cannot prove — transcript capture from a live containerized
+ * turn, and a tiny wall-clock cap ending the session cleanly. The provider key must
+ * exist in the project env slot (`env` beside the Dockerfile) under the name the model's
+ * provider resolves to inside the container (e.g. glm models resolve to `zai`, so
+ * `ZAI_API_KEY=…`) — without it the turn fails with "No API key found" in the transcript.
  */
-const enabled = process.env['SERAPHIM_REAL_RUNTIME'] == '1';
-const live = enabled ? describe : describe.skip;
-
 const DOCKERFILE = [
   // glibc base: the CLI's pi_natives addon is glibc-built and cannot load on musl
   // (alpine) — node:26 debian works. The npm package is bun-compiled, so bun must be
@@ -61,7 +57,7 @@ async function sandboxFor() {
   return { sandbox: dockerSandbox({ projectsRoot: root, docker: cliDocker }), repo, cwd };
 }
 
-live('pi runtime (real omp in container)', () => {
+describe('pi runtime (real omp in container)', () => {
   it('captures a transcript from a real containerized turn', { timeout: 600_000 }, async () => {
     const { sandbox, repo, cwd } = await sandboxFor();
     const image = await sandbox.ensureImage(repo);
