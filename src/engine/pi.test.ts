@@ -18,13 +18,13 @@ function userEnd(text: string) {
 
 /** One complete assistant message_end event with text and thinking blocks. */
 function assistantEnd(text: string, thinking = '') {
-  const content: { type: string; text?: string; thinking?: string }[] = [];
+  const content: { type: string; text: string | null; thinking: string | null }[] = [];
 
   if (thinking !== '') {
-    content.push({ type: 'thinking', thinking });
+    content.push({ type: 'thinking', thinking, text: null });
   }
 
-  content.push({ type: 'text', text });
+  content.push({ type: 'text', text, thinking: null });
 
   return JSON.stringify({ type: 'message_end', message: { role: 'assistant', content } });
 }
@@ -46,6 +46,20 @@ describe('parseTranscript', () => {
 
     expect(transcript).toContain('not json at all');
     expect(transcript).toContain('{"type":"agent_start"}');
+  });
+
+  it('keeps stop-bookkeeping events verbatim in the transcript', () => {
+    // The transcript is the whole stream rendered: a capped turn's raw turn_end line
+    // stays in the record next to the messages, not silently dropped.
+    const transcript = parseTranscript(
+      [
+        assistantEnd('partial'),
+        '{"type":"turn_end","message":{"stopReason":"aborted","errorMessage":"Deadline exceeded"}}',
+      ].join('\n'),
+    );
+
+    expect(transcript).toContain('"stopReason":"aborted"');
+    expect(transcript).toContain('### assistant\n\npartial');
   });
 
   it('yields a nonempty body for an empty stream — the transcript file must exist', () => {
@@ -78,10 +92,19 @@ describe('classifyTurn', () => {
   it('maps an aborted Deadline-exceeded stop to cap-hit regardless of exit code', () => {
     expect(classifyTurn(1, [cappedStop])).toBe('cap-hit');
     expect(classifyTurn(0, [cappedStop])).toBe('cap-hit');
+    // omp's deadline message is matched on the cause, not exact phrasing: case drift
+    // keeps classifying as a cap.
+    expect(classifyTurn(1, [{ stopReason: 'aborted', errorMessage: 'DEADLINE EXCEEDED' }])).toBe(
+      'cap-hit',
+    );
   });
 
   it('maps a clean stop with exit 0 to completed', () => {
     expect(classifyTurn(0, [cleanStop])).toBe('completed');
+  });
+
+  it('maps exit 0 with no turn at all to cap-hit — the deadline fired pre-turn', () => {
+    expect(classifyTurn(0, [])).toBe('cap-hit');
   });
 
   it('maps mid-turn failure (nonzero exit, no cap signal) to failed', () => {
