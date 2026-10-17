@@ -1,7 +1,7 @@
 # Coding Standards
 
-`oxlint.config.ts` and `oxfmt.config.ts` are machine-checked — this file covers what they
-can't.
+`vp check` (lint + format + type errors, configured in `vite.config.ts`) is machine-checked —
+this file covers what it can't.
 
 ## Architecture
 
