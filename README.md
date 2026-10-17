@@ -16,12 +16,12 @@ Register a repo once — `seraphim` derives a project name from the URL (or take
 explicitly), probes the remote, and seeds a central directory under your home:
 
 ```bash
-pnpm dev register <git-url> [name] # register a repo, seed flow + Dockerfile + .env slots
-pnpm dev list                      # all projects and their state
-pnpm dev run <repo> <issue#>       # launch a session for a repo and issue
-pnpm dev status                    # see sessions and worktrees at a glance
-pnpm dev deactivate <repo>         # park a project; sessions refuse it until re-registered
-pnpm dev gc                        # confirm-then-delete cleanup
+vpr dev register <git-url> [name] # register a repo, seed flow + Dockerfile + .env slots
+vpr dev list                      # all projects and their state
+vpr dev run <repo> <issue#>       # launch a session for a repo and issue
+vpr dev status                    # see sessions and worktrees at a glance
+vpr dev deactivate <repo>         # park a project; sessions refuse it until re-registered
+vpr dev gc                        # confirm-then-delete cleanup
 ```
 
 Sessions resolve the clone URL from the registration record — an unregistered repo fails
@@ -44,7 +44,7 @@ locally or on a server you own.
 
 ## Development
 
-`pnpm install && pnpm dev` runs the CLI from source. For quality gates, PR and commit
+`vp install && vpr dev` runs the CLI from source. For quality gates, PR and commit
 conventions, see `CONTRIBUTING.md`; architecture decisions live in `docs/adr/`.
 
 ## License
