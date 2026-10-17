@@ -21,7 +21,7 @@ vpr dev list                      # all projects and their state
 vpr dev run <repo> <issue#>       # launch a session for a repo and issue
 vpr dev status                    # see sessions and worktrees at a glance
 vpr dev deactivate <repo>         # park a project; sessions refuse it until re-registered
-vpr dev gc                        # confirm-then-delete cleanup
+vpr dev prune                        # confirm-then-delete cleanup
 ```
 
 Sessions resolve the clone URL from the registration record — an unregistered repo fails
@@ -36,11 +36,26 @@ Registration seeds each project's central directory with three editable slots:
   across sessions. A missing Dockerfile fails fast.
 - **Flow** (`flow.ts`) — a typed TypeScript file (`defineFlow`) declaring agent, skills,
   sandbox, and steps; `ctx.run(prompt)` invokes the agent, `ctx.sh(cmd)` runs gate
-  commands. The seed is a working flow, so `run` works with no manual step.
+  commands (their output rides the session log). The seed is a working flow, so `run`
+  works with no manual step.
 - **`.env`** — environment carried into the session sandbox.
 
 Re-registering never clobbers edited slots; it only updates the record. Everything runs
 locally or on a server you own.
+
+## Skills and cleanup
+
+A flow's `config.skills` is the only skill enrollment: the kernel checks every declared
+name against the curated pool (`<home>/skills`, falling back to the pool shipped in this
+checkout) and stages exactly the declared skills into the worktree at the agent runtime's
+project-level skills path (pi/omp: `.omp/skills/`, claude: `.claude/skills/`) before the
+first turn. A declaration naming a skill the pool does not have fails the session before
+any tracker claim or worktree exists.
+
+`seraphim prune` lists sessions, orphan worktrees, and stale `seraphim/*` image tags that are
+eligible for cleanup and deletes them only after an explicit confirmation (`--confirm` in
+non-interactive shells). Completed sessions only — failed and cap-hit sessions keep their
+branch, logs, and transcript for human takeover, always.
 
 ## Development
 
