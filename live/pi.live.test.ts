@@ -2,8 +2,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { cliDocker, dockerSandbox } from './docker-sandbox.ts';
-import { piRuntime } from './pi.ts';
+import { cliDocker, dockerSandbox } from '../src/engine/docker-sandbox.ts';
+import { piRuntime } from '../src/engine/pi.ts';
 
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
@@ -41,7 +41,7 @@ async function sandboxFor() {
   ];
 
   if (sources.length === 0) {
-    const local = await readFile('.scratch/live.env', 'utf8').catch(() => null);
+    const local = await readFile(join(import.meta.dirname, '.env'), 'utf8').catch(() => null);
 
     if (local) {
       sources.push(...local.split('\n').filter((line: string) => line.trim() !== ''));
