@@ -1,6 +1,6 @@
 # Contributing
 
-See `AGENTS.md` for architecture and `CONTEXT.md` for domain vocabulary before making changes.
+See `AGENTS.md` for architecture and `GLOSSARY.md` for domain vocabulary before making changes.
 
 ## Setup
 

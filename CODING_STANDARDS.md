@@ -43,7 +43,7 @@ can't.
 
 ## Naming
 
-- Match `CONTEXT.md`'s glossary and its `_Avoid_` terms.
+- Match `GLOSSARY.md`'s glossary and its `_Avoid_` terms.
 
 ## Comments
 
