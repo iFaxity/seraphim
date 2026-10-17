@@ -87,7 +87,10 @@ export function dockerSandbox(options: DockerSandboxOptions) {
         return success({ id: id.data });
       }
 
-      const build = await docker.run(['build', '-q', '-t', tag, dir]);
+      // buildx explicitly, --load into the local image store: the build no longer
+      // depends on the daemon's default builder, and `docker run` (exec below) always
+      // sees the built image whatever driver the host has.
+      const build = await docker.run(['buildx', 'build', '--load', '-q', '-t', tag, dir]);
 
       if (build.exitCode != 0) {
         const detail = build.stderr || build.stdout;
