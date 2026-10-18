@@ -52,6 +52,10 @@ _Avoid_: skill registry, skill store
 A worktree directory under the worktrees root that no session manifest references — left behind by a crashed run and listed by `prune` as eligible.
 _Avoid_: dangling worktree, stray worktree
 
+**Turn engine**:
+The kernel module owning cap enforcement and the turn ledger: gate before dispatch, record after, transcripts per turn and per session. Kernel-internal — no adapter implements it; caps live in the kernel, invisible to flow code.
+_Avoid_: turn manager, cap checker, budget guard
+
 **Stale image**:
 A `seraphim/*` sandbox image tag no registered project's current Dockerfile+lockfile content hash names. Reclaimable cache; `prune` untags it on confirmation.
 _Avoid_: dead image, unused image
