@@ -3,17 +3,17 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { type SessionLine } from './engine/commands/status.ts';
-import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
-import { fakeDeps } from './engine/fakes.ts';
-import { gitAdapter, processGit } from './engine/git.ts';
-import { githubApi } from './engine/github-api.ts';
-import { ghTracker } from './engine/github-tracker.ts';
-import { piRuntime } from './engine/pi.ts';
-import { type Outcome } from './engine/registry.ts';
-import { type Deps } from './engine/session.ts';
-import { poolRoot } from './engine/skills.ts';
+import { fakeDeps } from './engine/fakes/deps.ts';
+import { githubApi } from './engine/forges/github-api.ts';
+import { ghTracker } from './engine/forges/github-tracker.ts';
+import { type SessionLine } from './engine/kernel/commands/status.ts';
+import { type Outcome } from './engine/kernel/dispatcher.ts';
+import { gitAdapter, processGit } from './engine/kernel/git.ts';
+import { type Deps } from './engine/kernel/session.ts';
+import { poolRoot } from './engine/kernel/skills.ts';
+import { piRuntime } from './engine/runtimes/pi.ts';
+import { cliDocker, dockerSandbox } from './engine/sandboxes/docker-sandbox.ts';
 import { readEnvFile } from './lib/env-file.ts';
 import { failure, success, type Result } from './lib/result.ts';
 
