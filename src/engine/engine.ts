@@ -2,6 +2,8 @@ import { dispatch } from './dispatcher.ts';
 import { type CommandName } from './invocation.ts';
 import { type Deps } from './session.ts';
 
+import { success, failure } from '../lib/result.ts';
+
 const KNOWN: readonly CommandName[] = [
   'run',
   'register',
@@ -25,20 +27,20 @@ function isCommandName(name: string): name is CommandName {
  */
 export function parse(argv: readonly string[]) {
   if (argv.length === 0) {
-    return { success: true as const, data: { command: 'help' as const, args: [] } };
+    return success({ command: 'help' as const, args: [] });
   }
 
   const [first, ...rest] = argv;
 
   if ((first ?? '').startsWith('-')) {
-    return { success: false as const, error: new Error(`unrecognized option '${first}'`) };
+    return failure(new Error(`unrecognized option '${first}'`));
   }
 
   const name = first ?? '';
 
   return isCommandName(name)
-    ? { success: true as const, data: { command: name, args: rest } }
-    : { success: false as const, error: new Error(`unknown command '${name}'`) };
+    ? success({ command: name, args: rest })
+    : failure(new Error(`unknown command '${name}'`));
 }
 
 /**

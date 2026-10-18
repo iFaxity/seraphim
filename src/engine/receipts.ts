@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { z } from 'zod';
 
-import { tryCatch } from '../lib/result.ts';
+import { tryCatch, success, failure } from '../lib/result.ts';
 import { fromEpochMs, toEpochMs } from '../lib/time.ts';
 import { readFile, readdir } from 'node:fs/promises';
 
@@ -97,28 +97,19 @@ export async function readManifest(sessionPath: string) {
   const raw = await tryCatch(readFile(join(sessionPath, MANIFEST_FILE), 'utf8'));
 
   if (!raw.success) {
-    return {
-      success: false as const,
-      error: new Error(`unreadable manifest in ${sessionPath}: ${String(raw.error)}`),
-    };
+    return failure(new Error(`unreadable manifest in ${sessionPath}: ${String(raw.error)}`));
   }
 
   const json = tryCatch(() => JSON.parse(raw.data) as unknown);
 
   if (!json.success) {
-    return {
-      success: false as const,
-      error: new Error(`invalid manifest JSON in ${sessionPath}: ${String(json.error)}`),
-    };
+    return failure(new Error(`invalid manifest JSON in ${sessionPath}: ${String(json.error)}`));
   }
 
   const parsed = SessionManifestSchema.safeParse(json.data);
 
   if (!parsed.success) {
-    return {
-      success: false as const,
-      error: new Error(`invalid manifest in ${sessionPath}: ${parsed.error.message}`),
-    };
+    return failure(new Error(`invalid manifest in ${sessionPath}: ${parsed.error.message}`));
   }
 
   // The kernel-facing shape: instants. The disk saw numbers; the conversion happens once,
@@ -134,7 +125,7 @@ export async function readManifest(sessionPath: string) {
     })),
   };
 
-  return { success: true as const, data: manifest };
+  return success(manifest);
 }
 
 /** All sessions across all repos under the receipts root, newest first. */
@@ -152,10 +143,7 @@ export async function listSessions(sessionsRoot: string) {
   if (!repos.success) {
     return repos.error instanceof Error && 'code' in repos.error && repos.error.code == 'ENOENT'
       ? successEmpty()
-      : {
-          success: false as const,
-          error: new Error(`unreadable sessions root ${sessionsRoot}: ${String(repos.error)}`),
-        };
+      : failure(new Error(`unreadable sessions root ${sessionsRoot}: ${String(repos.error)}`));
   }
 
   let skipped = 0;
@@ -204,16 +192,15 @@ export async function listSessions(sessionsRoot: string) {
   ).flat();
 
   return {
-    success: true as const,
-    data: listings.sort(
-      (a, b) => toEpochMs(b.manifest.startedAt) - toEpochMs(a.manifest.startedAt),
+    ...success(
+      listings.sort((a, b) => toEpochMs(b.manifest.startedAt) - toEpochMs(a.manifest.startedAt)),
     ),
     skipped,
   };
 }
 
 function successEmpty() {
-  return { success: true as const, data: [], skipped: 0 };
+  return { ...success([]), skipped: 0 };
 }
 
 /** Last line of a session's `flow.log`, or null when there is none. */

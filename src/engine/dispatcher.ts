@@ -245,11 +245,8 @@ const COMMANDS: readonly {
         };
       }
 
+      // runPrune is infallible: per-item failures ride the result's failed list.
       const done = await runPrune(deps, planned.data);
-
-      if (!done.success) {
-        return { kind: 'error', message: done.error.message };
-      }
 
       return { kind: 'prune-done', removed: done.data.removed, failed: done.data.failed };
     },

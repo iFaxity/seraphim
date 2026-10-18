@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { CapsSchema } from './receipts.ts';
 import { type Tracker } from './seams.ts';
 
-import { tryCatch } from '../lib/result.ts';
+import { failure, success, tryCatch } from '../lib/result.ts';
 import { readFile } from 'node:fs/promises';
 
 /**
@@ -75,19 +75,13 @@ export async function loadFlow(home: string, repo: string) {
   const read = await tryCatch(readFile(path, 'utf8'));
 
   if (!read.success) {
-    return {
-      success: false as const,
-      error: new Error(`no project flow for '${repo}': expected ${path}`),
-    };
+    return failure(new Error(`no project flow for '${repo}': expected ${path}`));
   }
 
   const imported = await tryCatch(import(path));
 
   if (!imported.success) {
-    return {
-      success: false as const,
-      error: new Error(`flow for '${repo}' failed to load: ${String(imported.error)}`),
-    };
+    return failure(new Error(`flow for '${repo}' failed to load: ${String(imported.error)}`));
   }
 
   const mod =
@@ -98,14 +92,8 @@ export async function loadFlow(home: string, repo: string) {
   const parsed = FlowModuleSchema.safeParse(mod);
 
   if (!parsed.success) {
-    return {
-      success: false as const,
-      error: new Error(`flow for '${repo}' is invalid: ${parsed.error.message}`),
-    };
+    return failure(new Error(`flow for '${repo}' is invalid: ${parsed.error.message}`));
   }
 
-  return {
-    success: true as const,
-    data: parsed.data,
-  };
+  return success(parsed.data);
 }

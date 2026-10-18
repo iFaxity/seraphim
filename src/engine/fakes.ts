@@ -10,6 +10,8 @@ import {
   type TurnResult,
 } from './seams.ts';
 
+import { success } from '../lib/result.ts';
+
 /**
  * Hand-written fakes for the three adapter seams plus the internal `Git` seam (ADR-0002 keeps
  * fakes engine-side). They record observable effects — tracker calls issued, worktree
@@ -101,7 +103,7 @@ export function fakeSandbox() {
   const executed: string[] = [];
   return {
     executed,
-    ensureImage: () => Promise.resolve({ success: true as const, data: { id: 'fake-image' } }),
+    ensureImage: () => Promise.resolve(success({ id: 'fake-image' })),
     exec: (input) => {
       executed.push(input.command.join(' '));
 
