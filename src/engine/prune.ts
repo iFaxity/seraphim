@@ -5,7 +5,7 @@ import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 import { type Git } from './seams.ts';
 
-import { type Result } from '../lib/result.ts';
+import { success } from '../lib/result.ts';
 import { readdir, rm } from 'node:fs/promises';
 
 /**
@@ -59,7 +59,7 @@ export type PruneDeps = {
  * (a crashed run left it behind) is an orphan. A seraphim/* image tag is stale when no
  * registered project's Dockerfile+lockfile content hash names it anymore.
  */
-export async function planPrune(deps: PruneDeps): Promise<Result<PrunePlan>> {
+export async function planPrune(deps: PruneDeps) {
   const listed = await listSessions(deps.sessionsRoot);
 
   if (!listed.success) {
@@ -94,10 +94,7 @@ export async function planPrune(deps: PruneDeps): Promise<Result<PrunePlan>> {
     images = await staleImages(deps.workspaceRoot, deps.docker);
   }
 
-  return {
-    success: true as const,
-    data: { sessions, orphanWorktrees, images, skipped: listed.skipped },
-  };
+  return success({ sessions, orphanWorktrees, images, skipped: listed.skipped });
 }
 
 /**
@@ -105,10 +102,7 @@ export async function planPrune(deps: PruneDeps): Promise<Result<PrunePlan>> {
  * directory, deletes orphan worktree directories, untags stale images. Per-item failures are
  * collected, never fatal — one stuck worktree must not block the rest of the cleanup.
  */
-export async function runPrune(
-  deps: PruneDeps,
-  plan: PrunePlan,
-): Promise<Result<{ readonly removed: PrunePlan; readonly failed: readonly string[] }>> {
+export async function runPrune(deps: PruneDeps, plan: PrunePlan) {
   const failed: string[] = [];
 
   for (const session of plan.sessions) {
@@ -149,7 +143,7 @@ export async function runPrune(
     }
   }
 
-  return { success: true as const, data: { removed: plan, failed } };
+  return success({ removed: plan, failed });
 }
 
 /**

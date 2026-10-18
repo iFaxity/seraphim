@@ -15,7 +15,7 @@ import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
 
 import { fileExists } from '../lib/fs.ts';
-import { failure, tryCatch } from '../lib/result.ts';
+import { failure, success, tryCatch } from '../lib/result.ts';
 import { now, toEpochMs } from '../lib/time.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 
@@ -62,9 +62,7 @@ export type Deps = {
  */
 function step<TResult>(action: PromiseLike<TResult>, label: string) {
   return tryCatch(action).then((result) =>
-    result.success
-      ? result
-      : { success: false as const, error: new Error(`${label}: ${String(result.error)}`) },
+    result.success ? result : failure(new Error(`${label}: ${String(result.error)}`)),
   );
 }
 
@@ -114,10 +112,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
   // Availability is the adapter's own report — the kernel never branches on a backend
   // name. Selecting a runtime whose adapter is missing fails fast here.
   if (!deps.runtime.available(flow.data.config.agent)) {
-    return {
-      success: false as const,
-      error: new Error(`adapter not available: ${flow.data.config.agent}`),
-    };
+    return failure(new Error(`adapter not available: ${flow.data.config.agent}`));
   }
   const issue = await step(
     deps.tracker.getIssue(input.repo, input.issueNumber),
@@ -378,7 +373,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return write;
   }
 
-  return { success: true as const, data: { manifest: finalManifest } };
+  return success({ manifest: finalManifest });
 }
 
 /** Thrown by ctx.run when a turn fails or hits a cap — the flow stops, state is recorded. */
@@ -407,15 +402,14 @@ async function checkPreflight(deps: Deps, repo: string) {
   const hasDockerfile = await fileExists(dockerfilePath);
 
   if (!hasDockerfile) {
-    return {
-      success: false as const,
-      error: new Error(
+    return failure(
+      new Error(
         `no Dockerfile for '${repo}': expected ${deps.workspaceRoot}/projects/${repo}/Dockerfile`,
       ),
-    };
+    );
   }
 
-  return { success: true as const, data: undefined };
+  return success(undefined);
 }
 
 /** The disk shape of one kernel turn: instants converted to epoch ms. */
@@ -443,19 +437,13 @@ async function writeReceipts(
   const validated = SessionManifestSchema.safeParse(diskManifest);
 
   if (!validated.success) {
-    return {
-      success: false as const,
-      error: new Error(`session manifest invalid: ${validated.error.message}`),
-    };
+    return failure(new Error(`session manifest invalid: ${validated.error.message}`));
   }
 
   const mkdirResult = await tryCatch(mkdir(dir, { recursive: true }));
 
   if (!mkdirResult.success) {
-    return {
-      success: false as const,
-      error: new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`),
-    };
+    return failure(new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`));
   }
 
   const manifestWrite = await tryCatch(
@@ -463,10 +451,7 @@ async function writeReceipts(
   );
 
   if (!manifestWrite.success) {
-    return {
-      success: false as const,
-      error: new Error(`manifest write failed: ${String(manifestWrite.error)}`),
-    };
+    return failure(new Error(`manifest write failed: ${String(manifestWrite.error)}`));
   }
 
   const turnWrite = await writeAll(
@@ -478,10 +463,7 @@ async function writeReceipts(
   );
 
   if (!turnWrite.success) {
-    return {
-      success: false as const,
-      error: new Error(`turn record write failed: ${String(turnWrite.error)}`),
-    };
+    return failure(new Error(`turn record write failed: ${String(turnWrite.error)}`));
   }
 
   if (logs.length > 0) {
@@ -490,10 +472,7 @@ async function writeReceipts(
     );
 
     if (!logWrite.success) {
-      return {
-        success: false as const,
-        error: new Error(`log write failed: ${String(logWrite.error)}`),
-      };
+      return failure(new Error(`log write failed: ${String(logWrite.error)}`));
     }
   }
 
@@ -504,13 +483,10 @@ async function writeReceipts(
   );
 
   if (!transcriptWrite.success) {
-    return {
-      success: false as const,
-      error: new Error(`transcript write failed: ${String(transcriptWrite.error)}`),
-    };
+    return failure(new Error(`transcript write failed: ${String(transcriptWrite.error)}`));
   }
 
-  return { success: true as const, data: undefined };
+  return success(undefined);
 }
 
 /**
@@ -523,5 +499,5 @@ async function writeAll(dir: string, files: readonly { name: string; body: strin
   );
   const failed = writes.find((write) => !write.success);
 
-  return failed ?? { success: true as const, data: undefined };
+  return failed ?? success(undefined);
 }

@@ -1,7 +1,7 @@
 import { basename, join } from 'node:path';
 
 import { isFsErrorCode } from '../lib/fs.ts';
-import { failure, tryCatch, type Result } from '../lib/result.ts';
+import { failure, success, tryCatch } from '../lib/result.ts';
 import { cp, mkdir, readdir, stat } from 'node:fs/promises';
 
 /**
@@ -29,12 +29,12 @@ export type PoolSkill = {
 };
 
 /** All pool skills, name order. The pool root itself is optional — an empty pool is valid. */
-export async function listPoolSkills(poolRoot: string): Promise<Result<readonly PoolSkill[]>> {
+export async function listPoolSkills(poolRoot: string) {
   const read = await tryCatch(readdir(poolRoot, { withFileTypes: true }));
 
   if (!read.success) {
     return isFsErrorCode(read.error, 'ENOENT')
-      ? { success: true as const, data: [] }
+      ? success([])
       : failure(new Error(`unreadable skill pool ${poolRoot}: ${String(read.error)}`));
   }
 
@@ -51,10 +51,7 @@ export async function listPoolSkills(poolRoot: string): Promise<Result<readonly 
       }),
   );
 
-  return {
-    success: true as const,
-    data: skills.flat().sort((a, b) => a.name.localeCompare(b.name)),
-  };
+  return success(skills.flat().sort((a, b) => a.name.localeCompare(b.name)));
 }
 
 /**
@@ -82,7 +79,7 @@ export async function checkDeclaredSkills(poolRoot: string, declared: readonly s
     );
   }
 
-  return { success: true as const, data: null };
+  return success(null);
 }
 
 /** The worktree-relative project skills path each runtime discovers: one level deep. */
@@ -101,7 +98,7 @@ export async function stageSkills(input: {
   readonly worktreePath: string;
   readonly agent: 'pi' | 'claude';
   readonly declared: readonly string[];
-}): Promise<Result<readonly string[]>> {
+}) {
   const pool = await listPoolSkills(input.poolRoot);
 
   if (!pool.success) {
@@ -125,5 +122,5 @@ export async function stageSkills(input: {
     staged.push(name);
   }
 
-  return { success: true as const, data: staged };
+  return success(staged);
 }
