@@ -2,8 +2,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { cliDocker, dockerSandbox } from '../src/engine/docker-sandbox.ts';
-import { stageSkills } from '../src/engine/skills.ts';
+import { stageSkills } from '../src/engine/kernel/skills.ts';
+import { cliDocker, dockerSandbox } from '../src/engine/sandboxes/docker-sandbox.ts';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 
 /**

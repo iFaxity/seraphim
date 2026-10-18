@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine/engine.ts';
-import { fakeDeps } from './engine/fakes.ts';
+import { fakeDeps } from './engine/fakes/deps.ts';
 import { main } from './main.ts';
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
