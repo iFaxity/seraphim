@@ -3,14 +3,15 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { type SessionLine } from './engine/commands/status.ts';
 import { cliDocker, dockerSandbox } from './engine/docker-sandbox.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes.ts';
 import { gitAdapter, processGit } from './engine/git.ts';
 import { githubApi } from './engine/github-api.ts';
 import { ghTracker } from './engine/github-tracker.ts';
-import { type Outcome, type SessionLine } from './engine/invocation.ts';
 import { piRuntime } from './engine/pi.ts';
+import { type Outcome } from './engine/registry.ts';
 import { type Deps } from './engine/session.ts';
 import { poolRoot } from './engine/skills.ts';
 import { readEnvFile } from './lib/env-file.ts';
