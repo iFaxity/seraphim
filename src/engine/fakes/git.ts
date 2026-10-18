@@ -1,7 +1,7 @@
-import { type Git } from '../kernel/seams.ts';
+import { type Git } from '../contracts.ts';
 
 /**
- * Hand-written fake for the git seam (ADR-0002 keeps fakes engine-side): records clones,
+ * Hand-written fake for the git contract (ADR-0002 keeps fakes engine-side): records clones,
  * worktrees, prunes, and branch deletes, so tests assert behavior a user observes —
  * worktree branches created — never kernel internals (spec: Testing Decisions).
  */

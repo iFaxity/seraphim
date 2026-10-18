@@ -12,10 +12,10 @@ export const pruneCommand = command({
     json: { type: 'boolean', default: false },
     confirm: { type: 'boolean', default: false },
   }),
-  execute: async (deps, values) => {
+  execute: async (env, values) => {
     // Deletion runs over a freshly computed plan: the operator confirmed the listing, and
     // the executor re-derives eligibility so nothing deleted in between is touched twice.
-    const planned = await planPrune(deps);
+    const planned = await planPrune(env);
 
     if (!planned.success) {
       return failure(planned.error);
@@ -30,7 +30,7 @@ export const pruneCommand = command({
     }
 
     // runPrune is infallible: per-item failures ride the result's failed list.
-    const done = await runPrune(deps, planned.data);
+    const done = await runPrune(env, planned.data);
 
     return success({
       kind: 'prune-done' as const,

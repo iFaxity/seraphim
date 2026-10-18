@@ -59,3 +59,11 @@ _Avoid_: turn manager, cap checker, budget guard
 **Stale image**:
 A `seraphim/*` sandbox image tag no registered project's current Dockerfile+lockfile content hash names. Reclaimable cache; `prune` untags it on confirmation.
 _Avoid_: dead image, unused image
+
+**Contract**:
+A kernel-declared interface describing one outside system (`Tracker`, `Sandbox`, `AgentRuntime`, `Git`), declared in `src/engine/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
+_Avoid_: seam, port, service interface
+
+**KernelEnvironment**:
+The record of contract instances plus filesystem roots (`workspaceRoot`, `sessionsRoot`, `poolRoot`) the kernel runs against, threaded explicitly into `engine()` — composed once in `src/main.ts` (`composeKernelEnvironment`), faked wholesale in tests (`fakeKernelEnvironment`).
+_Avoid_: deps, dependencies, context

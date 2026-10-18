@@ -1,8 +1,8 @@
 import { type Caps, type Turn } from './receipts.ts';
-import { type TurnResult } from './seams.ts';
 
 import { failure, success, type Result } from '../../lib/result.ts';
 import { toEpochMs } from '../../lib/time.ts';
+import { type TurnResult } from '../contracts.ts';
 
 /** Free-text artifacts that sit alongside — never replace — the schema'd receipt JSON. */
 export type TranscriptFile = {

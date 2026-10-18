@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
-import { planPrune, runPrune, type PruneDeps } from './prune.ts';
+import { planPrune, runPrune, type PruneEnv } from './prune.ts';
 import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
 import { fakeGit, type FakeGit } from '../fakes/git.ts';
@@ -23,7 +23,7 @@ afterAll(async () => {
   await rm(sessionsRoot, { recursive: true, force: true });
 });
 
-function depsWith(fake: FakeGit, docker?: DockerRunner): PruneDeps {
+function envWith(fake: FakeGit, docker?: DockerRunner): PruneEnv {
   return { workspaceRoot: root, sessionsRoot, git: fake, docker };
 }
 
@@ -93,7 +93,7 @@ describe('planPrune', () => {
     await seedSession({ repo: 'demo', issueNumber: 2, state: 'failed' });
     await seedSession({ repo: 'demo', issueNumber: 3, state: 'cap-hit' });
 
-    const planned = await planPrune(depsWith(fakeGit()));
+    const planned = await planPrune(envWith(fakeGit()));
 
     expect(planned.success).toBe(true);
 
@@ -121,7 +121,7 @@ describe('planPrune', () => {
     });
     const orphan = await seedWorktree('demo', '999-orphan');
 
-    const planned = await planPrune(depsWith(fakeGit()));
+    const planned = await planPrune(envWith(fakeGit()));
 
     expect(planned.success).toBe(true);
 
@@ -136,7 +136,7 @@ describe('planPrune', () => {
     await registerProject(root, fakeGit(), 'https://example.invalid/acme/demo.git', 'demo');
 
     const planned = await planPrune(
-      depsWith(fakeGit(), dockerListing(['seraphim/demo:deadbeef', 'seraphim/gone:00112233'])),
+      envWith(fakeGit(), dockerListing(['seraphim/demo:deadbeef', 'seraphim/gone:00112233'])),
     );
 
     expect(planned.success).toBe(true);
@@ -160,7 +160,7 @@ describe('planPrune', () => {
 
     const { imageTagFor } = await import('../sandboxes/docker-sandbox.ts');
     const tag = await imageTagFor(projectDir);
-    const planned = await planPrune(depsWith(fakeGit(), dockerListing([tag])));
+    const planned = await planPrune(envWith(fakeGit(), dockerListing([tag])));
 
     expect(planned.success).toBe(true);
 
@@ -170,7 +170,7 @@ describe('planPrune', () => {
   });
 
   it('skips image pruning when no docker runner is configured', async () => {
-    const planned = await planPrune(depsWith(fakeGit()));
+    const planned = await planPrune(envWith(fakeGit()));
 
     expect(planned.success).toBe(true);
 
@@ -186,9 +186,9 @@ describe('runPrune', () => {
     const session = await seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' });
     await mkdir(session.worktreePath, { recursive: true });
 
-    const planned = await planPrune(depsWith(git));
+    const planned = await planPrune(envWith(git));
     const done = await runPrune(
-      depsWith(git),
+      envWith(git),
       planned.success
         ? planned.data
         : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
@@ -207,9 +207,9 @@ describe('runPrune', () => {
   it('removes orphan worktrees and untags stale images', async () => {
     const orphan = await seedWorktree('demo', '999-orphan');
     const docker = dockerListing(['seraphim/gone:00112233']);
-    const planned = await planPrune(depsWith(fakeGit(), docker));
+    const planned = await planPrune(envWith(fakeGit(), docker));
     const done = await runPrune(
-      depsWith(fakeGit(), docker),
+      envWith(fakeGit(), docker),
       planned.success
         ? planned.data
         : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
@@ -230,9 +230,9 @@ describe('runPrune', () => {
         ? Promise.reject(new Error('device busy'))
         : Promise.resolve();
 
-    const planned = await planPrune(depsWith(git));
+    const planned = await planPrune(envWith(git));
     const done = await runPrune(
-      depsWith(git),
+      envWith(git),
       planned.success
         ? planned.data
         : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
@@ -256,9 +256,9 @@ describe('runPrune image failures', () => {
           ? { exitCode: 0, stdout: 'seraphim/gone:00112233', stderr: '' }
           : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
     };
-    const planned = await planPrune(depsWith(fakeGit(), docker));
+    const planned = await planPrune(envWith(fakeGit(), docker));
     const done = await runPrune(
-      depsWith(fakeGit(), docker),
+      envWith(fakeGit(), docker),
       planned.success
         ? planned.data
         : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
@@ -275,7 +275,7 @@ describe('runPrune image failures', () => {
     const docker: DockerRunner = {
       run: async () => ({ exitCode: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' }),
     };
-    const planned = await planPrune(depsWith(fakeGit(), docker));
+    const planned = await planPrune(envWith(fakeGit(), docker));
 
     expect(planned.success).toBe(true);
 

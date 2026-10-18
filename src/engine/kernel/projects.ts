@@ -1,9 +1,8 @@
 import { z } from 'zod';
 
-import { type Git } from './seams.ts';
-
 import { isFsErrorCode } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
+import { type Git } from '../contracts.ts';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 
 /**

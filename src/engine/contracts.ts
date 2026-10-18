@@ -1,7 +1,7 @@
-import { type Result } from '../../lib/result.ts';
+import { type Result } from '../lib/result.ts';
 
 /**
- * The three adapter seams the session engine drives, plus the internal `Git` seam. All are
+ * The three adapter contracts the session engine drives, plus the internal `Git` contract. All are
  * compile-time TS types (CODING_STANDARDS: internal kernel types stay TS; `zod` only at
  * untrusted edges) — flows depend on the interface, tests inject fakes, and no kernel code
  * branches on a specific backend (ADR-0003).
@@ -25,7 +25,7 @@ export type PullRequest = {
 };
 
 /**
- * Tracker seam: ingest-only normalization over the forge (ADR-0003). The label/comment dance
+ * Tracker contract: ingest-only normalization over the forge (ADR-0003). The label/comment dance
  * (claim on pickup) and `openDraftPr` are the kernel's only writes; everything else reads.
  */
 export type Tracker = {
@@ -63,7 +63,7 @@ export type Image = {
 };
 
 /**
- * Sandbox seam: per-project image build/cache and exec with the session worktree mounted.
+ * Sandbox contract: per-project image build/cache and exec with the session worktree mounted.
  * v1 ships no real adapter; tests inject fakes.
  */
 export type Sandbox = {
@@ -83,7 +83,7 @@ export type TurnResult = {
 };
 
 /**
- * AgentRuntime seam: one agent turn in the session worktree, with caps and transcript
+ * AgentRuntime contract: one agent turn in the session worktree, with caps and transcript
  * capture. Adapter availability lives here — the kernel never branches on a backend name
  * (ADR-0003); a runtime that cannot drive an agent reports so through `available`. The
  * `repo` names the project whose sandbox image and env slot the turn runs against.
@@ -99,7 +99,7 @@ export type AgentRuntime = {
 };
 
 /**
- * Internal git mechanics seam — the engine's only path to version control, so tests fake it
+ * Internal git mechanics contract — the engine's only path to version control, so tests fake it
  * instead of shelling out. Not a flow-facing adapter: flows never touch git.
  */
 export type Git = {

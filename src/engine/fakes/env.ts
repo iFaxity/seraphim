@@ -11,14 +11,14 @@ import {
   type Sandbox,
   type Tracker,
   type TurnResult,
-} from '../kernel/seams.ts';
+} from '../contracts.ts';
 import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 
 /**
- * Composes the per-seam fakes into one `Deps` home, so tests inject a whole engine with one
+ * Composes the per-contract fakes into one `KernelEnvironment` home, so tests inject a whole engine with one
  * call and reach the individual fakes for scripted behavior and recorded-effects assertions.
  */
-export function fakeDeps(
+export function fakeKernelEnvironment(
   overrides?: Partial<{
     readonly runtime: FakeRuntime | AgentRuntime;
     readonly tracker: FakeTracker | Tracker;
@@ -70,7 +70,7 @@ export function fakeDeps(
       : recording;
 
   return {
-    deps: {
+    env: {
       tracker,
       sandbox,
       runtime,

@@ -1,7 +1,7 @@
-import { type Issue, type Tracker } from '../kernel/seams.ts';
+import { type Issue, type Tracker } from '../contracts.ts';
 
 /**
- * Hand-written fake for the tracker seam (ADR-0002 keeps fakes engine-side): records the
+ * Hand-written fake for the tracker contract (ADR-0002 keeps fakes engine-side): records the
  * kernel's writes and seeds the intake view, so tests assert behavior a user observes —
  * tracker calls issued — never kernel internals (spec: Testing Decisions).
  */

@@ -8,7 +8,7 @@ this file covers what it can't.
 - Vertical feature slices under `src/features/<name>/` own their schema, commands, and tests —
   don't reach into another feature's internals.
 - No barrel files.
-- Adapter seams (`Tracker`, `Sandbox`, `AgentRuntime`) are interfaces: flows depend on the
+- Adapter contracts (`Tracker`, `Sandbox`, `AgentRuntime`) are interfaces: flows depend on the
   interface, tests inject fakes. No kernel code branches on a specific backend.
 - CLI commands are thin: parse + dispatch to a kernel/engine function; no business logic in
   `src/commands/`.
@@ -19,10 +19,10 @@ this file covers what it can't.
 - Compose `Promise.all` over a pre-built array variable; no spreads or `join` chains inside
   the call — build the list, then await it.
 - Prefer array chaining (`map`/`filter`/`reduce`) over imperative `for`/`while` loops.
-- Infer return types; annotate only load-bearing seams — `seams.ts` members, type
+- Infer return types; annotate only load-bearing contracts — `contracts.ts` members, type
   predicates (`x is T`), `fakes/` factories.
 - Absent values are `null`, never `undefined` or optional fields (`?:`/`.optional()`).
-  Exceptions: optional _parameters_ at call sites (`deps?: Deps`), and receipt JSON keys may
+  Exceptions: optional _parameters_ at call sites (`env?: KernelEnvironment`), and receipt JSON keys may
   be omitted on disk — the kernel-facing types are still `| null`.
 
 ## Errors

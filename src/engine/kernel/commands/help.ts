@@ -47,6 +47,6 @@ export function makeHelpCommand(
     name: 'help',
     summary: 'show command help',
     usage: 'help [command]',
-    handler: (_deps, args) => Promise.resolve(helpOutcome(args)),
+    handler: (_env, args) => Promise.resolve(helpOutcome(args)),
   };
 }

@@ -8,7 +8,7 @@ import { runSession } from './session.ts';
 
 import { toEpochMs } from '../../lib/time.ts';
 import { engine } from '../engine.ts';
-import { fakeDeps } from '../fakes/deps.ts';
+import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { fakeRuntime } from '../fakes/runtime.ts';
 import { fakeSandbox } from '../fakes/sandbox.ts';
 import { type FakeTracker } from '../fakes/tracker.ts';
@@ -20,9 +20,9 @@ function seedRemote(repo: string) {
 }
 
 async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
-  const { deps } = fakeDeps({ workspaceRoot: root });
+  const { env } = fakeKernelEnvironment({ workspaceRoot: root });
 
-  await registerProject(root, deps.git, seedRemote(repo), repo);
+  await registerProject(root, env.git, seedRemote(repo), repo);
 
   const projectDir = join(root, 'projects', repo);
 
@@ -72,9 +72,9 @@ afterAll(async () => {
 describe('runSession', () => {
   it('runs a full session over fakes: branch off default, worktree recorded, receipts written, clean exit', async () => {
     await seedProject(root, 'demo');
-    const { deps, runtime, git } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, runtime, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'demo', issueNumber: 7 });
+    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
 
     expect(result.success).toBe(true);
 
@@ -113,9 +113,9 @@ describe('runSession', () => {
   });
 
   it('fails fast naming the register fix for an unregistered repo', async () => {
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'ghost', issueNumber: 1 });
+    const result = await runSession(env, { repo: 'ghost', issueNumber: 1 });
 
     expect(result.success).toBe(false);
 
@@ -128,9 +128,9 @@ describe('runSession', () => {
   it('fails fast for an inactive project, naming the re-register fix', async () => {
     await seedProject(root, 'dormant');
     await deactivateProject(root, 'dormant');
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'dormant', issueNumber: 9 });
+    const result = await runSession(env, { repo: 'dormant', issueNumber: 9 });
 
     expect(result.success).toBe(false);
 
@@ -155,9 +155,9 @@ describe('runSession', () => {
 export default flow;
 `,
     );
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'nobudget', issueNumber: 5 });
+    const result = await runSession(env, { repo: 'nobudget', issueNumber: 5 });
 
     expect(result.success).toBe(false);
 
@@ -169,9 +169,9 @@ export default flow;
   it('fails fast with a clear error when the Dockerfile is missing', async () => {
     await seedProject(root, 'nodocker');
     await rm(join(root, 'projects', 'nodocker', 'Dockerfile'));
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'nodocker', issueNumber: 2 });
+    const result = await runSession(env, { repo: 'nodocker', issueNumber: 2 });
 
     expect(result.success).toBe(false);
 
@@ -182,9 +182,9 @@ export default flow;
 
   it('rejects the claude adapter as not available', async () => {
     await seedProject(root, 'claudeflow', 'claude');
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'claudeflow', issueNumber: 3 });
+    const result = await runSession(env, { repo: 'claudeflow', issueNumber: 3 });
 
     expect(result.success).toBe(false);
 
@@ -195,9 +195,9 @@ export default flow;
 
   it('claims the issue on pickup before any session work', async () => {
     await seedProject(root, 'claimed');
-    const { deps, tracker } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, tracker } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    await runSession(deps, { repo: 'claimed', issueNumber: 4 });
+    await runSession(env, { repo: 'claimed', issueNumber: 4 });
 
     function isFakeTracker(value: unknown): value is FakeTracker {
       return typeof value == 'object' && value != null && 'calls' in value;
@@ -234,9 +234,9 @@ export default flow;
 `,
     );
 
-    const { deps, runtime, git } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, runtime, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'turncap', issueNumber: 20 });
+    const result = await runSession(env, { repo: 'turncap', issueNumber: 20 });
 
     expect(result.success).toBe(true);
 
@@ -280,9 +280,9 @@ export default flow;
 `,
     );
 
-    const { deps, runtime, git } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, runtime, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'clockcap', issueNumber: 21 });
+    const result = await runSession(env, { repo: 'clockcap', issueNumber: 21 });
 
     expect(result.success).toBe(true);
 
@@ -318,7 +318,7 @@ export default flow;
 `,
     );
 
-    const { deps, runtime, git } = fakeDeps({
+    const { env, runtime, git } = fakeKernelEnvironment({
       workspaceRoot: root,
       sessionsRoot,
       // Wide margins so the race cannot flip on machine speed: setup reliably finishes
@@ -326,7 +326,7 @@ export default flow;
       runtimeDelayMs: 2000,
     });
 
-    const result = await runSession(deps, { repo: 'overshoot', issueNumber: 22 });
+    const result = await runSession(env, { repo: 'overshoot', issueNumber: 22 });
 
     expect(result.success).toBe(true);
 
@@ -363,9 +363,9 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'transcriptcap', issueNumber: 23 });
+    const result = await runSession(env, { repo: 'transcriptcap', issueNumber: 23 });
 
     expect(result.success).toBe(true);
 
@@ -411,9 +411,9 @@ export default flow;
 `,
     );
 
-    const { deps, runtime } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, runtime } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'bypasser', issueNumber: 25 });
+    const result = await runSession(env, { repo: 'bypasser', issueNumber: 25 });
 
     expect(result.success).toBe(true);
 
@@ -450,9 +450,9 @@ export default flow;
 `,
     );
 
-    const { deps, runtime } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, runtime } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'exactbudget', issueNumber: 26 });
+    const result = await runSession(env, { repo: 'exactbudget', issueNumber: 26 });
 
     expect(result.success).toBe(true);
 
@@ -482,9 +482,9 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'transcripted', issueNumber: 22 });
+    const result = await runSession(env, { repo: 'transcripted', issueNumber: 22 });
 
     expect(result.success).toBe(true);
 
@@ -504,9 +504,9 @@ export default flow;
 
   it('prepends the AFK no-user preamble to every prompt sent to the runtime', async () => {
     await seedProject(root, 'preamble');
-    const { deps, runtime } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, runtime } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    await runSession(deps, { repo: 'preamble', issueNumber: 23 });
+    await runSession(env, { repo: 'preamble', issueNumber: 23 });
 
     expect(runtime.prompts[0]).toContain('implement issue');
     expect(runtime.prompts[0]).toContain('no user input');
@@ -529,13 +529,13 @@ export default flow;
 `,
     );
 
-    const { deps, runtime } = fakeDeps({
+    const { env, runtime } = fakeKernelEnvironment({
       workspaceRoot: root,
       sessionsRoot,
       runtime: fakeRuntime('failed'),
     });
 
-    const result = await runSession(deps, { repo: 'noretry', issueNumber: 24 });
+    const result = await runSession(env, { repo: 'noretry', issueNumber: 24 });
 
     expect(result.success).toBe(true);
 
@@ -580,9 +580,13 @@ export default flow;
     );
 
     const failing = fakeRuntime('failed');
-    const { deps, runtime } = fakeDeps({ workspaceRoot: root, sessionsRoot, runtime: failing });
+    const { env, runtime } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      runtime: failing,
+    });
 
-    const result = await runSession(deps, { repo: 'multi', issueNumber: 5 });
+    const result = await runSession(env, { repo: 'multi', issueNumber: 5 });
 
     expect(result.success).toBe(true);
 
@@ -611,9 +615,9 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'prflow', issueNumber: 6 });
+    const result = await runSession(env, { repo: 'prflow', issueNumber: 6 });
 
     expect(result.success).toBe(true);
 
@@ -644,9 +648,9 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(deps, { repo: 'gates', issueNumber: 8 });
+    const result = await runSession(env, { repo: 'gates', issueNumber: 8 });
 
     expect(result.success).toBe(true);
 
@@ -659,7 +663,7 @@ export default flow;
 
   it('stages declared skills into the worktree at the runtime project path before the flow runs', async () => {
     await seedProject(root, 'staging');
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
     // The flow sees the staged skill through the worktree the sandbox mounts.
     const projectDir = join(root, 'projects', 'staging');
@@ -682,7 +686,7 @@ export default flow;
 `,
     );
 
-    const result = await runSession(deps, { repo: 'staging', issueNumber: 12 });
+    const result = await runSession(env, { repo: 'staging', issueNumber: 12 });
 
     // The flow itself asserts the staged SKILL.md's content through the worktree path —
     // a completed session means the runtime-visible staging path held the skill.
@@ -703,10 +707,10 @@ export default flow;
 `,
     );
 
-    const { deps, tracker, git } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env, tracker, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
     const fake = tracker as FakeTracker;
 
-    const result = await runSession(deps, { repo: 'noskill', issueNumber: 13 });
+    const result = await runSession(env, { repo: 'noskill', issueNumber: 13 });
 
     expect(result.success).toBe(false);
 
@@ -736,7 +740,7 @@ export default flow;
     );
 
     const base = fakeSandbox();
-    const deps = fakeDeps({
+    const env = fakeKernelEnvironment({
       workspaceRoot: root,
       sessionsRoot,
       sandbox: {
@@ -748,9 +752,9 @@ export default flow;
           stderr: 'oops: the lint failed',
         }),
       },
-    }).deps;
+    }).env;
 
-    const result = await runSession(deps, { repo: 'gatelog', issueNumber: 9 });
+    const result = await runSession(env, { repo: 'gatelog', issueNumber: 9 });
 
     expect(result.success).toBe(true);
 
@@ -775,22 +779,22 @@ export default flow;
   });
 });
 
-describe('engine seam: run then status', () => {
+describe('engine contract: run then status', () => {
   it('lists the session just executed', async () => {
-    await seedProject(root, 'seam');
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    await seedProject(root, 'contract');
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const ran = await engine(['run', 'seam', '11'], deps);
+    const ran = await engine(['run', 'contract', '11'], env);
 
     expect(ran.success).toBe(true);
 
-    const listed = await engine(['status', '--json'], deps);
+    const listed = await engine(['status', '--json'], env);
 
     expect(listed.success).toBe(true);
 
     if (listed.success && listed.data.kind == 'status') {
       expect(listed.data.sessions).toHaveLength(1);
-      expect(listed.data.sessions[0]?.repo).toBe('seam');
+      expect(listed.data.sessions[0]?.repo).toBe('contract');
       expect(listed.data.sessions[0]?.issueNumber).toBe(11);
     }
   });
@@ -818,11 +822,11 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    await engine(['run', 'capstatus', '15'], deps);
+    await engine(['run', 'capstatus', '15'], env);
 
-    const listed = await engine(['status', '--json'], deps);
+    const listed = await engine(['status', '--json'], env);
 
     expect(listed.success).toBe(true);
 
@@ -838,9 +842,9 @@ export default flow;
     await mkdir(corrupt, { recursive: true });
     await writeFile(join(corrupt, 'manifest.json'), '{not json');
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const listed = await engine(['status', '--json'], deps);
+    const listed = await engine(['status', '--json'], env);
 
     expect(listed.success).toBe(true);
 
@@ -853,13 +857,13 @@ export default flow;
 describe('receipt regressions', () => {
   it('preserves cap-hit as the terminal state, not failed', async () => {
     await seedProject(root, 'capflow');
-    const { deps } = fakeDeps({
+    const { env } = fakeKernelEnvironment({
       workspaceRoot: root,
       sessionsRoot,
       runtime: fakeRuntime('cap-hit'),
     });
 
-    const result = await runSession(deps, { repo: 'capflow', issueNumber: 12 });
+    const result = await runSession(env, { repo: 'capflow', issueNumber: 12 });
 
     expect(result.success).toBe(true);
 
@@ -890,8 +894,8 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
-    const result = await runSession(deps, { repo: 'logged', issueNumber: 13 });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const result = await runSession(env, { repo: 'logged', issueNumber: 13 });
 
     expect(result.success).toBe(true);
 
@@ -912,7 +916,7 @@ export default flow;
   });
 
   it('surfaces the last log line through status', async () => {
-    const projectDir = await seedProject(root, 'seamlog');
+    const projectDir = await seedProject(root, 'contractlog');
 
     await writeFile(
       join(projectDir, 'flow.ts'),
@@ -929,11 +933,11 @@ export default flow;
 `,
     );
 
-    const { deps } = fakeDeps({ workspaceRoot: root, sessionsRoot });
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    await engine(['run', 'seamlog', '14'], deps);
+    await engine(['run', 'contractlog', '14'], env);
 
-    const listed = await engine(['status', '--json'], deps);
+    const listed = await engine(['status', '--json'], env);
 
     expect(listed.success).toBe(true);
 

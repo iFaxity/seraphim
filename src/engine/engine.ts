@@ -1,4 +1,4 @@
-import { type Deps } from './deps.ts';
+import { type KernelEnvironment } from './env.ts';
 import { dispatch, getCommand } from './kernel/dispatcher.ts';
 
 import { success, failure } from '../lib/result.ts';
@@ -31,15 +31,15 @@ export function parse(argv: readonly string[]) {
 /**
  * The engine's front door for CLI and library callers alike: argv in, Result<Outcome> out.
  * Expected failure is a failure Result — never a throw — per the Errors doctrine. Async: the
- * session lifecycle is I/O-bound. Deps are threaded explicitly — no hidden globals (ADR-0002);
+ * session lifecycle is I/O-bound. The KernelEnvironment is threaded explicitly — no hidden globals (ADR-0002);
  * the composition root supplies the real adapters.
  */
-export async function engine(argv: readonly string[], deps?: Deps) {
+export async function engine(argv: readonly string[], env?: KernelEnvironment) {
   const invocation = parse(argv);
 
   if (!invocation.success) {
     return invocation;
   }
 
-  return dispatch(deps, invocation.data);
+  return dispatch(env, invocation.data);
 }

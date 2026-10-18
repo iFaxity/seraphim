@@ -9,7 +9,7 @@ import { createTurnEngine, type TurnAborted } from './turns.ts';
 import { fileExists } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { type Deps } from '../deps.ts';
+import { type KernelEnvironment } from '../env.ts';
 
 /**
  * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
@@ -45,10 +45,10 @@ function step<TResult>(action: PromiseLike<TResult>, label: string) {
  * `ctx.run(prompt)` dispatch into the runtime, receipt files under the sessions root.
  * Failures stop for human takeover: state is recorded, branch retained.
  */
-export async function runSession(deps: Deps, input: SessionInput) {
+export async function runSession(env: KernelEnvironment, input: SessionInput) {
   // The registration is the first prerequisite: it resolves the remote and fail-fast names
   // the register fix for unregistered repos. The flow file follows: loadFlow owns its errors.
-  const project = await loadProject(deps.workspaceRoot, input.repo);
+  const project = await loadProject(env.workspaceRoot, input.repo);
 
   if (!project.success) {
     return project;
@@ -62,7 +62,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return failure(error);
   }
 
-  const flow = await loadFlow(deps.workspaceRoot, input.repo);
+  const flow = await loadFlow(env.workspaceRoot, input.repo);
 
   if (!flow.success) {
     return flow;
@@ -70,13 +70,13 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   // Declaration enforcement before any effect: a flow naming a skill the pool does not
   // have stops here, before a claim, a clone, or a worktree exists (story 15, fail-fast).
-  const skills = await checkDeclaredSkills(deps.poolRoot, flow.data.config.skills);
+  const skills = await checkDeclaredSkills(env.poolRoot, flow.data.config.skills);
 
   if (!skills.success) {
     return skills;
   }
 
-  const preflight = await checkPreflight(deps, input.repo);
+  const preflight = await checkPreflight(env, input.repo);
 
   if (!preflight.success) {
     return preflight;
@@ -84,11 +84,11 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   // Availability is the adapter's own report — the kernel never branches on a backend
   // name. Selecting a runtime whose adapter is missing fails fast here.
-  if (!deps.runtime.available(flow.data.config.agent)) {
+  if (!env.runtime.available(flow.data.config.agent)) {
     return failure(new Error(`adapter not available: ${flow.data.config.agent}`));
   }
   const issue = await step(
-    deps.tracker.getIssue(input.repo, input.issueNumber),
+    env.tracker.getIssue(input.repo, input.issueNumber),
     'tracker read failed',
   );
 
@@ -97,26 +97,26 @@ export async function runSession(deps: Deps, input: SessionInput) {
   }
 
   // Claim on pickup so concurrent sessions cannot double-run the same issue.
-  const claimed = await step(deps.tracker.claim(issue.data), 'tracker claim failed');
+  const claimed = await step(env.tracker.claim(issue.data), 'tracker claim failed');
 
   if (!claimed.success) {
     return claimed;
   }
 
-  const image = await step(deps.sandbox.ensureImage(input.repo), 'image build failed');
+  const image = await step(env.sandbox.ensureImage(input.repo), 'image build failed');
 
   if (!image.success) {
     return image;
   }
 
-  const repoPath = join(deps.workspaceRoot, 'repos', input.repo);
-  const clone = await step(deps.git.cloneIfMissing(repoPath, project.data.remote), 'clone failed');
+  const repoPath = join(env.workspaceRoot, 'repos', input.repo);
+  const clone = await step(env.git.cloneIfMissing(repoPath, project.data.remote), 'clone failed');
 
   if (!clone.success) {
     return clone;
   }
 
-  const pull = await step(deps.git.pull(repoPath), 'pull failed');
+  const pull = await step(env.git.pull(repoPath), 'pull failed');
 
   if (!pull.success) {
     return pull;
@@ -125,15 +125,12 @@ export async function runSession(deps: Deps, input: SessionInput) {
   const startedAt = now();
   const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
   const worktreePath = join(
-    deps.workspaceRoot,
+    env.workspaceRoot,
     'worktrees',
     input.repo,
     `${input.issueNumber}-${toEpochMs(startedAt)}`,
   );
-  const defaultBranch = await step(
-    deps.git.defaultBranch(repoPath),
-    'default branch lookup failed',
-  );
+  const defaultBranch = await step(env.git.defaultBranch(repoPath), 'default branch lookup failed');
 
   if (!defaultBranch.success) {
     return defaultBranch;
@@ -141,7 +138,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   const branch = `seraphim/${input.repo}/${input.issueNumber}-${toEpochMs(startedAt)}`;
   const worktree = await step(
-    deps.git.createWorktree({
+    env.git.createWorktree({
       repoPath,
       branch,
       path: worktreePath,
@@ -159,7 +156,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
   // (story 16). The worktree is host filesystem here; the sandbox bind-mounts it at /workspace.
   const staged = await step(
     stageSkills({
-      poolRoot: deps.poolRoot,
+      poolRoot: env.poolRoot,
       worktreePath,
       agent: flow.data.config.agent,
       declared: flow.data.config.skills,
@@ -229,7 +226,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
       logs.push(message);
     },
     sh: async (command: readonly string[]) => {
-      const executed = await deps.sandbox.exec({
+      const executed = await env.sandbox.exec({
         repo: input.repo,
         worktreePath,
         command,
@@ -250,7 +247,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
     },
     tracker: {
       openDraftPr: (prInput: { readonly title: string; readonly body: string }) =>
-        deps.tracker
+        env.tracker
           .openDraftPr({
             repo: input.repo,
             issue: issue.data,
@@ -277,7 +274,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
       // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
       // non-interactive contract, flows stay prompt-pure.
       const turn = await tryCatch(
-        deps.runtime.run({
+        env.runtime.run({
           repo: input.repo,
           cwd: worktreePath,
           prompt: `${AFK_PREAMBLE}\n\n${prompt}`,
@@ -314,7 +311,7 @@ export async function runSession(deps: Deps, input: SessionInput) {
   const { turns, transcripts } = turnsEngine.snapshot();
   const finalManifest = { ...manifest, endedAt: now(), turns };
   const write = await writeReceipt(
-    deps.sessionsRoot,
+    env.sessionsRoot,
     relDir,
     finalManifest,
     turns,
@@ -337,14 +334,14 @@ class TurnAbortedError extends Error {
 }
 
 /** Fails fast on missing Dockerfile-shaped prerequisites; loadFlow owns the flow file. */
-async function checkPreflight(deps: Deps, repo: string) {
-  const dockerfilePath = join(deps.workspaceRoot, 'projects', repo, 'Dockerfile');
+async function checkPreflight(env: KernelEnvironment, repo: string) {
+  const dockerfilePath = join(env.workspaceRoot, 'projects', repo, 'Dockerfile');
   const hasDockerfile = await fileExists(dockerfilePath);
 
   if (!hasDockerfile) {
     return failure(
       new Error(
-        `no Dockerfile for '${repo}': expected ${deps.workspaceRoot}/projects/${repo}/Dockerfile`,
+        `no Dockerfile for '${repo}': expected ${env.workspaceRoot}/projects/${repo}/Dockerfile`,
       ),
     );
   }

@@ -1,8 +1,8 @@
 import { success } from '../../lib/result.ts';
-import { type Sandbox } from '../kernel/seams.ts';
+import { type Sandbox } from '../contracts.ts';
 
 /**
- * Hand-written fake for the sandbox seam (ADR-0002 keeps fakes engine-side): records the
+ * Hand-written fake for the sandbox contract (ADR-0002 keeps fakes engine-side): records the
  * commands exec'd against it, so tests assert behavior a user observes — sandbox execs —
  * never kernel internals (spec: Testing Decisions).
  */

@@ -8,8 +8,8 @@ export const listCommand = command({
   summary: 'list registered projects',
   usage: 'list [--json]',
   parse: strictFlags('list', { json: { type: 'boolean', default: false } }),
-  execute: async (deps, values) => {
-    const listed = await listProjects(deps.workspaceRoot);
+  execute: async (env, values) => {
+    const listed = await listProjects(env.workspaceRoot);
 
     if (!listed.success) {
       return failure(listed.error);

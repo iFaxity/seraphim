@@ -5,11 +5,11 @@ import {
   type SandboxExec,
   type AgentRuntime,
   type TurnResult,
-} from '../kernel/seams.ts';
+} from '../contracts.ts';
 
 /**
- * The real pi adapter behind the `AgentRuntime` seam: turns run inside the project's
- * sandbox image (via the `Sandbox` seam's exec) — the model CLI, its tool calls, and its
+ * The real pi adapter behind the `AgentRuntime` contract: turns run inside the project's
+ * sandbox image (via the `Sandbox` contract's exec) — the model CLI, its tool calls, and its
  * credentials all stay in the container, and binary resolution is trivially "whatever the
  * image installed". Per-turn flags are fixed here — no session files, no extensions, tool
  * calls auto-approved: the whole stack is AFK and the transcript must come from the
@@ -87,7 +87,7 @@ type TurnEnd = { readonly stopReason: string; readonly errorMessage: string | nu
  * omp caps its own `--max-time` budget in-process: the child exits 0 (deadline fired
  * before a turn started) or 1 (mid-turn), and the `turn_end` event carries
  * `stopReason: "aborted"` with the deadline message — the runtime-side cap observable
- * the seam's `cap-hit` maps to. The message is matched case-insensitively on the
+ * the contract's `cap-hit` maps to. The message is matched case-insensitively on the
  * "deadline" cause, not the CLI's full phrasing, so minor wording drift keeps
  * classifying. A null exit code (killed by signal) is a failed stop, not a cap: nothing
  * in it indicates the wall-clock budget was the cause.
@@ -220,7 +220,7 @@ function turnCommand(input: {
 }
 
 /**
- * Maps one sandbox-executed turn onto the seam's result. stdout is decoded whole, so a
+ * Maps one sandbox-executed turn onto the contract's result. stdout is decoded whole, so a
  * multibyte character split across capture chunks must not become replacement characters
  * in the transcript. A failed stop keeps the container's stderr under the parsed stream —
  * on those turns stdout often carries no message at all, and the failure text is the only
@@ -244,7 +244,7 @@ function toTurnResult(executed: SandboxExec): TurnResult {
  * The real pi runtime adapter: sandbox-backed. `maxTimeMs` is the runtime-side
  * wall-clock stop derived from the flow's declared cap (required: a wall-clock budget is
  * a flow-level fact, and a silent default would be a hidden budget). `exec` is the
- * sandbox seam's exec — the turn runs in the project image with the worktree mounted at
+ * sandbox contract's exec — the turn runs in the project image with the worktree mounted at
  * /workspace and the project's env slot supplying the provider key. `binary` names the
  * CLI as the project image installs it (upstream `pi`, packaged `omp`).
  */
