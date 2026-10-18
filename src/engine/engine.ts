@@ -1,23 +1,7 @@
-import { dispatch } from './dispatcher.ts';
-import { type CommandName } from './invocation.ts';
+import { dispatch, getCommand } from './registry.ts';
 import { type Deps } from './session.ts';
 
 import { success, failure } from '../lib/result.ts';
-
-const KNOWN: readonly CommandName[] = [
-  'run',
-  'register',
-  'list',
-  'deactivate',
-  'status',
-  'prune',
-  'tick',
-  'help',
-];
-
-function isCommandName(name: string): name is CommandName {
-  return (KNOWN as readonly string[]).includes(name);
-}
 
 /**
  * Parses raw argv into an invocation, or a failure Result for expected input errors (unknown
@@ -37,9 +21,10 @@ export function parse(argv: readonly string[]) {
   }
 
   const name = first ?? '';
+  const cmd = getCommand(name);
 
-  return isCommandName(name)
-    ? success({ command: name, args: rest })
+  return cmd
+    ? success({ command: cmd.name, args: rest })
     : failure(new Error(`unknown command '${name}'`));
 }
 
@@ -58,5 +43,3 @@ export async function engine(argv: readonly string[], deps?: Deps) {
 
   return dispatch(deps, invocation.data);
 }
-
-export { KNOWN };
