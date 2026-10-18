@@ -1,6 +1,10 @@
 import { type Git } from '../kernel/seams.ts';
 
-/** Hand-written fake for the git seam: records clones, worktrees, prunes, branch deletes. */
+/**
+ * Hand-written fake for the git seam (ADR-0002 keeps fakes engine-side): records clones,
+ * worktrees, prunes, and branch deletes, so tests assert behavior a user observes —
+ * worktree branches created — never kernel internals (spec: Testing Decisions).
+ */
 export type FakeGit = Git & {
   readonly clones: { readonly path: string; readonly url: string }[];
   readonly worktrees: {

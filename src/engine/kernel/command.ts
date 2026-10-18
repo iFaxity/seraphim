@@ -12,7 +12,7 @@ import { type Deps } from '../deps.ts';
 export type ErrorOutcome = { readonly kind: 'error'; readonly message: string };
 
 /**
- * One command module's outward shape — the registry's row type. `O` is the command's own
+ * One command module's outward shape — the dispatcher's row type. `O` is the command's own
  * outcome variant; the helper's error outcome rides alongside.
  */
 export type Command<Name extends string, O> = {
@@ -22,7 +22,7 @@ export type Command<Name extends string, O> = {
   readonly handler: (deps: Deps | undefined, args: readonly string[]) => Promise<O | ErrorOutcome>;
 };
 
-/** Any command, when the concrete variant doesn't matter (help's table, the registry). */
+/** Any command, when the concrete variant doesn't matter (help's table, the dispatcher). */
 export type AnyCommand = {
   readonly name: string;
   readonly summary: string;
@@ -77,7 +77,7 @@ export function strictFlags(
  * the handler's `Result` to the error outcome once — an execute body is the pure mapping
  * from engine results to its own outcome variant. The execute function's type is captured
  * whole (rather than inferring an outcome parameter from it) so a multi-shape execute —
- * several success variants — keeps its full union in the derived registry.
+ * several success variants — keeps its full union in the derived dispatcher.
  */
 type Execute<P> = (deps: Deps, parsed: P) => Promise<Result<{ readonly kind: string }>>;
 

@@ -12,7 +12,7 @@ import { failure, success } from '../../lib/result.ts';
 import { type Deps } from '../deps.ts';
 
 /**
- * The registry — the engine's whole externally visible command surface. Adding a command
+ * The dispatcher — the engine's whole externally visible command surface. Adding a command
  * is one module plus a row below; help, the known-command list, and the
  * `CommandName`/`Outcome` unions all derive from these rows (zero drift), and `main.ts`'s
  * render switch fails to compile until its branch for the new outcome lands. The help row
@@ -36,10 +36,10 @@ const rows: readonly AnyCommand[] = COMMANDS;
 /** The single command a CLI invocation names, parsed from the first positional. */
 export type CommandName = (typeof COMMANDS)[number]['name'];
 
-/** Every command's outcome, derived — never hand-maintained — from the registry rows. */
+/** Every command's outcome, derived — never hand-maintained — from the dispatcher rows. */
 export type Outcome = Awaited<ReturnType<(typeof COMMANDS)[number]['handler']>>;
 
-/** One registry row's stable metadata, as help and introspection read it. */
+/** One dispatcher row's stable metadata, as help and introspection read it. */
 export type CommandRow = {
   readonly name: CommandName;
   readonly summary: string;
@@ -51,7 +51,7 @@ export function getCommand(name: string): (typeof COMMANDS)[number] | undefined 
   return COMMANDS.find((c) => c.name === name);
 }
 
-/** Every registered command's metadata, in registry order — help's table and introspection. */
+/** Every registered command's metadata, in dispatcher order — help's table and introspection. */
 export function commandList(): readonly CommandRow[] {
   return COMMANDS.map(({ name, summary, usage }) => ({ name, summary, usage }));
 }
