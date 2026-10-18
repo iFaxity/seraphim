@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { type Deps } from './engine/deps.ts';
 import { engine } from './engine/engine.ts';
 import { fakeDeps } from './engine/fakes/deps.ts';
 import { githubApi } from './engine/forges/github-api.ts';
@@ -10,7 +11,6 @@ import { ghTracker } from './engine/forges/github-tracker.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
 import { gitAdapter, processGit } from './engine/kernel/git.ts';
-import { type Deps } from './engine/kernel/session.ts';
 import { poolRoot } from './engine/kernel/skills.ts';
 import { piRuntime } from './engine/runtimes/pi.ts';
 import { cliDocker, dockerSandbox } from './engine/sandboxes/docker-sandbox.ts';

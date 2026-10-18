@@ -7,9 +7,9 @@ import { registerCommand } from './commands/register.ts';
 import { runCommand } from './commands/run.ts';
 import { statusCommand } from './commands/status.ts';
 import { tickCommand } from './commands/tick.ts';
-import { type Deps } from './session.ts';
 
 import { failure, success } from '../../lib/result.ts';
+import { type Deps } from '../deps.ts';
 
 /**
  * The registry — the engine's whole externally visible command surface. Adding a command

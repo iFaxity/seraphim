@@ -1,8 +1,7 @@
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 
-import { type Deps } from './session.ts';
-
 import { failure, success, tryCatch, type Result } from '../../lib/result.ts';
+import { type Deps } from '../deps.ts';
 
 /**
  * What a session command reports back to its caller. Commands never format CLI prose —
