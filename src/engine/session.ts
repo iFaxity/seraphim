@@ -13,17 +13,12 @@ import {
 } from './receipts.ts';
 import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
+import { createTurnEngine, type TranscriptFile, type TurnAborted } from './turns.ts';
 
 import { fileExists } from '../lib/fs.ts';
 import { failure, success, tryCatch } from '../lib/result.ts';
 import { now, toEpochMs } from '../lib/time.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
-
-/** Free-text artifacts that sit alongside — never replace — the schema'd receipt JSON. */
-export type TranscriptFile = {
-  readonly name: string;
-  readonly body: string;
-};
 
 /**
  * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
@@ -198,15 +193,17 @@ export async function runSession(deps: Deps, input: SessionInput) {
     return staged;
   }
 
-  const turns: Turn[] = [];
+  const turnsEngine = createTurnEngine({
+    caps: flow.data.config.caps,
+    agent: flow.data.config.agent,
+    model: flow.data.config.model,
+    now,
+  });
   const logs: string[] = [];
-  const transcripts: TranscriptFile[] = [];
-  const sessionTranscript: string[] = [];
 
-  // The declared budget is the flow's; enforcement is the kernel's — flow code sees neither
-  // the caps nor a bypass (spec: caps live in the kernel, invisible to flows).
+  // The flow's declared budget rides the manifest as the effective kernel-enforced record;
+  // enforcement itself lives in the turn engine below.
   const caps = flow.data.config.caps;
-  const deadline = toEpochMs(now()) + caps.wallClockMs;
 
   // Drafted now for the ctx callbacks to mutate; the zod contract is checked once, at
   // write time below, so the validated shape is the one actually persisted — not an
@@ -229,6 +226,22 @@ export async function runSession(deps: Deps, input: SessionInput) {
     caps,
     turns: [],
   };
+
+  /**
+   * Records the exit state on the manifest (plus the budget reason for a cap breach),
+   * then throws to stop the flow. One helper so every abort records the same way —
+   * the manifest is the receipt, and the transcript (engine-side) tells the human
+   * what the flow wanted next.
+   */
+  function abort(aborted: TurnAborted): never {
+    manifest.state = aborted.exitState;
+
+    if (aborted.kind === 'cap') {
+      manifest.capHit = aborted.reason;
+    }
+
+    throw new TurnAbortedError(aborted.exitState);
+  }
 
   const ctx = {
     repo: input.repo,
@@ -277,23 +290,12 @@ export async function runSession(deps: Deps, input: SessionInput) {
       // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
       // not be able to dispatch past a budget by catching the abort (spec: caps live in
       // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
-      if (toEpochMs(now()) >= deadline) {
-        capAbort(
-          manifest,
-          `wall-clock cap of ${caps.wallClockMs}ms exhausted before turn ${turns.length + 1}`,
-          sessionTranscript,
-        );
+      const gate = turnsEngine.gate();
+
+      if (!gate.success) {
+        abort(gate.error);
       }
 
-      if (turns.length >= caps.maxTurns) {
-        capAbort(
-          manifest,
-          `turn cap of ${caps.maxTurns} reached before turn ${turns.length + 1}`,
-          sessionTranscript,
-        );
-      }
-
-      const turnStart = now();
       // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
       // non-interactive contract, flows stay prompt-pure.
       const turn = await tryCatch(
@@ -304,44 +306,18 @@ export async function runSession(deps: Deps, input: SessionInput) {
           model: flow.data.config.model,
         }),
       );
-      const exitState = !turn.success ? ('failed' as const) : turn.data.exitState;
 
-      turns.push({
-        index: turns.length + 1,
+      const recorded = turnsEngine.record({
         prompt,
-        agent: flow.data.config.agent,
-        model: flow.data.config.model,
-        exitState,
-        startedAt: turnStart,
-        endedAt: now(),
+        startedAt: gate.data.startedAt,
+        outcome: turn,
       });
 
-      // A turn that outlived the deadline still ran to completion — the runtime is not
-      // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
-      // completed (spec: exceeding wall clock is a cap hit with the retention contract).
-      if (toEpochMs(now()) >= deadline) {
-        capAbort(
-          manifest,
-          `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${turns.length}`,
-          sessionTranscript,
-        );
-      }
-
-      // Transcript capture alongside the schema files — empty body on a runtime crash
-      // rather than a missing file, so diagnostics always have something to read.
-      const transcript = turn.success ? turn.data.transcript : String(turn.error);
-
-      transcripts.push({ name: `turn-${turns.length}.transcript.md`, body: transcript });
-      // The prompt as the runtime received it (preamble included), so the session file is
-      // the conversation, not just the replies.
-      sessionTranscript.push(`## turn ${turns.length}\n\n> prompt: ${prompt}\n\n${transcript}\n`);
-
-      if (exitState != 'completed') {
-        manifest.state = exitState;
-        // Failures always stop for human takeover — no recovery, no further turns.
-        // A throw, not a Result, because flow code (`flow.data.run(ctx)`) is untrusted and
-        // must not be able to swallow the abort; tryCatch at the call site converts it back.
-        throw new TurnAbortedError(exitState);
+      // Failures always stop for human takeover — no recovery, no further turns.
+      // A throw, not a Result, because flow code (`flow.data.run(ctx)`) is untrusted and
+      // must not be able to swallow the abort; tryCatch at the call site converts it back.
+      if (!recorded.success) {
+        abort(recorded.error);
       }
     },
   };
@@ -357,10 +333,8 @@ export async function runSession(deps: Deps, input: SessionInput) {
     manifest.state = 'completed';
   }
 
+  const { turns, transcripts } = turnsEngine.snapshot();
   const finalManifest = { ...manifest, endedAt: now(), turns };
-  // The whole-session transcript rides alongside the per-turn files — the per-turn
-  // captures stay for per-turn diagnostics.
-  transcripts.push({ name: 'session.transcript.md', body: sessionTranscript.join('\n') });
   const write = await writeReceipts(
     sessionDir(deps.sessionsRoot, relDir),
     finalManifest,
@@ -381,19 +355,6 @@ class TurnAbortedError extends Error {
   constructor(exitState: 'failed' | 'cap-hit') {
     super(`turn aborted: ${exitState}`);
   }
-}
-
-/**
- * Records the budget reason on the manifest and in the session transcript, then throws to
- * stop the flow. One helper so every cap abort records the breach exactly the same way —
- * the manifest is the receipt, and the transcript tells the human what the flow wanted next.
- */
-function capAbort(manifest: Session, reason: string, sessionTranscript?: string[]): never {
-  manifest.state = 'cap-hit';
-  manifest.capHit = reason;
-  sessionTranscript?.push(`## cap hit\n\n> ${reason}\n`);
-
-  throw new TurnAbortedError('cap-hit');
 }
 
 /** Fails fast on missing Dockerfile-shaped prerequisites; loadFlow owns the flow file. */
