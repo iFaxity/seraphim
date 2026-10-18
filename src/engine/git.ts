@@ -137,7 +137,9 @@ export function gitAdapter(runner: GitRunner) {
     },
     removeWorktree: async (input) => {
       // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-      if (!(await directoryExists(input.path))) {
+      const worktreeExists = await directoryExists(input.path);
+
+      if (!worktreeExists) {
         return;
       }
 
