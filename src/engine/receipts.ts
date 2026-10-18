@@ -30,6 +30,8 @@ export const CapsSchema = z.object({
   wallClockMs: z.number().int().min(0),
 });
 
+export type Caps = z.infer<typeof CapsSchema>;
+
 /** The session manifest: one file per session, the row `seraphim status` lists. */
 export const SessionManifestSchema = z.object({
   repo: z.string().min(1),
