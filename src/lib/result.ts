@@ -2,24 +2,24 @@ type Action<T> = () => T;
 
 /**
  * Discriminated on `success` so callers branch exhaustively: narrowing on the tag gives the data
- * or the error without a cast.
+ * or the error without a cast. `T` defaults to void, so completion-only results are plain
+ * `Success`. A conditional that drops `data` for void was tried and rejected: deferred
+ * conditionals in generic positions (e.g. `Promise<Result<T>>` params) union in a phantom
+ * dataless branch and block `.data` on real results.
  */
-export type Success<T> = {
-  success: true;
-  data: T;
-};
+export type Success<T = void> = { success: true; data: T };
 
 /** Mirror of `Success` — kept as its own type so `TError` can be narrower than `Error`. */
-export type Failure<T> = {
+export type Failure<T = Error> = {
   success: false;
   error: T;
 };
 
 /** `Result` over an async operation, for `tryCatch`'s promise overload. */
-export type Result<TResult, TError = Error> = Success<TResult> | Failure<TError>;
+export type Result<TResult = void, TError = Error> = Success<TResult> | Failure<TError>;
 
 /** `Result` for async operations — what a `tryCatch` promise overload resolves to. */
-export type AsyncResult<TResult, TError = Error> = Promise<Result<TResult, TError>>;
+export type AsyncResult<TResult = void, TError = Error> = Promise<Result<TResult, TError>>;
 
 function isPromiseLike<T>(input: unknown): input is PromiseLike<T> {
   if (typeof input != 'object' || input == null) {
@@ -29,8 +29,8 @@ function isPromiseLike<T>(input: unknown): input is PromiseLike<T> {
   return 'then' in input && typeof input?.then == 'function';
 }
 
-/** `Success<void>` for operations that report nothing but completion. */
-export function success(): Success<void>;
+/** Completion-only success — what `success()` returns. */
+export function success(): Success;
 export function success<T>(data: T): Success<T>;
 export function success<T>(data?: T) {
   return {
