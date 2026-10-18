@@ -29,7 +29,10 @@ function isPromiseLike<T>(input: unknown): input is PromiseLike<T> {
   return 'then' in input && typeof input?.then == 'function';
 }
 
-export function success<T>(data: T) {
+/** `Success<void>` for operations that report nothing but completion. */
+export function success(): Success<void>;
+export function success<T>(data: T): Success<T>;
+export function success<T>(data?: T) {
   return {
     success: true as const,
     data,

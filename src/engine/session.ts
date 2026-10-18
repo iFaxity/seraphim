@@ -363,5 +363,5 @@ async function checkPreflight(deps: Deps, repo: string) {
     );
   }
 
-  return success(undefined);
+  return success();
 }

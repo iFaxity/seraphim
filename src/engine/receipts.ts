@@ -296,7 +296,7 @@ export async function writeReceipt(
     return failure(new Error(`transcript write failed: ${String(transcriptWrite.error)}`));
   }
 
-  return success(undefined);
+  return success();
 }
 
 /**
@@ -309,5 +309,5 @@ async function writeAll(dir: string, files: readonly { name: string; body: strin
   );
   const failed = writes.find((write) => !write.success);
 
-  return failed ?? success(undefined);
+  return failed ?? success();
 }
