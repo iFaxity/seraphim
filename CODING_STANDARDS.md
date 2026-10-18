@@ -20,7 +20,7 @@ this file covers what it can't.
   the call — build the list, then await it.
 - Prefer array chaining (`map`/`filter`/`reduce`) over imperative `for`/`while` loops.
 - Infer return types; annotate only load-bearing seams — `seams.ts` members, type
-  predicates (`x is T`), `fakes.ts` factories.
+  predicates (`x is T`), `fakes/` factories.
 - Absent values are `null`, never `undefined` or optional fields (`?:`/`.optional()`).
   Exceptions: optional _parameters_ at call sites (`deps?: Deps`), and receipt JSON keys may
   be omitted on disk — the kernel-facing types are still `| null`.

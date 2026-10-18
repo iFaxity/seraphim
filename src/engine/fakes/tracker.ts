@@ -1,6 +1,10 @@
 import { type Issue, type Tracker } from '../kernel/seams.ts';
 
-/** Hand-written fake for the tracker seam: records the kernel's writes, seeds the intake view. */
+/**
+ * Hand-written fake for the tracker seam (ADR-0002 keeps fakes engine-side): records the
+ * kernel's writes and seeds the intake view, so tests assert behavior a user observes —
+ * tracker calls issued — never kernel internals (spec: Testing Decisions).
+ */
 export type FakeTracker = Tracker & {
   readonly calls: {
     readonly claimed: readonly string[];

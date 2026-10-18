@@ -1,7 +1,11 @@
 import { success } from '../../lib/result.ts';
 import { type Sandbox } from '../kernel/seams.ts';
 
-/** Hand-written fake for the sandbox seam: records the commands exec'd against it. */
+/**
+ * Hand-written fake for the sandbox seam (ADR-0002 keeps fakes engine-side): records the
+ * commands exec'd against it, so tests assert behavior a user observes — sandbox execs —
+ * never kernel internals (spec: Testing Decisions).
+ */
 export type FakeSandbox = Sandbox & {
   readonly executed: readonly string[];
 };

@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import { commandList, getCommand } from './dispatcher.ts';
 
-describe('command registry', () => {
-  it('lists every command in the help table — the registry is the only command list', async () => {
+describe('command dispatcher', () => {
+  it('lists every command in the help table — the dispatcher is the only command list', async () => {
     const help = getCommand('help');
 
-    expect(help, 'help must be a registry row').toBeDefined();
+    expect(help, 'help must be a dispatcher row').toBeDefined();
 
     if (!help) {
       return;
@@ -23,7 +23,7 @@ describe('command registry', () => {
   it('answers help for exactly the listed commands, so membership cannot drift', async () => {
     const help = getCommand('help');
 
-    expect(help, 'help must be a registry row').toBeDefined();
+    expect(help, 'help must be a dispatcher row').toBeDefined();
 
     if (!help) {
       return;

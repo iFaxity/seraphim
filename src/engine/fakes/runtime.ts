@@ -1,6 +1,10 @@
 import { type AgentRuntime } from '../kernel/seams.ts';
 
-/** Hand-written fake for the runtime seam: records prompts and transcripts per turn. */
+/**
+ * Hand-written fake for the runtime seam (ADR-0002 keeps fakes engine-side): records prompts
+ * and transcripts per turn, so tests assert behavior a user observes — agent invocations —
+ * never kernel internals (spec: Testing Decisions).
+ */
 export type FakeRuntime = AgentRuntime & {
   readonly prompts: readonly string[];
   readonly transcript: readonly string[];
