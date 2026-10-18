@@ -3,22 +3,14 @@ import { join } from 'node:path';
 import { type DockerRunner } from './docker-sandbox.ts';
 import { loadFlow } from './flow.ts';
 import { loadProject } from './projects.ts';
-import {
-  type Session,
-  type Turn,
-  MANIFEST_FILE,
-  SessionManifestSchema,
-  sessionDir,
-  sessionRelDir,
-} from './receipts.ts';
+import { type Session, writeReceipt, sessionRelDir } from './receipts.ts';
 import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
-import { createTurnEngine, type TranscriptFile, type TurnAborted } from './turns.ts';
+import { createTurnEngine, type TurnAborted } from './turns.ts';
 
 import { fileExists } from '../lib/fs.ts';
 import { failure, success, tryCatch } from '../lib/result.ts';
 import { now, toEpochMs } from '../lib/time.ts';
-import { mkdir, writeFile } from 'node:fs/promises';
 
 /**
  * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
@@ -335,8 +327,9 @@ export async function runSession(deps: Deps, input: SessionInput) {
 
   const { turns, transcripts } = turnsEngine.snapshot();
   const finalManifest = { ...manifest, endedAt: now(), turns };
-  const write = await writeReceipts(
-    sessionDir(deps.sessionsRoot, relDir),
+  const write = await writeReceipt(
+    deps.sessionsRoot,
+    relDir,
     finalManifest,
     turns,
     logs,
@@ -371,94 +364,4 @@ async function checkPreflight(deps: Deps, repo: string) {
   }
 
   return success(undefined);
-}
-
-/** The disk shape of one kernel turn: instants converted to epoch ms. */
-function toDiskTurn(turn: Turn) {
-  return { ...turn, startedAt: toEpochMs(turn.startedAt), endedAt: toEpochMs(turn.endedAt) };
-}
-/**
- * The disk boundary: converts kernel instants into the epoch-ms receipt schema, validates the
- * persisted shape, then writes every file — the disk sees only plain numbers, checked here.
- */
-
-async function writeReceipts(
-  dir: string,
-  manifest: Session,
-  turns: readonly Turn[],
-  logs: readonly string[],
-  transcripts: readonly TranscriptFile[],
-) {
-  const diskManifest = {
-    ...manifest,
-    startedAt: toEpochMs(manifest.startedAt),
-    endedAt: manifest.endedAt == null ? null : toEpochMs(manifest.endedAt),
-    turns: manifest.turns.map(toDiskTurn),
-  };
-  const validated = SessionManifestSchema.safeParse(diskManifest);
-
-  if (!validated.success) {
-    return failure(new Error(`session manifest invalid: ${validated.error.message}`));
-  }
-
-  const mkdirResult = await tryCatch(mkdir(dir, { recursive: true }));
-
-  if (!mkdirResult.success) {
-    return failure(new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`));
-  }
-
-  const manifestWrite = await tryCatch(
-    writeFile(join(dir, MANIFEST_FILE), `${JSON.stringify(validated.data, null, 2)}\n`, 'utf8'),
-  );
-
-  if (!manifestWrite.success) {
-    return failure(new Error(`manifest write failed: ${String(manifestWrite.error)}`));
-  }
-
-  const turnWrite = await writeAll(
-    dir,
-    turns.map((turn) => ({
-      name: `turn-${turn.index}.json`,
-      body: `${JSON.stringify(toDiskTurn(turn), null, 2)}\n`,
-    })),
-  );
-
-  if (!turnWrite.success) {
-    return failure(new Error(`turn record write failed: ${String(turnWrite.error)}`));
-  }
-
-  if (logs.length > 0) {
-    const logWrite = await tryCatch(
-      writeFile(join(dir, 'flow.log'), `${logs.join('\n')}\n`, 'utf8'),
-    );
-
-    if (!logWrite.success) {
-      return failure(new Error(`log write failed: ${String(logWrite.error)}`));
-    }
-  }
-
-  // Full conversation transcript per turn, alongside the turn record.
-  const transcriptWrite = await writeAll(
-    dir,
-    transcripts.map((transcript) => ({ name: transcript.name, body: `${transcript.body}\n` })),
-  );
-
-  if (!transcriptWrite.success) {
-    return failure(new Error(`transcript write failed: ${String(transcriptWrite.error)}`));
-  }
-
-  return success(undefined);
-}
-
-/**
- * Writes every file, reporting the first failure as a failure Result. The one write loop the
- * receipts module owns — manifest, turn records, and transcripts all go through it.
- */
-async function writeAll(dir: string, files: readonly { name: string; body: string }[]) {
-  const writes = await Promise.all(
-    files.map((file) => tryCatch(writeFile(join(dir, file.name), file.body, 'utf8'))),
-  );
-  const failed = writes.find((write) => !write.success);
-
-  return failed ?? success(undefined);
 }

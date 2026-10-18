@@ -1,9 +1,11 @@
 import { join } from 'node:path';
 import { z } from 'zod';
 
+import { type TranscriptFile } from './turns.ts';
+
 import { tryCatch, success, failure } from '../lib/result.ts';
 import { fromEpochMs, toEpochMs } from '../lib/time.ts';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 
 /**
  * Receipts are the filesystem-as-database (ADR-0001): a zod-validated session manifest
@@ -56,7 +58,7 @@ export type SessionManifest = z.infer<typeof SessionManifestSchema>;
 
 /**
  * Kernel-facing turn: timestamps as instants. Disk schemas stay epoch numbers (JSON
- * boundary); this shape is what the kernel drafts, mutates, and hands to writeReceipts.
+ * boundary); this shape is what the kernel drafts, mutates, and hands to writeReceipt.
  */
 export type Turn = Omit<TurnRecord, 'startedAt' | 'endedAt'> & {
   readonly startedAt: Temporal.Instant;
@@ -216,4 +218,96 @@ async function lastLog(dir: string) {
   const lines = read.data.trimEnd().split('\n');
 
   return lines.at(-1) ?? null;
+}
+
+/** The disk shape of one kernel turn: instants converted to epoch ms. */
+function toDiskTurn(turn: Turn) {
+  return { ...turn, startedAt: toEpochMs(turn.startedAt), endedAt: toEpochMs(turn.endedAt) };
+}
+
+/**
+ * The disk boundary: converts kernel instants into the epoch-ms receipt schema, validates the
+ * persisted shape, then writes every file — the disk sees only plain numbers, checked here.
+ */
+export async function writeReceipt(
+  sessionsRoot: string,
+  relDir: string,
+  manifest: Session,
+  turns: readonly Turn[],
+  logs: readonly string[],
+  transcripts: readonly TranscriptFile[],
+) {
+  const dir = sessionDir(sessionsRoot, relDir);
+  const diskManifest = {
+    ...manifest,
+    startedAt: toEpochMs(manifest.startedAt),
+    endedAt: manifest.endedAt == null ? null : toEpochMs(manifest.endedAt),
+    turns: manifest.turns.map(toDiskTurn),
+  };
+  const validated = SessionManifestSchema.safeParse(diskManifest);
+
+  if (!validated.success) {
+    return failure(new Error(`session manifest invalid: ${validated.error.message}`));
+  }
+
+  const mkdirResult = await tryCatch(mkdir(dir, { recursive: true }));
+
+  if (!mkdirResult.success) {
+    return failure(new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`));
+  }
+
+  const manifestWrite = await tryCatch(
+    writeFile(join(dir, MANIFEST_FILE), `${JSON.stringify(validated.data, null, 2)}\n`, 'utf8'),
+  );
+
+  if (!manifestWrite.success) {
+    return failure(new Error(`manifest write failed: ${String(manifestWrite.error)}`));
+  }
+
+  const turnWrite = await writeAll(
+    dir,
+    turns.map((turn) => ({
+      name: `turn-${turn.index}.json`,
+      body: `${JSON.stringify(toDiskTurn(turn), null, 2)}\n`,
+    })),
+  );
+
+  if (!turnWrite.success) {
+    return failure(new Error(`turn record write failed: ${String(turnWrite.error)}`));
+  }
+
+  if (logs.length > 0) {
+    const logWrite = await tryCatch(
+      writeFile(join(dir, 'flow.log'), `${logs.join('\n')}\n`, 'utf8'),
+    );
+
+    if (!logWrite.success) {
+      return failure(new Error(`log write failed: ${String(logWrite.error)}`));
+    }
+  }
+
+  // Full conversation transcript per turn, alongside the turn record.
+  const transcriptWrite = await writeAll(
+    dir,
+    transcripts.map((transcript) => ({ name: transcript.name, body: `${transcript.body}\n` })),
+  );
+
+  if (!transcriptWrite.success) {
+    return failure(new Error(`transcript write failed: ${String(transcriptWrite.error)}`));
+  }
+
+  return success(undefined);
+}
+
+/**
+ * Writes every file, reporting the first failure as a failure Result. The one write loop the
+ * receipts module owns — manifest, turn records, and transcripts all go through it.
+ */
+async function writeAll(dir: string, files: readonly { name: string; body: string }[]) {
+  const writes = await Promise.all(
+    files.map((file) => tryCatch(writeFile(join(dir, file.name), file.body, 'utf8'))),
+  );
+  const failed = writes.find((write) => !write.success);
+
+  return failed ?? success(undefined);
 }
