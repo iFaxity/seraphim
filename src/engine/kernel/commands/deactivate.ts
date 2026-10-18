@@ -14,8 +14,8 @@ export const deactivateCommand = command({
 
     return success({ repo: args[0] ?? '' });
   },
-  execute: async (deps, { repo }) => {
-    const result = await deactivateProject(deps.workspaceRoot, repo);
+  execute: async (env, { repo }) => {
+    const result = await deactivateProject(env.workspaceRoot, repo);
 
     if (!result.success) {
       return failure(result.error);

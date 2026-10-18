@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import { classifyTurn, parseTranscript, piRuntime } from './pi.ts';
 
-import { type SandboxExec } from '../kernel/seams.ts';
+import { type SandboxExec } from '../contracts.ts';
 
 /**
  * Tests for the omp `--mode json` transcript parsing and turn classification. The fixtures
- * are recorded omp event lines — the adapter is driven by the seam, so the parser and the
+ * are recorded omp event lines — the adapter is driven by the contract, so the parser and the
  * stop-classifier are tested directly instead of launching the real binary.
  */
 

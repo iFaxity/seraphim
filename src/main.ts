@@ -3,9 +3,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { type Deps } from './engine/deps.ts';
 import { engine } from './engine/engine.ts';
-import { fakeDeps } from './engine/fakes/deps.ts';
+import { type KernelEnvironment } from './engine/env.ts';
+import { fakeKernelEnvironment } from './engine/fakes/env.ts';
 import { githubApi } from './engine/forges/github-api.ts';
 import { ghTracker } from './engine/forges/github-tracker.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
@@ -20,37 +20,35 @@ import { failure, success, type Result } from './lib/result.ts';
 /**
  * CLI boundary: the only place engine outcomes become stdout prose. Rendering lives here so
  * the engine stays presentation-free (ADR-0002) and tests can branch on the Result tag.
- * Deps are composed here (composition root) and threaded explicitly into the engine.
+ * The KernelEnvironment is composed here (composition root) and threaded explicitly into the engine.
  */
-export async function main(argv: readonly string[], deps?: Deps) {
-  const effectiveDeps = deps ?? composeDeps();
-  const result = await engine(argv, effectiveDeps).then(
+export async function main(argv: readonly string[], env?: KernelEnvironment) {
+  const effectiveEnv = env ?? composeKernelEnvironment();
+  const result = await engine(argv, effectiveEnv).then(
     (outcome) => success(outcome),
     (error) => failure(error),
   );
-  const rendered = result.success
-    ? await render(result.data, effectiveDeps)
-    : failure(result.error);
+  const rendered = result.success ? await render(result.data, effectiveEnv) : failure(result.error);
 
   return rendered.success ? rendered.data : `error: ${rendered.error.message}`;
 }
 
 /**
- * Composition root: builds the real `Deps` from the engine's seams — the Docker sandbox,
+ * Composition root: builds the real `KernelEnvironment` from the engine's contracts — the Docker sandbox,
  * the git CLI, the GitHub tracker, and the pi agent runtime are all real adapters. The
  * runtime launches turns through the sandbox's own exec: the model CLI, its tool calls,
  * and its credentials all run inside the project image, with the per-turn wall-clock
  * stop derived here (per-session flow caps stay kernel-gated in `runSession`). Tracker
  * auth: `GH_TOKEN` from the seraphim-home `.env`.
  */
-function composeDeps() {
+function composeKernelEnvironment() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
   const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
   const tracker = ghTracker(githubApi(token));
   const sandbox = dockerSandbox({ projectsRoot, docker: cliDocker });
 
-  return fakeDeps({
+  return fakeKernelEnvironment({
     tracker,
     sandbox,
     git: gitAdapter(processGit),
@@ -59,7 +57,7 @@ function composeDeps() {
     sessionsRoot: join(home, 'sessions'),
     poolRoot: resolvePoolRoot(home),
     docker: cliDocker,
-  }).deps;
+  }).env;
 }
 
 /**
@@ -75,7 +73,7 @@ function resolvePoolRoot(home: string) {
     : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
 }
 
-async function render(result: Result<Outcome>, deps: Deps) {
+async function render(result: Result<Outcome>, env: KernelEnvironment) {
   if (!result.success) {
     return failure(result.error);
   }
@@ -128,9 +126,9 @@ async function render(result: Result<Outcome>, deps: Deps) {
         return success('aborted: nothing deleted');
       }
 
-      const confirmed = await engine(['prune', '--confirm'], deps);
+      const confirmed = await engine(['prune', '--confirm'], env);
 
-      return render(confirmed, deps);
+      return render(confirmed, env);
     }
     case 'prune-done': {
       const count =

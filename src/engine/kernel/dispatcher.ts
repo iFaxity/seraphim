@@ -9,7 +9,7 @@ import { statusCommand } from './commands/status.ts';
 import { tickCommand } from './commands/tick.ts';
 
 import { failure, success } from '../../lib/result.ts';
-import { type Deps } from '../deps.ts';
+import { type KernelEnvironment } from '../env.ts';
 
 /**
  * The dispatcher — the engine's whole externally visible command surface. Adding a command
@@ -64,10 +64,10 @@ export type Invocation = {
 
 /**
  * Dispatches one invocation to its command's handler — the engine boundary: everything below
- * this returns outcomes, never prose. Deps are threaded explicitly — no hidden globals behind
+ * this returns outcomes, never prose. The KernelEnvironment is threaded explicitly — no hidden globals behind
  * the library boundary (ADR-0002).
  */
-export async function dispatch(deps: Deps | undefined, invocation: Invocation) {
+export async function dispatch(env: KernelEnvironment | undefined, invocation: Invocation) {
   const { command, args } = invocation;
   const cmd = getCommand(command);
 
@@ -75,7 +75,7 @@ export async function dispatch(deps: Deps | undefined, invocation: Invocation) {
     return failure(new Error(`unknown command '${command}'`));
   }
 
-  const outcome = await cmd.handler(deps, args);
+  const outcome = await cmd.handler(env, args);
 
   return success(outcome);
 }

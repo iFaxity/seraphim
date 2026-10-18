@@ -46,8 +46,8 @@ export const statusCommand = command({
   summary: 'list sessions and worktrees',
   usage: 'status [--json]',
   parse: strictFlags('status', { json: { type: 'boolean', default: false } }),
-  execute: async (deps, values) => {
-    const listed = await listSessions(deps.sessionsRoot);
+  execute: async (env, values) => {
+    const listed = await listSessions(env.sessionsRoot);
 
     if (!listed.success) {
       return failure(listed.error);

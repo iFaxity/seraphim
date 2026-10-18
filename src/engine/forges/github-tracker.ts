@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { API_ROOT, issuesUrl, nextLink, type GitHubClient } from './github-api.ts';
 
-import { type Issue, type Tracker } from '../kernel/seams.ts';
+import { type Issue, type Tracker } from '../contracts.ts';
 
 /**
  * The real `Tracker` adapter over the GitHub REST API (ADR-0003: adapters are ingest-only
@@ -39,7 +39,7 @@ export const GitHubIssueSchema = z.object({
   pull_request: z.unknown().optional(),
 });
 
-/** The created-PR response, reduced to what the seam's `PullRequest` carries. Draft is
+/** The created-PR response, reduced to what the contract's `PullRequest` carries. Draft is
  * checked by the schema so a non-draft create response fails validation loudly. */
 export const GitHubPullSchema = z.object({
   number: z.number(),
@@ -64,7 +64,7 @@ function blockedByFromBody(body: string) {
 }
 
 /**
- * Normalizes one schema-validated GitHub issue into the seam's forge-agnostic `Issue`.
+ * Normalizes one schema-validated GitHub issue into the contract's forge-agnostic `Issue`.
  * The schema has handled malformed fields; this maps only, it does not guard.
  */
 function toIssue(repo: string, raw: z.infer<typeof GitHubIssueSchema>) {

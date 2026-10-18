@@ -16,8 +16,8 @@ export const runCommand = command({
 
     return success({ repo: args[0] ?? '', issueNumber: Number(args[1]) });
   },
-  execute: async (deps, { repo, issueNumber }) => {
-    const result = await runSession(deps, { repo, issueNumber });
+  execute: async (env, { repo, issueNumber }) => {
+    const result = await runSession(env, { repo, issueNumber });
 
     if (!result.success) {
       return failure(result.error);

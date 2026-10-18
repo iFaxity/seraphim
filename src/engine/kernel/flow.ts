@@ -2,9 +2,9 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { CapsSchema } from './receipts.ts';
-import { type Tracker } from './seams.ts';
 
 import { failure, success, tryCatch } from '../../lib/result.ts';
+import { type Tracker } from '../contracts.ts';
 import { readFile } from 'node:fs/promises';
 
 /**

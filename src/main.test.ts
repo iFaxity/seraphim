@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine/engine.ts';
-import { fakeDeps } from './engine/fakes/deps.ts';
+import { fakeKernelEnvironment } from './engine/fakes/env.ts';
 import { main } from './main.ts';
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -131,14 +131,14 @@ describe('status listing', () => {
       }),
     );
 
-    const { deps } = fakeDeps({ sessionsRoot: join(root, 'sessions') });
-    const out = await main(['status'], deps);
+    const { env } = fakeKernelEnvironment({ sessionsRoot: join(root, 'sessions') });
+    const out = await main(['status'], env);
 
     expect(out).toContain('demo#7');
     expect(out).toContain('completed');
     expect(out).toContain('/tmp/wt');
 
-    const json = await main(['status', '--json'], deps);
+    const json = await main(['status', '--json'], env);
     const parsed = JSON.parse(json) as { sessions: { repo: string; state: string }[] };
 
     expect(parsed.sessions).toHaveLength(1);
@@ -146,10 +146,10 @@ describe('status listing', () => {
   });
 
   it('lists no sessions when the receipts root is missing', async () => {
-    const { deps } = fakeDeps({
+    const { env } = fakeKernelEnvironment({
       sessionsRoot: join(tmpdir(), `seraphim-missing-${randomUUID()}`),
     });
-    const json = await main(['status', '--json'], deps);
+    const json = await main(['status', '--json'], env);
 
     expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });
   });
@@ -164,8 +164,8 @@ describe('prune rendering', () => {
     }
   });
 
-  function depsFor() {
-    return fakeDeps({ workspaceRoot: root, sessionsRoot: join(root, 'sessions') }).deps;
+  function envFor() {
+    return fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot: join(root, 'sessions') }).env;
   }
 
   async function seedCompletedSession() {
@@ -198,14 +198,14 @@ describe('prune rendering', () => {
   it('renders an empty prune plan as nothing eligible', async () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
 
-    expect(await main(['prune'], depsFor())).toBe('nothing eligible for cleanup');
+    expect(await main(['prune'], envFor())).toBe('nothing eligible for cleanup');
   });
 
   it('renders the plan and refuses deletion without a TTY confirmation', async () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
     const dir = await seedCompletedSession();
 
-    const result = await main(['prune'], depsFor());
+    const result = await main(['prune'], envFor());
 
     expect(result).toContain('└─ #1 —');
     expect(result).toContain('nothing deleted: rerun with --confirm');
@@ -217,7 +217,7 @@ describe('prune rendering', () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
     const dir = await seedCompletedSession();
 
-    const result = await main(['prune', '--confirm'], depsFor());
+    const result = await main(['prune', '--confirm'], envFor());
 
     expect(result).toContain('prune removed');
     await expect(readFile(join(dir, 'manifest.json'), 'utf8')).rejects.toMatchObject({
@@ -227,8 +227,8 @@ describe('prune rendering', () => {
 
   it('groups stale images under their project in the tree', async () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
-    const deps = depsFor();
-    deps.docker = {
+    const env = envFor();
+    env.docker = {
       run: async (args) =>
         args[0] == 'images'
           ? {
@@ -239,7 +239,7 @@ describe('prune rendering', () => {
           : { exitCode: 0, stdout: args.join(' '), stderr: '' },
     };
 
-    const result = await main(['prune'], deps);
+    const result = await main(['prune'], env);
 
     expect(result).toContain('(unclaimed images)');
     expect(result).toContain('stale images — reclaimable cache ×3 tag(s)');
@@ -249,7 +249,7 @@ describe('prune rendering', () => {
   it('rejects invalid prune flags with a clean error', async () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
 
-    expect(await main(['prune', '--wat'], depsFor())).toBe(
+    expect(await main(['prune', '--wat'], envFor())).toBe(
       "error: invalid prune arguments: Unknown option '--wat'",
     );
   });

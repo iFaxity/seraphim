@@ -2,9 +2,9 @@ import { join } from 'node:path';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
-import { type Git } from './seams.ts';
 
 import { success } from '../../lib/result.ts';
+import { type Git } from '../contracts.ts';
 import { imageTagFor, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 import { readdir, rm } from 'node:fs/promises';
 
@@ -45,7 +45,7 @@ export type PrunePlan = {
   readonly skipped: number;
 };
 
-export type PruneDeps = {
+export type PruneEnv = {
   readonly workspaceRoot: string;
   readonly sessionsRoot: string;
   readonly git: Pick<Git, 'removeWorktree' | 'deleteBranch'>;
@@ -59,8 +59,8 @@ export type PruneDeps = {
  * (a crashed run left it behind) is an orphan. A seraphim/* image tag is stale when no
  * registered project's Dockerfile+lockfile content hash names it anymore.
  */
-export async function planPrune(deps: PruneDeps) {
-  const listed = await listSessions(deps.sessionsRoot);
+export async function planPrune(env: PruneEnv) {
+  const listed = await listSessions(env.sessionsRoot);
 
   if (!listed.success) {
     return listed;
@@ -84,14 +84,14 @@ export async function planPrune(deps: PruneDeps) {
   );
   const sessionWorktrees = new Set(sessions.map((session) => session.worktreePath));
 
-  const worktreesRoot = join(deps.workspaceRoot, 'worktrees');
+  const worktreesRoot = join(env.workspaceRoot, 'worktrees');
   const orphanWorktrees = await listOrphanWorktrees(worktreesRoot, (path) => {
     return !retainedWorktrees.has(path) && !sessionWorktrees.has(path);
   });
 
   let images: PruneImage[] = [];
-  if (deps.docker) {
-    images = await staleImages(deps.workspaceRoot, deps.docker);
+  if (env.docker) {
+    images = await staleImages(env.workspaceRoot, env.docker);
   }
 
   return success({ sessions, orphanWorktrees, images, skipped: listed.skipped });
@@ -102,16 +102,16 @@ export async function planPrune(deps: PruneDeps) {
  * directory, deletes orphan worktree directories, untags stale images. Per-item failures are
  * collected, never fatal — one stuck worktree must not block the rest of the cleanup.
  */
-export async function runPrune(deps: PruneDeps, plan: PrunePlan) {
+export async function runPrune(env: PruneEnv, plan: PrunePlan) {
   const failed: string[] = [];
 
   for (const session of plan.sessions) {
-    const repoPath = join(deps.workspaceRoot, 'repos', session.repo);
+    const repoPath = join(env.workspaceRoot, 'repos', session.repo);
 
-    await deps.git
+    await env.git
       .removeWorktree({ repoPath, path: session.worktreePath })
       .catch((error: unknown) => failed.push(`${session.worktreePath}: ${String(error)}`));
-    await deps.git
+    await env.git
       .deleteBranch({ repoPath, branch: session.branch })
       .catch((error: unknown) => failed.push(`${session.branch}: ${String(error)}`));
     await rm(session.dir, { recursive: true, force: true }).catch((error: unknown) =>
@@ -122,10 +122,10 @@ export async function runPrune(deps: PruneDeps, plan: PrunePlan) {
   for (const path of plan.orphanWorktrees) {
     // Through git, not rm: an orphan directory may still be a registered worktree, and git
     // owns prunable `.git/worktrees` metadata — the kernel replaces that layer entirely.
-    const repo = path.slice(join(deps.workspaceRoot, 'worktrees').length + 1).split('/')[0] ?? '';
-    const repoPath = join(deps.workspaceRoot, 'repos', repo);
+    const repo = path.slice(join(env.workspaceRoot, 'worktrees').length + 1).split('/')[0] ?? '';
+    const repoPath = join(env.workspaceRoot, 'repos', repo);
 
-    await deps.git
+    await env.git
       .removeWorktree({ repoPath, path })
       .catch((error: unknown) => failed.push(`${path}: ${String(error)}`));
     await rm(path, { recursive: true, force: true }).catch((error: unknown) =>
@@ -133,9 +133,9 @@ export async function runPrune(deps: PruneDeps, plan: PrunePlan) {
     );
   }
 
-  if (deps.docker) {
+  if (env.docker) {
     for (const image of plan.images) {
-      const untag = await deps.docker.run(['image', 'rm', image.tag]);
+      const untag = await env.docker.run(['image', 'rm', image.tag]);
 
       if (untag.exitCode != 0) {
         failed.push(`${image.tag}: ${untag.stderr || untag.stdout}`);

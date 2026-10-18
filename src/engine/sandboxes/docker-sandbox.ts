@@ -4,7 +4,7 @@ import { join, basename } from 'node:path';
 
 import { fileExists } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
-import { type Sandbox } from '../kernel/seams.ts';
+import { type Sandbox } from '../contracts.ts';
 import { readFile, stat } from 'node:fs/promises';
 
 /**

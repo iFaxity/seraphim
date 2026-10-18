@@ -7,8 +7,8 @@ import { cliDocker, dockerSandbox } from '../src/engine/sandboxes/docker-sandbox
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 
 /**
- * Container-seam verification, included only by the integration tier config
- * (`test:integration`): proves the seams fakes cannot — the worktree bind-mount actually
+ * Container-contract verification, included only by the integration tier config
+ * (`test:integration`): proves the fakes cannot — the worktree bind-mount actually
  * carries staged skills to `/workspace`, the project `env` slot reaches the container, and
  * the image has `gh` for forge reads. Needs Docker; no model calls, so no tokens.
  */
@@ -29,7 +29,7 @@ try {
   dockerAvailable = false;
 }
 
-describe.skipIf(!dockerAvailable)('container seams', () => {
+describe.skipIf(!dockerAvailable)('container contracts', () => {
   async function setup(repo: string) {
     const root = await mkdtemp(join(tmpdir(), 'seraphim-integration-'));
     const projectsRoot = join(root, 'projects');

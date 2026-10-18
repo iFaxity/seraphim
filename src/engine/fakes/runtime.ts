@@ -1,7 +1,7 @@
-import { type AgentRuntime } from '../kernel/seams.ts';
+import { type AgentRuntime } from '../contracts.ts';
 
 /**
- * Hand-written fake for the runtime seam (ADR-0002 keeps fakes engine-side): records prompts
+ * Hand-written fake for the runtime contract (ADR-0002 keeps fakes engine-side): records prompts
  * and transcripts per turn, so tests assert behavior a user observes — agent invocations —
  * never kernel internals (spec: Testing Decisions).
  */

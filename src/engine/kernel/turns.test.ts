@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import { type TurnResult } from './seams.ts';
 import { createTurnEngine } from './turns.ts';
 
 import { failure, success } from '../../lib/result.ts';
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
+import { type TurnResult } from '../contracts.ts';
 
 /** Controllable fake clock: each `advance(ms)` moves the instant the engine reads. */
 function fakeClock(startMs = 1_000_000) {

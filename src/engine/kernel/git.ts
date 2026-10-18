@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 
-import { type Git } from './seams.ts';
-
+import { type Git } from '../contracts.ts';
 import { stat } from 'node:fs/promises';
 
 /** True when the path exists and is a directory — prune's idempotence check for worktrees. */
@@ -96,7 +95,7 @@ export function expectOk(label: string, run: GitRun) {
 export function gitAdapter(runner: GitRunner) {
   return {
     defaultBranch: async (repoPath) => {
-      // `--short` yields `origin/<branch>`; the seam's contract is the branch name (the fake
+      // `--short` yields `origin/<branch>`; the adapter contract is the branch name (the fake
       // returns 'main' and createWorktree re-prefixes origin/), so strip the remote here.
       const run = await runner.run(
         ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],

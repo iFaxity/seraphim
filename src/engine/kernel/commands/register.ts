@@ -14,8 +14,8 @@ export const registerCommand = command({
 
     return success({ url: args[0] ?? '', name: args[1] });
   },
-  execute: async (deps, { url, name }) => {
-    const result = await registerProject(deps.workspaceRoot, deps.git, url, name);
+  execute: async (env, { url, name }) => {
+    const result = await registerProject(env.workspaceRoot, env.git, url, name);
 
     if (!result.success) {
       return failure(result.error);

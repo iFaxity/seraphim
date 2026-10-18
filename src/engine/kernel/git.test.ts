@@ -6,7 +6,7 @@ import { expectOk, gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
 import { mkdtemp } from 'node:fs/promises';
 
-/** Scripts git's behavior per invocation pattern — the same seam the docker adapter fakes. */
+/** Scripts git's behavior per invocation pattern — the same contract the docker adapter fakes. */
 function fakeRunner(script: (args: readonly string[]) => GitRun): GitRunner & {
   invocations: string[][];
 } {
@@ -133,7 +133,7 @@ describe('gitAdapter.createWorktree', () => {
 });
 
 describe('gitAdapter.defaultBranch', () => {
-  it('reads origin/HEAD and strips the remote prefix per the seam contract', async () => {
+  it('reads origin/HEAD and strips the remote prefix per the git contract', async () => {
     const git = gitAdapter(fakeRunner(() => run(0, 'origin/trunk\n')));
 
     await expect(git.defaultBranch('/home/x/repos/widgets')).resolves.toBe('trunk');

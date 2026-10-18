@@ -1,7 +1,7 @@
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 
 import { failure, success, tryCatch, type Result } from '../../lib/result.ts';
-import { type Deps } from '../deps.ts';
+import { type KernelEnvironment } from '../env.ts';
 
 /**
  * What a session command reports back to its caller. Commands never format CLI prose —
@@ -19,7 +19,10 @@ export type Command<Name extends string, O> = {
   readonly name: Name;
   readonly summary: string;
   readonly usage: string;
-  readonly handler: (deps: Deps | undefined, args: readonly string[]) => Promise<O | ErrorOutcome>;
+  readonly handler: (
+    env: KernelEnvironment | undefined,
+    args: readonly string[],
+  ) => Promise<O | ErrorOutcome>;
 };
 
 /** Any command, when the concrete variant doesn't matter (help's table, the dispatcher). */
@@ -27,14 +30,18 @@ export type AnyCommand = {
   readonly name: string;
   readonly summary: string;
   readonly usage: string;
-  readonly handler: (deps: Deps | undefined, args: readonly string[]) => Promise<unknown>;
+  readonly handler: (
+    env: KernelEnvironment | undefined,
+    args: readonly string[],
+  ) => Promise<unknown>;
 };
 
-/** The one missing-Deps error, shared by every command that needs an engine home. */
-function noDepsError() {
+/** The one missing-KernelEnvironment error, shared by every command that needs an engine home. */
+function noEnvError() {
   return {
     kind: 'error',
-    message: 'no engine home configured: supply Deps to engine() (see src/main.ts composeDeps)',
+    message:
+      'no engine home configured: supply KernelEnvironment to engine() (see src/main.ts composeKernelEnvironment)',
   } as const;
 }
 
@@ -73,13 +80,13 @@ export function strictFlags(
 }
 
 /**
- * The shared command scaffold: parse arguments once, guarantee non-undefined deps, and map
+ * The shared command scaffold: parse arguments once, guarantee non-undefined env, and map
  * the handler's `Result` to the error outcome once — an execute body is the pure mapping
  * from engine results to its own outcome variant. The execute function's type is captured
  * whole (rather than inferring an outcome parameter from it) so a multi-shape execute —
  * several success variants — keeps its full union in the derived dispatcher.
  */
-type Execute<P> = (deps: Deps, parsed: P) => Promise<Result<{ readonly kind: string }>>;
+type Execute<P> = (env: KernelEnvironment, parsed: P) => Promise<Result<{ readonly kind: string }>>;
 
 type OutcomeOf<E extends Execute<never>> = E extends (
   ...args: never
@@ -100,18 +107,18 @@ export function command<Name extends string, P, E extends Execute<P>>(def: {
     name,
     summary,
     usage,
-    handler: async (deps, args): Promise<OutcomeOf<E> | ErrorOutcome> => {
+    handler: async (env, args): Promise<OutcomeOf<E> | ErrorOutcome> => {
       const parsed = parse(args);
 
       if (!parsed.success) {
         return { kind: 'error', message: parsed.error.message };
       }
 
-      if (!deps) {
-        return noDepsError();
+      if (!env) {
+        return noEnvError();
       }
 
-      const result = await execute(deps, parsed.data);
+      const result = await execute(env, parsed.data);
 
       // The cast narrows the captured execute's declared shape back to its concrete outcome
       // union — the constraint `Execute` infers against is looser than the module's own.

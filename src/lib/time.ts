@@ -1,5 +1,5 @@
 /**
- * Time seam over Temporal (stage 4, unflagged in Node 26): one clock read, one schema-edge
+ * Time contract over Temporal (stage 4, unflagged in Node 26): one clock read, one schema-edge
  * conversion, one formatter. `Date` and bare epoch `number`s never leave this module;
  * instants are the platform's own `Temporal.Instant`, never an alias of ours.
  */
@@ -20,7 +20,7 @@ export function toEpochMs(instant: Temporal.Instant) {
 }
 
 /**
- * The one formatter: `Intl.DateTimeFormat` configured at this seam instead of ad hoc at every
+ * The one formatter: `Intl.DateTimeFormat` configured at this contract instead of ad hoc at every
  * render site. Presentation-only — records and comparisons stay instants and epoch numbers.
  */
 export function formatInstant(
