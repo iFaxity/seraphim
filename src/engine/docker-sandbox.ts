@@ -178,8 +178,9 @@ function validateRepoName(repo: string) {
  */
 export async function imageTagFor(dir: string) {
   const dockerfilePath = join(dir, 'Dockerfile');
+  const hasDockerfile = await fileExists(dockerfilePath);
 
-  if (!(await fileExists(dockerfilePath))) {
+  if (!hasDockerfile) {
     return '';
   }
 

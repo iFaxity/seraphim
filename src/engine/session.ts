@@ -403,7 +403,10 @@ function capAbort(manifest: Session, reason: string, sessionTranscript?: string[
 
 /** Fails fast on missing Dockerfile-shaped prerequisites; loadFlow owns the flow file. */
 async function checkPreflight(deps: Deps, repo: string) {
-  if (!(await fileExists(join(deps.workspaceRoot, 'projects', repo, 'Dockerfile')))) {
+  const dockerfilePath = join(deps.workspaceRoot, 'projects', repo, 'Dockerfile');
+  const hasDockerfile = await fileExists(dockerfilePath);
+
+  if (!hasDockerfile) {
     return {
       success: false as const,
       error: new Error(

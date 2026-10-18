@@ -89,7 +89,10 @@ export async function planPrune(deps: PruneDeps): Promise<Result<PrunePlan>> {
     return !retainedWorktrees.has(path) && !sessionWorktrees.has(path);
   });
 
-  const images = deps.docker ? await staleImages(deps.workspaceRoot, deps.docker) : [];
+  let images: PruneImage[] = [];
+  if (deps.docker) {
+    images = await staleImages(deps.workspaceRoot, deps.docker);
+  }
 
   return {
     success: true as const,
