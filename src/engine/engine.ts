@@ -1,5 +1,5 @@
+import { type Deps } from './deps.ts';
 import { dispatch, getCommand } from './kernel/dispatcher.ts';
-import { type Deps } from './kernel/session.ts';
 
 import { success, failure } from '../lib/result.ts';
 

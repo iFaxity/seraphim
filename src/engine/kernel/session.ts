@@ -3,14 +3,13 @@ import { join } from 'node:path';
 import { loadFlow } from './flow.ts';
 import { loadProject } from './projects.ts';
 import { type Session, writeReceipt, sessionRelDir } from './receipts.ts';
-import { type AgentRuntime, type Git, type Sandbox, type Tracker } from './seams.ts';
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
 import { createTurnEngine, type TurnAborted } from './turns.ts';
 
 import { fileExists } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
+import { type Deps } from '../deps.ts';
 
 /**
  * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
@@ -28,19 +27,6 @@ export type SessionInput = {
 /** The receipt-visible result of one completed session — kernel types, instants unconverted. */
 export type SessionOutcome = {
   readonly manifest: Session;
-};
-
-export type Deps = {
-  readonly tracker: Tracker;
-  readonly sandbox: Sandbox;
-  readonly runtime: AgentRuntime;
-  readonly git: Git;
-  readonly workspaceRoot: string;
-  readonly sessionsRoot: string;
-  /** The curated skill pool the kernel enforces declarations against and stages from. */
-  readonly poolRoot: string;
-  /** The docker CLI runner prune reuses for stale-image listing and untagging. */
-  readonly docker: DockerRunner;
 };
 
 /**
