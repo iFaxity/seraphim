@@ -716,7 +716,8 @@ export default flow;
     const tracker = fakeTracker();
     const failingOpen = {
       ...tracker,
-      openDraftPr: () => Promise.reject(new Error("head branch 'seraphim/neverpush/11-0' not found")),
+      openDraftPr: () =>
+        Promise.reject(new Error("head branch 'seraphim/neverpush/11-0' not found")),
     };
 
     const { env, forge } = fakeKernelEnvironment({

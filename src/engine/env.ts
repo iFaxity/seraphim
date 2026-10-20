@@ -1,4 +1,10 @@
-import { type AgentRuntime, type Forge, type Git, type Sandbox, type Tracker } from './contracts.ts';
+import {
+  type AgentRuntime,
+  type Forge,
+  type Git,
+  type Sandbox,
+  type Tracker,
+} from './contracts.ts';
 import { type DockerRunner } from './sandboxes/docker-sandbox.ts';
 
 /**
