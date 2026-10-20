@@ -9,6 +9,7 @@ import { createTurnEngine, type TurnAborted } from './turns.ts';
 import { fileExists } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
+import { type NotifyEvent } from '../contracts.ts';
 import { type KernelEnvironment } from '../env.ts';
 
 /**
@@ -218,6 +219,33 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
     throw new TurnAbortedError(aborted.exitState);
   }
 
+  // Narrowed locals for the closures below: TS can't see the guard-returns above from
+  // inside `notify`/`ctx`, so the records are bound once, here.
+  const projectRecord = project.data;
+  const issueRecord = issue.data;
+
+  /**
+   * Fires one operator page: failed, cap-hit, PR-opened. A delivery failure is logged, never
+   * fatal — the receipt stays the source of truth. A session that later resumes from failure
+   * (recovery turns) must stay silent: a self-heal that never reaches a terminal state never
+   * pages the operator.
+   */
+  async function notify(event: NotifyEvent, detail: string) {
+    const sent = await tryCatch(
+      env.notifier.notify({
+        repo: input.repo,
+        issueNumber: input.issueNumber,
+        event,
+        summary: `${input.repo}#${input.issueNumber} ${issueRecord.title} — ${detail}`,
+        target: projectRecord.notify?.target ?? null,
+      }),
+    );
+
+    if (!sent.success) {
+      logs.push(`notify failed: ${String(sent.error)}`);
+    }
+  }
+
   const ctx = {
     repo: input.repo,
     issueNumber: input.issueNumber,
@@ -255,8 +283,9 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
             title: prInput.title,
             body: prInput.body,
           })
-          .then((pr) => {
+          .then(async (pr) => {
             manifest.prUrl = pr.url;
+            await notify('pr-opened', `draft PR opened: ${pr.url}`);
 
             return pr;
           }),
@@ -310,6 +339,19 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
 
   const { turns, transcripts } = turnsEngine.snapshot();
   const finalManifest = { ...manifest, endedAt: now(), turns };
+
+  // Terminal-state pages : a failure or cap breach stops for human takeover, so
+  // the operator is paged. Completed sessions stay silent; the PR-opened page already fired
+  // in the ctx callback above.
+  if (finalManifest.state == 'failed' || finalManifest.state == 'cap-hit') {
+    await notify(
+      finalManifest.state,
+      finalManifest.capHit
+        ? `cap hit: ${finalManifest.capHit}`
+        : 'session failed — human takeover required',
+    );
+  }
+
   const write = await writeReceipt(
     env.sessionsRoot,
     relDir,

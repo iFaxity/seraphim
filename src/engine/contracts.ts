@@ -128,3 +128,30 @@ export type Git = {
    */
   readonly probeRemote: (url: string) => Promise<void>;
 };
+
+/** The terminal outcomes the kernel pages the operator about. Resumed sessions never notify. */
+export type NotifyEvent = 'failed' | 'cap-hit' | 'pr-opened';
+
+/**
+ * One page the kernel sends when a session reaches a terminal state the operator must see
+ * while AFK: a failure, a cap breach, or a draft PR awaiting review. The target is the
+ * channel address (e.g. an ntfy topic URL); `null` rides the composed default target, a
+ * non-null value is the per-project override from the project record.
+ */
+export type Notification = {
+  readonly repo: string;
+  readonly issueNumber: number;
+  readonly event: NotifyEvent;
+  /** Human-readable session summary — the payload's operator-facing content. */
+  readonly summary: string;
+  readonly target: string | null;
+};
+
+/**
+ * Notifier contract: one authenticated webhook POST per page (ntfy is the first consumer;
+ * Telegram/Discord/desktop are further adapters, not kernel code). Fire-and-forget from the
+ * flow's perspective — a failed delivery is logged, never fails the session.
+ */
+export type Notifier = {
+  readonly notify: (notification: Notification) => Promise<void>;
+};

@@ -9,9 +9,11 @@ import { fakeKernelEnvironment } from './engine/fakes/env.ts';
 import { githubApi } from './engine/forges/github-api.ts';
 import { ghTracker } from './engine/forges/github-tracker.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
+import { loadKernelConfig } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
 import { gitAdapter, processGit } from './engine/kernel/git.ts';
 import { poolRoot } from './engine/kernel/skills.ts';
+import { nullNotifier, webhookNotifier } from './engine/notifiers/webhook.ts';
 import { piRuntime } from './engine/runtimes/pi.ts';
 import { cliDocker, dockerSandbox } from './engine/sandboxes/docker-sandbox.ts';
 import { readEnvFile } from './lib/env-file.ts';
@@ -23,7 +25,19 @@ import { failure, success, type Result } from './lib/result.ts';
  * The KernelEnvironment is composed here (composition root) and threaded explicitly into the engine.
  */
 export async function main(argv: readonly string[], env?: KernelEnvironment) {
-  const effectiveEnv = env ?? composeKernelEnvironment();
+  let composed;
+
+  if (env != null) {
+    composed = success(env);
+  } else {
+    composed = await composeKernelEnvironment();
+  }
+
+  if (!composed.success) {
+    return `error: ${composed.error.message}`;
+  }
+
+  const effectiveEnv = composed.data;
   const result = await engine(argv, effectiveEnv).then(
     (outcome) => success(outcome),
     (error) => failure(error),
@@ -41,23 +55,35 @@ export async function main(argv: readonly string[], env?: KernelEnvironment) {
  * stop derived here (per-session flow caps stay kernel-gated in `runSession`). Tracker
  * auth: `GH_TOKEN` from the seraphim-home `.env`.
  */
-function composeKernelEnvironment() {
+async function composeKernelEnvironment() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
   const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
   const tracker = ghTracker(githubApi(token));
   const sandbox = dockerSandbox({ projectsRoot, docker: cliDocker });
+  const config = await loadKernelConfig(home);
 
-  return fakeKernelEnvironment({
-    tracker,
-    sandbox,
-    git: gitAdapter(processGit),
-    runtime: piRuntime({ maxTimeMs: 30 * 60_000, exec: sandbox.exec }),
-    workspaceRoot: home,
-    sessionsRoot: join(home, 'sessions'),
-    poolRoot: resolvePoolRoot(home),
-    docker: cliDocker,
-  }).env;
+  if (!config.success) {
+    return config;
+  }
+
+  // One channel, configured once in the global kernel config . No channel
+  // configured is a silent notifier — the kernel still fires pages, they go nowhere.
+  const notifier = config.data.notify ? webhookNotifier(config.data.notify) : nullNotifier();
+
+  return success(
+    fakeKernelEnvironment({
+      tracker,
+      sandbox,
+      notifier,
+      git: gitAdapter(processGit),
+      runtime: piRuntime({ maxTimeMs: 30 * 60_000, exec: sandbox.exec }),
+      workspaceRoot: home,
+      sessionsRoot: join(home, 'sessions'),
+      poolRoot: resolvePoolRoot(home),
+      docker: cliDocker,
+    }).env,
+  );
 }
 
 /**

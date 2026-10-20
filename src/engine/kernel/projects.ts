@@ -16,6 +16,18 @@ export const ProjectRecordSchema = z.object({
   repo: z.string().min(1),
   remote: z.string().min(1),
   state: z.enum(['active', 'inactive']),
+  /**
+   * Nullable per-project notifier override: a non-null target reroutes this project's pages
+   * to its own channel. Unset/null keeps the global kernel config's channel — the default
+   * still holds. The target is a full URL; the global channel's bearer token rides it, so it
+   * must be a topic on the same channel host.
+   */
+  notify: z
+    .object({
+      target: z.string().url(),
+    })
+    .nullable()
+    .default(null),
 });
 
 export type ProjectRecord = z.infer<typeof ProjectRecordSchema>;
@@ -132,7 +144,7 @@ export async function registerProject(
     return failure(error);
   }
 
-  const record: ProjectRecord = { repo, remote: url, state: 'active' };
+  const record: ProjectRecord = { repo, remote: url, state: 'active', notify: null };
   const wrote = await writeRecord(dir, record);
 
   if (!wrote.success) {
@@ -184,6 +196,7 @@ export async function deactivateProject(home: string, repo: string) {
     repo: read.data.repo,
     remote: read.data.remote,
     state: 'inactive',
+    notify: read.data.notify,
   };
 
   return writeRecord(projectPath(home, repo), record);
