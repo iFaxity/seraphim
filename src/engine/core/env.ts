@@ -2,6 +2,7 @@ import {
   type AgentRuntime,
   type Forge,
   type Git,
+  type Notifier,
   type Sandbox,
   type Tracker,
 } from './contracts.ts';
@@ -26,4 +27,6 @@ export type KernelEnvironment = {
   readonly poolRoot: string;
   /** The docker CLI runner prune reuses for stale-image listing and untagging. */
   readonly docker: DockerRunner;
+  /** The operator page channel: failed, cap-hit, and PR-opened notifications. */
+  readonly notifier: Notifier;
 };

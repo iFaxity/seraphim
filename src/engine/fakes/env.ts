@@ -2,6 +2,7 @@ import { join } from 'node:path';
 
 import { fakeForge, type FakeForge } from './forge.ts';
 import { fakeGit, type FakeGit } from './git.ts';
+import { fakeNotifier, type FakeNotifier } from './notifier.ts';
 import { fakeRuntime, type FakeRuntime } from './runtime.ts';
 import { fakeSandbox, type FakeSandbox } from './sandbox.ts';
 import { fakeTracker, type FakeTracker } from './tracker.ts';
@@ -10,6 +11,7 @@ import {
   type AgentRuntime,
   type Forge,
   type Git,
+  type Notifier,
   type Sandbox,
   type Tracker,
   type TurnResult,
@@ -22,6 +24,7 @@ export type FakeEnvironmentOverrides = Partial<{
   readonly forge: FakeForge | Forge;
   readonly sandbox: FakeSandbox | Sandbox;
   readonly git: FakeGit | Git;
+  readonly notifier: FakeNotifier | Notifier;
   readonly workspaceRoot: string;
   readonly sessionsRoot: string;
   readonly poolRoot: string;
@@ -69,6 +72,7 @@ function resolveEnvironment(overrides: FakeEnvironmentOverrides | undefined): {
   readonly forge: FakeForge | Forge;
   readonly sandbox: FakeSandbox | Sandbox;
   readonly git: FakeGit | Git;
+  readonly notifier: FakeNotifier;
   readonly workspaceRoot: string;
   readonly sessionsRoot: string;
   readonly poolRoot: string;
@@ -80,6 +84,7 @@ function resolveEnvironment(overrides: FakeEnvironmentOverrides | undefined): {
     forge = fakeForge(),
     sandbox = fakeSandbox(),
     git = fakeGit(),
+    notifier = fakeNotifier(),
     workspaceRoot = '/tmp/seraphim-fake',
     sessionsRoot = '/tmp/seraphim-fake-sessions',
     poolRoot = join(workspaceRoot, 'skills'),
@@ -90,6 +95,10 @@ function resolveEnvironment(overrides: FakeEnvironmentOverrides | undefined): {
 
   return {
     wrappedRuntime: wrapRuntime(runtime, runtimeDelayMs),
+    // A real `Notifier` override (e.g. the webhook adapter at the composition root) has no
+    // recording surface, so it passes through shaped as a FakeNotifier with empty recordings —
+    // the same pass-through the runtime wrap above applies.
+    notifier: 'events' in notifier ? (notifier as FakeNotifier) : { ...notifier, events: [] },
     tracker,
     forge,
     sandbox,
@@ -118,5 +127,6 @@ export function fakeKernelEnvironment(overrides?: FakeEnvironmentOverrides) {
     forge: leaves.forge as FakeForge,
     sandbox: leaves.sandbox,
     git: leaves.git as FakeGit,
+    notifier: leaves.notifier,
   };
 }
