@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 
 import { fakeGit, type FakeGit } from './git.ts';
+import { fakeNotifier, type FakeNotifier } from './notifier.ts';
 import { fakeRuntime, type FakeRuntime } from './runtime.ts';
 import { fakeSandbox, type FakeSandbox } from './sandbox.ts';
 import { fakeTracker, type FakeTracker } from './tracker.ts';
@@ -8,6 +9,7 @@ import { fakeTracker, type FakeTracker } from './tracker.ts';
 import {
   type AgentRuntime,
   type Git,
+  type Notifier,
   type Sandbox,
   type Tracker,
   type TurnResult,
@@ -24,6 +26,7 @@ export function fakeKernelEnvironment(
     readonly tracker: FakeTracker | Tracker;
     readonly sandbox: FakeSandbox | Sandbox;
     readonly git: FakeGit | Git;
+    readonly notifier: FakeNotifier | Notifier;
     readonly workspaceRoot: string;
     readonly sessionsRoot: string;
     readonly poolRoot: string;
@@ -36,6 +39,12 @@ export function fakeKernelEnvironment(
   const tracker = overrides?.tracker ?? fakeTracker();
   const sandbox = overrides?.sandbox ?? fakeSandbox();
   const git = overrides?.git ?? fakeGit();
+  // A real `Notifier` override (e.g. the webhook adapter at the composition root) has no
+  // recording surface, so it passes through shaped as a FakeNotifier with empty recordings —
+  // the same pass-through the runtime override gets below.
+  const notifierInput = overrides?.notifier ?? fakeNotifier();
+  const notifier: FakeNotifier =
+    'events' in notifierInput ? (notifierInput as FakeNotifier) : { ...notifierInput, events: [] };
   const workspaceRoot = overrides?.workspaceRoot ?? '/tmp/seraphim-fake';
   const sessionsRoot = overrides?.sessionsRoot ?? '/tmp/seraphim-fake-sessions';
   const poolRoot = overrides?.poolRoot ?? join(workspaceRoot, 'skills');
@@ -75,6 +84,7 @@ export function fakeKernelEnvironment(
       sandbox,
       runtime,
       git: git as FakeGit,
+      notifier,
       workspaceRoot,
       sessionsRoot,
       poolRoot,
@@ -84,5 +94,6 @@ export function fakeKernelEnvironment(
     tracker,
     sandbox,
     git: git as FakeGit,
+    notifier,
   };
 }

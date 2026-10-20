@@ -946,3 +946,168 @@ export default flow;
     }
   });
 });
+
+describe('runSession notifications ', () => {
+  it('pages failed when the runtime turn fails', async () => {
+    await seedProject(root, 'notifyfail');
+    const { env, notifier } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      runtime: fakeRuntime('failed'),
+    });
+
+    const result = await runSession(env, { repo: 'notifyfail', issueNumber: 9 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.manifest.state).toBe('failed');
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]).toMatchObject({
+      repo: 'notifyfail',
+      issueNumber: 9,
+      event: 'failed',
+      target: null,
+    });
+    expect(notifier.events[0]?.summary).toContain('notifyfail#9');
+  });
+
+  it('pages cap-hit when the turn budget is breached', async () => {
+    await seedProject(root, 'notifycap');
+    const { env, notifier } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      runtime: fakeRuntime('cap-hit'),
+    });
+
+    const result = await runSession(env, { repo: 'notifycap', issueNumber: 12 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.manifest.state).toBe('cap-hit');
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]?.event).toBe('cap-hit');
+  });
+
+  it('pages pr-opened when the flow opens a draft PR, once per PR', async () => {
+    const projectDir = await seedProject(root, 'notifypr');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
+  run: async (ctx) => {
+    await ctx.run('implement issue');
+    await ctx.tracker.openDraftPr({ title: 'demo PR', body: 'closes issue' });
+  },
+};
+
+export default flow;
+`,
+    );
+
+    const { env, notifier } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+
+    const result = await runSession(env, { repo: 'notifypr', issueNumber: 6 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]).toMatchObject({
+      repo: 'notifypr',
+      issueNumber: 6,
+      event: 'pr-opened',
+      target: null,
+    });
+    expect(notifier.events[0]?.summary).toContain('https://example.invalid/notifypr/pull/99');
+  });
+
+  it('stays silent on a completed session with no PR', async () => {
+    await seedProject(root, 'notifyquiet');
+    const { env, notifier } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+
+    const result = await runSession(env, { repo: 'notifyquiet', issueNumber: 3 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.manifest.state).toBe('completed');
+    expect(notifier.events).toEqual([]);
+  });
+
+  it('rides the per-project notify target override on every page', async () => {
+    const projectDir = await seedProject(root, 'notifytarget');
+
+    await writeFile(
+      join(projectDir, 'project.json'),
+      JSON.stringify({
+        repo: 'notifytarget',
+        remote: seedRemote('notifytarget'),
+        state: 'active',
+        notify: { target: 'https://ntfy.invalid/acme/notifytarget' },
+      }),
+    );
+
+    const { env, notifier } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      runtime: fakeRuntime('failed'),
+    });
+
+    const result = await runSession(env, { repo: 'notifytarget', issueNumber: 5 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]?.target).toBe('https://ntfy.invalid/acme/notifytarget');
+  });
+
+  it('logs a failed delivery instead of failing the session', async () => {
+    await seedProject(root, 'notifydown');
+    const { env } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      runtime: fakeRuntime('failed'),
+      notifier: {
+        notify: () => Promise.reject(new Error('webhook unreachable')),
+      },
+    });
+
+    const result = await runSession(env, { repo: 'notifydown', issueNumber: 7 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.manifest.state).toBe('failed');
+
+    const receiptDirs = await readdir(join(sessionsRoot, 'notifydown'));
+    const flowLog = await readFile(
+      join(sessionsRoot, 'notifydown', receiptDirs[0] ?? '', 'flow.log'),
+      'utf8',
+    );
+
+    expect(flowLog).toContain('notify failed');
+    expect(flowLog).toContain('webhook unreachable');
+  });
+});

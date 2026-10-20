@@ -39,7 +39,12 @@ describe('registerProject', () => {
       return;
     }
 
-    expect(result.data.record).toEqual({ repo: 'widgets', remote: REMOTE, state: 'active' });
+    expect(result.data.record).toEqual({
+      repo: 'widgets',
+      remote: REMOTE,
+      state: 'active',
+      notify: null,
+    });
     expect(result.data.reactivated).toBe(false);
     expect(result.data.artifacts).toEqual([
       'projects/widgets/flow.ts',
@@ -208,6 +213,49 @@ describe('loadProject', () => {
 
     if (!read.success) {
       expect(read.error.message).toMatch(/invalid project record/);
+    }
+  });
+});
+
+describe('project notify override', () => {
+  it('parses a legacy record without a notify field as the null default', async () => {
+    const dir = join(root, 'projects', 'legacy');
+
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'project.json'),
+      JSON.stringify({ repo: 'legacy', remote: REMOTE, state: 'active' }),
+    );
+
+    const read = await loadProject(root, 'legacy');
+
+    expect(read.success).toBe(true);
+
+    if (read.success) {
+      expect(read.data.notify).toBeNull();
+    }
+  });
+
+  it('round-trips a per-project notify target override', async () => {
+    const dir = join(root, 'projects', 'override');
+
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'project.json'),
+      JSON.stringify({
+        repo: 'override',
+        remote: REMOTE,
+        state: 'active',
+        notify: { target: 'https://ntfy.invalid/acme/override' },
+      }),
+    );
+
+    const read = await loadProject(root, 'override');
+
+    expect(read.success).toBe(true);
+
+    if (read.success) {
+      expect(read.data.notify?.target).toBe('https://ntfy.invalid/acme/override');
     }
   });
 });

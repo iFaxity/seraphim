@@ -61,8 +61,12 @@ A `seraphim/*` sandbox image tag no registered project's current Dockerfile+lock
 _Avoid_: dead image, unused image
 
 **Contract**:
-A kernel-declared interface describing one outside system (`Tracker`, `Sandbox`, `AgentRuntime`, `Git`), declared in `src/engine/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
+A kernel-declared interface describing one outside system (`Tracker`, `Sandbox`, `AgentRuntime`, `Git`, `Notifier`), declared in `src/engine/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
 _Avoid_: seam, port, service interface
+
+**Notifier**:
+The operator page channel: one authenticated webhook POST per terminal session outcome (`failed`, `cap-hit`, `pr-opened`); ntfy is the first consumer. Composed once from the global kernel config (`~/.seraphim/config.json`); a nullable per-project override (`project.json` `notify.target`) reroutes one project's pages. Unconfigured = silent.
+_Avoid_: alerting, push channel, messaging adapter
 
 **KernelEnvironment**:
 The record of contract instances plus filesystem roots (`workspaceRoot`, `sessionsRoot`, `poolRoot`) the kernel runs against, threaded explicitly into `engine()` — composed once in `src/main.ts` (`composeKernelEnvironment`), faked wholesale in tests (`fakeKernelEnvironment`).
