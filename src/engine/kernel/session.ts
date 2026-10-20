@@ -10,7 +10,7 @@ import { createTurnEngine, type TurnAborted, type TurnEngine } from './turns.ts'
 import { fileExists } from '../../lib/fs.ts';
 import { failure, flatten, success, tryCatch, type Result } from '../../lib/result.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { type Issue } from '../core/contracts.ts';
+import { type Issue, type NotifyEvent } from '../core/contracts.ts';
 import { type KernelEnvironment } from '../core/env.ts';
 import { type FlowConfig, type SessionContext } from '../core/flow-api.ts';
 
@@ -57,6 +57,10 @@ type SessionRun = {
   readonly manifest: Session;
   readonly turnsEngine: TurnEngine;
   readonly logs: string[];
+  /** The claimed issue's title: every operator page names it. */
+  readonly issueTitle: string;
+  /** The per-project notify target override; null rides the composed default channel. */
+  readonly notifyTarget: string | null;
 };
 
 /**
@@ -164,6 +168,8 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
     manifest,
     turnsEngine,
     logs,
+    issueTitle: issue.title,
+    notifyTarget: project.notify?.target ?? null,
   };
 
   const ctx = createFlowContext(run, { issue, branch, repoPath });
@@ -348,6 +354,28 @@ function createSessionManifest(
 }
 
 /**
+ * Fires one operator page: failed, cap-hit, PR-opened. A delivery failure is logged, never
+ * fatal — the receipt stays the source of truth. A session that later resumes from failure
+ * (recovery turns) must stay silent: a self-heal that never reaches a terminal state never
+ * pages the operator.
+ */
+async function notifyOperator(run: SessionRun, event: NotifyEvent, detail: string) {
+  const sent = await tryCatch(
+    run.env.notifier.notify({
+      repo: run.input.repo,
+      issueNumber: run.input.issueNumber,
+      event,
+      summary: `${run.input.repo}#${run.input.issueNumber} ${run.issueTitle} — ${detail}`,
+      target: run.notifyTarget,
+    }),
+  );
+
+  if (!sent.success) {
+    run.logs.push(`notify failed: ${String(sent.error)}`);
+  }
+}
+
+/**
  * Builds the flow-facing `SessionContext` over the session's adapters and turn ledger:
  * logging, gate commands, draft-PR opening, branch pushing, and turn dispatch. The ctx
  * closures mutate the manifest (the receipt) and the session log; `ctx.run` gates and
@@ -378,8 +406,9 @@ function createFlowContext(
             title: prInput.title,
             body: prInput.body,
           })
-          .then((pr) => {
+          .then(async (pr) => {
             manifest.prUrl = pr.url;
+            await notifyOperator(run, 'pr-opened', `draft PR opened: ${pr.url}`);
 
             return pr;
           }),
@@ -501,6 +530,19 @@ async function finalizeSessionReceipt(
 
   const { turns, transcripts } = turnsEngine.snapshot();
   const finalManifest = { ...manifest, endedAt: now(), turns };
+  // Terminal-state pages: a failure or cap breach stops for human takeover, so the operator
+  // is paged. Completed sessions stay silent; the PR-opened page already fired in the ctx
+  // callback above.
+  if (finalManifest.state == 'failed' || finalManifest.state == 'cap-hit') {
+    await notifyOperator(
+      run,
+      finalManifest.state,
+      finalManifest.capHit
+        ? `cap hit: ${finalManifest.capHit}`
+        : 'session failed — human takeover required',
+    );
+  }
+
   const write = await writeReceipt(
     env.sessionsRoot,
     relDir,
