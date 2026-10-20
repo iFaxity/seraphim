@@ -39,6 +39,15 @@ Registration seeds each project's central directory with three editable slots:
   commands (their output rides the session log). The seed is a working flow, so `run`
   works with no manual step.
 - **`.env`** — environment carried into the session sandbox.
+- **`ctx.forge.push()`** — the flow's own branch publication: optional, flow-authored. The
+  `Forge` adapter runs `git push` host-side; flows decide whether and when.
+
+**Container reachability guarantee**: the sandbox reaches exactly the worktree bind-mount
+(`/workspace`) plus the project `.env` file — nothing else. Push credentials never enter
+the container; they stay host-side in the `Forge` adapter. No kernel code path writes env
+values into transcripts or `flow.log`. One caveat, documented rather than engineered
+against: the agent can echo its own environment (e.g. `ctx.sh(['env'])`) — that is
+content-borne, and flows that run untrusted content own that risk.
 
 Re-registering never clobbers edited slots; it only updates the record. Everything runs
 locally or on a server you own.

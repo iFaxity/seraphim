@@ -1,7 +1,7 @@
 import { type Result } from '../lib/result.ts';
 
 /**
- * The three adapter contracts the session engine drives, plus the internal `Git` contract. All are
+ * The four adapter contracts the session engine drives, plus the internal `Git` contract. All are
  * compile-time TS types (CODING_STANDARDS: internal kernel types stay TS; `zod` only at
  * untrusted edges) — flows depend on the interface, tests inject fakes, and no kernel code
  * branches on a specific backend (ADR-0003).
@@ -43,6 +43,20 @@ export type Tracker = {
     readonly title: string;
     readonly body: string;
   }) => Promise<PullRequest>;
+};
+
+/**
+ * Forge contract: branch publication. Adapters run their own `git push` spawn
+ * with host credentials — the container never sees them (the sandbox reaches exactly the
+ * worktree bind + `.env`; push credentials stay host-side here). Push is optional and
+ * flow-authored: the kernel never enforces an unpushed branch, a PR opened against an
+ * unknown head fails naturally at the forge. Distinct from `Tracker` (ADR-0003 survives:
+ * ingest-only) — PR-open is flow-invoked but forge-effected, and this split keeps that
+ * guarantee testable. See ADR-0006.
+ */
+export type Forge = {
+  /** Publishes one branch to the session's remote. The kernel binds the branch name. */
+  readonly push: (branch: string) => Promise<void>;
 };
 
 /** One command executed inside the sandbox, with its observable outcome. */

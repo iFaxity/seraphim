@@ -261,6 +261,13 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
             return pr;
           }),
     },
+    forge: {
+      // Flow-authored, optional: the kernel binds the session branch — flows
+      // never touch git — and the adapter owns the host-side push credentials. A push
+      // failure propagates into the flow like any other adapter rejection; the kernel
+      // never pre-checks an unpushed branch (an unknown head fails at the forge).
+      push: () => env.forge.push(branch),
+    },
     run: async (prompt: string) => {
       // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
       // not be able to dispatch past a budget by catching the abort (spec: caps live in

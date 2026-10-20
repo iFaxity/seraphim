@@ -36,6 +36,15 @@ export type SessionContext = {
   readonly sh: (command: readonly string[]) => Promise<number>;
   /** Tracker handle for this session's issue — flows open draft PRs through it. */
   readonly tracker: Pick<Tracker, 'openDraftPr'>;
+  /**
+   * Forge handle for this session's branch — flows decide whether and when to publish
+   * (`ctx.forge.push()`). The kernel binds the session branch (flows never touch git);
+   * adapters own the host-side push credentials. Push is optional: a flow that never
+   * pushes just cannot open a PR that resolves.
+   */
+  readonly forge: {
+    readonly push: () => Promise<void>;
+  };
   readonly log: (message: string) => void;
 };
 

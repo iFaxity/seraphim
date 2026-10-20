@@ -21,6 +21,8 @@ export default {
     // ctx.run(prompt): one kernel-dispatched agent turn — AFK preamble, caps, transcript
     // capture are the kernel's. ctx.sh(command): one gate command in the sandbox; a
     // nonzero exit fails the session. ctx.tracker.openDraftPr({ title, body }): draft PR.
+    // ctx.forge.push(): publish the session branch — optional; a PR open without it
+    // fails at the forge.
     await ctx.run('implement the issue');
   },
 };
