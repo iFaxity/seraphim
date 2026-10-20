@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { z } from 'zod';
 
 import { isFsErrorCode } from '../../lib/fs.ts';
@@ -58,6 +59,10 @@ const SLOTS = [
   },
 ] as const;
 
+/** The home directory's gitignore body, seeded once so `git init` in `~/.seraphim` tracks
+ * exactly the operator's own files — credentials and kernel-managed state stay untracked. */
+const HOME_GITIGNORE = '.env\nsessions/\nrepos/\nworktrees/\n';
+
 export type Registration = {
   readonly record: ProjectRecord;
   readonly reactivated: boolean;
@@ -108,6 +113,17 @@ export async function registerProject(
 
   if (!made.success) {
     return made;
+  }
+
+  // Operator hygiene: seed the home directory's gitignore once so `git init` in ~/.seraphim
+  // tracks only the operator's own files. `wx` never clobbers — an existing .gitignore is an
+  // existing installation's, and its EEXIST is the success case, not an error.
+  const seededIgnore = await tryCatch(
+    writeFile(join(home, '.gitignore'), HOME_GITIGNORE, { flag: 'wx' }),
+  );
+
+  if (!seededIgnore.success && !isFsErrorCode(seededIgnore.error, 'EEXIST')) {
+    return seededIgnore;
   }
 
   const existing = await readRecord(dir);
