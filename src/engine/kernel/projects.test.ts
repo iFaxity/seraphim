@@ -60,6 +60,25 @@ describe('registerProject', () => {
     expect(stored).toEqual(result.data.record);
   });
 
+  it('seeds ~/.seraphim/.gitignore on first register and never clobbers an existing one', async () => {
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+
+    await registerProject(root, env.git, REMOTE);
+
+    const ignore = await readFile(join(root, '.gitignore'), 'utf8');
+
+    expect(ignore.split('\n')).toEqual(
+      expect.arrayContaining(['.env', 'sessions/', 'repos/', 'worktrees/']),
+    );
+
+    await writeFile(join(root, '.gitignore'), '# mine\n');
+
+    const again = await registerProject(root, env.git, REMOTE, 'widgets2');
+
+    expect(again.success).toBe(true);
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('# mine\n');
+  });
+
   it('seeds a flow template that loads with no imports or engine tree present', async () => {
     const { env } = fakeKernelEnvironment({ workspaceRoot: root });
 
