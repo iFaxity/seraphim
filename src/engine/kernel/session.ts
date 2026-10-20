@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 
 import { loadFlow } from './flow.ts';
+import { acquireRepoLock } from './lock.ts';
 import { loadProject } from './projects.ts';
 import { type Session, writeReceipt, sessionRelDir } from './receipts.ts';
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
@@ -87,12 +88,27 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
   if (!env.runtime.available(flow.data.config.agent)) {
     return failure(new Error(`adapter not available: ${flow.data.config.agent}`));
   }
+
+  // The repo lock serializes only the shared mutations across concurrent sessions on one
+  // repo — image build and clone/pull; the worktree and turn dispatch below stay outside it
+  // (parallel issues per repo are the intended use case). It is taken before the claim so a
+  // live lock fails fast without stranding a claimed issue.
+  const reposRoot = join(env.workspaceRoot, 'repos');
+  const repoPath = join(reposRoot, input.repo);
+  const lock = await step(acquireRepoLock(reposRoot, input.repo), 'repo lock failed');
+
+  if (!lock.success) {
+    return lock;
+  }
+
   const issue = await step(
     env.tracker.getIssue(input.repo, input.issueNumber),
     'tracker read failed',
   );
 
   if (!issue.success) {
+    await lock.data.release();
+
     return issue;
   }
 
@@ -100,26 +116,32 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
   const claimed = await step(env.tracker.claim(issue.data), 'tracker claim failed');
 
   if (!claimed.success) {
+    await lock.data.release();
+
     return claimed;
   }
 
-  const image = await step(env.sandbox.ensureImage(input.repo), 'image build failed');
+  // The shared mutations the repo lock guards; the lock itself is taken before the claim.
+  try {
+    const image = await step(env.sandbox.ensureImage(input.repo), 'image build failed');
 
-  if (!image.success) {
-    return image;
-  }
+    if (!image.success) {
+      return image;
+    }
 
-  const repoPath = join(env.workspaceRoot, 'repos', input.repo);
-  const clone = await step(env.git.cloneIfMissing(repoPath, project.data.remote), 'clone failed');
+    const clone = await step(env.git.cloneIfMissing(repoPath, project.data.remote), 'clone failed');
 
-  if (!clone.success) {
-    return clone;
-  }
+    if (!clone.success) {
+      return clone;
+    }
 
-  const pull = await step(env.git.pull(repoPath), 'pull failed');
+    const pull = await step(env.git.pull(repoPath), 'pull failed');
 
-  if (!pull.success) {
-    return pull;
+    if (!pull.success) {
+      return pull;
+    }
+  } finally {
+    await lock.data.release();
   }
 
   const startedAt = now();

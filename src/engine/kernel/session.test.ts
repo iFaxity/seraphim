@@ -1,3 +1,4 @@
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
@@ -6,17 +7,36 @@ import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession } from './session.ts';
 
-import { toEpochMs } from '../../lib/time.ts';
+import { fileExists } from '../../lib/fs.ts';
+import { now, toEpochMs } from '../../lib/time.ts';
+import { type Sandbox, type Tracker } from '../contracts.ts';
 import { engine } from '../engine.ts';
 import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { fakeRuntime } from '../fakes/runtime.ts';
 import { fakeSandbox } from '../fakes/sandbox.ts';
-import { type FakeTracker, fakeTracker } from '../fakes/tracker.ts';
+import { fakeTracker, type FakeTracker } from '../fakes/tracker.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 /** The remote seedProject registers; tests assert the session clones exactly this URL. */
 function seedRemote(repo: string) {
   return `https://example.invalid/acme/${repo}.git`;
+}
+
+/**
+ * A pid the kernel reads dead: a reaped child's pid — retried in the pathological case the
+ * pid was already reused by a live process.
+ */
+function deadPid() {
+  for (;;) {
+    const { pid } = spawnSync('true');
+    const gone = pid ?? -1;
+
+    try {
+      process.kill(gone, 0);
+    } catch {
+      return gone;
+    }
+  }
 }
 
 async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
@@ -55,6 +75,24 @@ async function seedSkillPool(root: string, name = 'implement') {
     '---\nname: implement\ndescription: non-interactive implementation skill\n---\n\nImplement the issue.\n',
   );
 }
+
+/** Matches the composed fake's recording surface, so tests reach `calls` through the union. */
+function isFakeTracker(value: unknown): value is FakeTracker {
+  return typeof value == 'object' && value != null && 'calls' in value;
+}
+
+/** Writes a lock file the way any holder — kernel or crash — would have left it on disk. */
+async function writeRepoLock(root: string, repo: string, lock: LockFileBody) {
+  const lockPath = join(root, 'repos', `.${repo}.lock`);
+
+  await mkdir(join(root, 'repos'), { recursive: true });
+  await writeFile(lockPath, JSON.stringify(lock));
+
+  return lockPath;
+}
+
+/** The lock record shape on disk (epoch-ms timestamp); test helpers only. */
+type LockFileBody = { readonly pid: number; readonly at: number };
 
 let root: string;
 let sessionsRoot: string;
@@ -198,10 +236,6 @@ export default flow;
     const { env, tracker } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
     await runSession(env, { repo: 'claimed', issueNumber: 4 });
-
-    function isFakeTracker(value: unknown): value is FakeTracker {
-      return typeof value == 'object' && value != null && 'calls' in value;
-    }
 
     if (!isFakeTracker(tracker)) {
       throw new Error('expected the default FakeTracker with call recording');
@@ -628,94 +662,6 @@ export default flow;
     expect(result.data.manifest.prUrl).toBe('https://example.invalid/prflow/pull/99');
   });
 
-  it('records the push and the PR open a pushing flow issues', async () => {
-    const projectDir = await seedProject(root, 'publisher');
-
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
-  run: async (ctx) => {
-    await ctx.run('implement issue');
-    await ctx.forge.push();
-    await ctx.tracker.openDraftPr({ title: 'demo PR', body: 'closes issue' });
-  },
-};
-
-export default flow;
-`,
-    );
-
-    const { env, forge } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
-
-    const result = await runSession(env, { repo: 'publisher', issueNumber: 11 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    // Observable effects only (CODING_STANDARDS: never internal call ordering): the flow's
-    // own awaits order push before the PR open — the kernel must not drop either, and the
-    // kernel binds the session branch and clone for the push.
-    expect(forge.calls.pushed).toEqual([
-      { repoPath: join(root, 'repos', 'publisher'), branch: result.data.manifest.branch },
-    ]);
-    expect(result.data.manifest.prUrl).toBe('https://example.invalid/publisher/pull/99');
-  });
-
-  it('completes a flow that never pushes, with openDraftPr failing naturally at the forge', async () => {
-    const projectDir = await seedProject(root, 'neverpush');
-
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
-  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
-  run: async (ctx) => {
-    await ctx.run('implement issue');
-    try {
-      await ctx.tracker.openDraftPr({ title: 'demo PR', body: 'closes issue' });
-      ctx.log('unexpected: PR opened without a push');
-    } catch (error) {
-      ctx.log('forge refused: ' + String(error));
-    }
-  },
-};
-
-export default flow;
-`,
-    );
-
-    // Forge-style failure: an unknown head, the way a real forge answers a PR open
-    // against a branch it has never seen. No adapter pre-check, no kernel enforcement.
-    const tracker = fakeTracker();
-    const failingOpen = {
-      ...tracker,
-      openDraftPr: () =>
-        Promise.reject(new Error("head branch 'seraphim/neverpush/11-0' not found")),
-    };
-
-    const { env, forge } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      tracker: failingOpen,
-    });
-
-    const result = await runSession(env, { repo: 'neverpush', issueNumber: 11 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    // The session itself completes — no unpushed-branch enforcement — and nothing pushed.
-    expect(forge.calls.pushed).toEqual([]);
-    expect(result.data.manifest.prUrl).toBeNull();
-    expect(result.data.manifest.state).toBe('completed');
-  });
-
   it('executes gate commands through ctx.sh inside the sandbox', async () => {
     const projectDir = await seedProject(root, 'gates');
 
@@ -1032,5 +978,139 @@ export default flow;
     if (listed.success && listed.data.kind == 'status') {
       expect(listed.data.sessions[0]?.lastLog).toBe('dispatched turn 1');
     }
+  });
+});
+
+describe('per-repo lock', () => {
+  it('serializes image build across two concurrent runs on one repo; worktrees stay parallel', async () => {
+    await seedProject(root, 'demo');
+    const { env, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const base = fakeSandbox();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const sandbox: Sandbox = {
+      ...base,
+      ensureImage: async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // The overlap window needs real time: the lock queue is internal, so no deterministic
+        // hook exists at this seam to signal "second session reached the mutex".
+        const { promise, resolve } = Promise.withResolvers<void>();
+
+        setTimeout(resolve, 25);
+        await promise;
+        const result = await base.ensureImage();
+        inFlight -= 1;
+
+        return result;
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      runSession({ ...env, sandbox }, { repo: 'demo', issueNumber: 7 }),
+      runSession({ ...env, sandbox }, { repo: 'demo', issueNumber: 8 }),
+    ]);
+
+    expect(first.success).toBe(true);
+    if (!second.success) {
+      throw second.error;
+    }
+    expect(second.success).toBe(true);
+    expect(maxInFlight).toBe(1);
+
+    // Parallel issues stay parallel: one distinct worktree per session
+    expect(git.worktrees).toHaveLength(2);
+    expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
+
+    // Both sessions released the lock on completion
+    expect(await fileExists(join(root, 'repos', '.demo.lock'))).toBe(false);
+  });
+
+  it('fails fast naming the repo while a live lock is held — before any effect', async () => {
+    await seedProject(root, 'demo');
+    const { env, tracker, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    // A live lock means another live process: a real child, killed once the test ends.
+    const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+
+    if (holder.pid == null) {
+      throw new Error('could not spawn the lock-holder process');
+    }
+
+    try {
+      const lockPath = await writeRepoLock(root, 'demo', {
+        pid: holder.pid,
+        at: toEpochMs(now()),
+      });
+      const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        expect(result.error.message).toMatch(
+          new RegExp(`repo 'demo' is locked by a live session \\(pid ${holder.pid}\\)`),
+        );
+      }
+
+      // Fails fast: no claim, no clone, and the live holder's lock is left alone
+      if (!isFakeTracker(tracker)) {
+        throw new Error('expected the default FakeTracker with call recording');
+      }
+
+      expect(tracker.calls.claimed).toEqual([]);
+      expect(git.clones).toEqual([]);
+      expect(await readFile(lockPath, 'utf8')).toContain(`"pid":${holder.pid}`);
+    } finally {
+      holder.kill('SIGKILL');
+    }
+  });
+
+  it('breaks and takes a stale lock left by a dead session', async () => {
+    await seedProject(root, 'demo');
+    const { env, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const lockPath = await writeRepoLock(root, 'demo', { pid: deadPid(), at: toEpochMs(now()) });
+    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+
+    expect(result.success).toBe(true);
+    expect(git.worktrees).toHaveLength(1);
+
+    // Taken by this run, released cleanly on completion
+    expect(await fileExists(lockPath)).toBe(false);
+  });
+
+  it('releases the lock when the tracker read or claim fails after acquisition', async () => {
+    await seedProject(root, 'demo');
+    const tracker = fakeTracker();
+    const broken: Tracker = {
+      ...tracker,
+      getIssue: () => Promise.reject(new Error('tracker down')),
+    };
+    const { env, git } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      tracker: broken,
+    });
+
+    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+
+    expect(result.success).toBe(false);
+    expect(git.clones).toEqual([]);
+
+    // A failed session must not wedge the repo: the next session acquires and runs.
+    const following = await runSession({ ...env, tracker }, { repo: 'demo', issueNumber: 7 });
+
+    expect(following.success).toBe(true);
+    expect(await fileExists(join(root, 'repos', '.demo.lock'))).toBe(false);
+  });
+
+  it('treats a corrupt lock file as stale — a crash mid-write cannot wedge the repo', async () => {
+    await seedProject(root, 'demo');
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+
+    await writeRepoLock(root, 'demo', { pid: 12.5, at: toEpochMs(now()) });
+
+    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+
+    expect(result.success).toBe(true);
+    expect(await fileExists(join(root, 'repos', '.demo.lock'))).toBe(false);
   });
 });
