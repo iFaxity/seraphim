@@ -129,7 +129,7 @@ export type Flow = {
  * export default defineFlow({
  *   config: {
  *     agent: 'pi',
- *     model: 'pi/latest',
+ *     model: 'anthropic/sonnet-5.5',
  *     skills: ['implement'],
  *     sandbox: 'docker',
  *     caps: { maxTurns: 10, wallClockMs: 600_000 },
