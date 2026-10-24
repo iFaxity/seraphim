@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 
+import { fakeForge, type FakeForge } from './forge.ts';
 import { fakeGit, type FakeGit } from './git.ts';
 import { fakeRuntime, type FakeRuntime } from './runtime.ts';
 import { fakeSandbox, type FakeSandbox } from './sandbox.ts';
@@ -7,6 +8,7 @@ import { fakeTracker, type FakeTracker } from './tracker.ts';
 
 import {
   type AgentRuntime,
+  type Forge,
   type Git,
   type Sandbox,
   type Tracker,
@@ -22,6 +24,7 @@ export function fakeKernelEnvironment(
   overrides?: Partial<{
     readonly runtime: FakeRuntime | AgentRuntime;
     readonly tracker: FakeTracker | Tracker;
+    readonly forge: FakeForge | Forge;
     readonly sandbox: FakeSandbox | Sandbox;
     readonly git: FakeGit | Git;
     readonly workspaceRoot: string;
@@ -34,6 +37,7 @@ export function fakeKernelEnvironment(
 ) {
   const inner = overrides?.runtime ?? fakeRuntime();
   const tracker = overrides?.tracker ?? fakeTracker();
+  const forge = overrides?.forge ?? fakeForge();
   const sandbox = overrides?.sandbox ?? fakeSandbox();
   const git = overrides?.git ?? fakeGit();
   const workspaceRoot = overrides?.workspaceRoot ?? '/tmp/seraphim-fake';
@@ -72,6 +76,7 @@ export function fakeKernelEnvironment(
   return {
     env: {
       tracker,
+      forge: forge as FakeForge,
       sandbox,
       runtime,
       git: git as FakeGit,
@@ -82,6 +87,7 @@ export function fakeKernelEnvironment(
     },
     runtime,
     tracker,
+    forge: forge as FakeForge,
     sandbox,
     git: git as FakeGit,
   };
