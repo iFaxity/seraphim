@@ -7,18 +7,27 @@ import { type Result } from '../lib/result.ts';
  * branches on a specific backend (ADR-0003).
  */
 
-/** Forge-agnostic view of one issue, normalized by tracker adapters (ADR-0003). */
+/**
+ * Forge-agnostic view of one issue, normalized by tracker adapters (ADR-0003). What flows
+ * see when they read tracker data — no forge-native shapes leak through.
+ */
 export type Issue = {
+  /** The project the issue lives in, as registered (e.g. `'acme/widgets'`). */
   readonly repo: string;
+  /** The issue number on the forge — the identity users quote as `#N`. */
   readonly number: number;
   readonly title: string;
+  /** The issue body as the forge stores it; `Blocked by #N` lines drive the ready filter. */
   readonly body: string;
+  /** Triage labels verbatim (e.g. `'ready-for-agent'`). */
   readonly labels: readonly string[];
+  /** Issue numbers this one waits on; nonempty means not ready for pickup. */
   readonly blockedBy: readonly number[];
 };
 
 /** Forge-agnostic view of one pull request, as status reporting needs it. */
 export type PullRequest = {
+  /** The forge-native URL — the same string a session receipt records as `prUrl`. */
   readonly url: string;
   readonly number: number;
   readonly state: 'open' | 'draft' | 'merged' | 'closed';
@@ -36,6 +45,20 @@ export type Tracker = {
   readonly listReady: (repo: string) => Promise<readonly Issue[]>;
   readonly getIssue: (repo: string, issueNumber: number) => Promise<Issue>;
   readonly claim: (issue: Issue) => Promise<void>;
+  /**
+   * Opens one draft PR from the session branch onto the forge default branch. Flow-invoked
+   * (through `ctx.tracker`, which fills in repo, issue, and branch), forge-effected here;
+   * put `Closes #N` in the body to link the issue. Fails naturally when the branch head is
+   * unknown — e.g. the flow never pushed.
+   *
+   * @example
+   * ```ts
+   * const pr = await ctx.tracker.openDraftPr({
+   *   title: 'feat: widget loader',
+   *   body: 'Closes #42.',
+   * });
+   * ```
+   */
   readonly openDraftPr: (input: {
     readonly repo: string;
     readonly issue: Issue;
