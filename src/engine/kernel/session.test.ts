@@ -11,7 +11,7 @@ import { engine } from '../engine.ts';
 import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { fakeRuntime } from '../fakes/runtime.ts';
 import { fakeSandbox } from '../fakes/sandbox.ts';
-import { type FakeTracker } from '../fakes/tracker.ts';
+import { type FakeTracker, fakeTracker } from '../fakes/tracker.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 /** The remote seedProject registers; tests assert the session clones exactly this URL. */
@@ -626,6 +626,94 @@ export default flow;
     }
 
     expect(result.data.manifest.prUrl).toBe('https://example.invalid/prflow/pull/99');
+  });
+
+  it('records the push and the PR open a pushing flow issues', async () => {
+    const projectDir = await seedProject(root, 'publisher');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
+  run: async (ctx) => {
+    await ctx.run('implement issue');
+    await ctx.forge.push();
+    await ctx.tracker.openDraftPr({ title: 'demo PR', body: 'closes issue' });
+  },
+};
+
+export default flow;
+`,
+    );
+
+    const { env, forge } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+
+    const result = await runSession(env, { repo: 'publisher', issueNumber: 11 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    // Observable effects only (CODING_STANDARDS: never internal call ordering): the flow's
+    // own awaits order push before the PR open — the kernel must not drop either, and the
+    // kernel binds the session branch and clone for the push.
+    expect(forge.calls.pushed).toEqual([
+      { repoPath: join(root, 'repos', 'publisher'), branch: result.data.manifest.branch },
+    ]);
+    expect(result.data.manifest.prUrl).toBe('https://example.invalid/publisher/pull/99');
+  });
+
+  it('completes a flow that never pushes, with openDraftPr failing naturally at the forge', async () => {
+    const projectDir = await seedProject(root, 'neverpush');
+
+    await writeFile(
+      join(projectDir, 'flow.ts'),
+      `const flow = {
+  config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
+  run: async (ctx) => {
+    await ctx.run('implement issue');
+    try {
+      await ctx.tracker.openDraftPr({ title: 'demo PR', body: 'closes issue' });
+      ctx.log('unexpected: PR opened without a push');
+    } catch (error) {
+      ctx.log('forge refused: ' + String(error));
+    }
+  },
+};
+
+export default flow;
+`,
+    );
+
+    // Forge-style failure: an unknown head, the way a real forge answers a PR open
+    // against a branch it has never seen. No adapter pre-check, no kernel enforcement.
+    const tracker = fakeTracker();
+    const failingOpen = {
+      ...tracker,
+      openDraftPr: () =>
+        Promise.reject(new Error("head branch 'seraphim/neverpush/11-0' not found")),
+    };
+
+    const { env, forge } = fakeKernelEnvironment({
+      workspaceRoot: root,
+      sessionsRoot,
+      tracker: failingOpen,
+    });
+
+    const result = await runSession(env, { repo: 'neverpush', issueNumber: 11 });
+
+    expect(result.success).toBe(true);
+
+    if (!result.success) {
+      return;
+    }
+
+    // The session itself completes — no unpushed-branch enforcement — and nothing pushed.
+    expect(forge.calls.pushed).toEqual([]);
+    expect(result.data.manifest.prUrl).toBeNull();
+    expect(result.data.manifest.state).toBe('completed');
   });
 
   it('executes gate commands through ctx.sh inside the sandbox', async () => {
