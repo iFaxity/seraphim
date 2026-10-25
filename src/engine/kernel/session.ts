@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 
 import { loadFlow } from './flow.ts';
+import { withRepoLock } from './lock.ts';
 import { loadProject } from './projects.ts';
 import { type Session, writeReceipt, sessionRelDir } from './receipts.ts';
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
@@ -87,40 +88,68 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
   if (!env.runtime.available(flow.data.config.agent)) {
     return failure(new Error(`adapter not available: ${flow.data.config.agent}`));
   }
-  const issue = await step(
-    env.tracker.getIssue(input.repo, input.issueNumber),
-    'tracker read failed',
+
+  // The repo lock serializes only the shared mutations across concurrent sessions on one
+  // repo — image build and clone/pull; the worktree and turn dispatch below stay outside it
+  // (parallel issues per repo are the intended use case). It is taken before the claim so a
+  // locked or expired-wait repo fails fast without stranding a claimed issue, and the guard
+  // carries its own try/finally, so no session step can leave the lock held.
+  const repoPath = join(env.workspaceRoot, 'repos', input.repo);
+  const guarded = await step(
+    withRepoLock(env.workspaceRoot, input.repo, async () => {
+      const issue = await step(
+        env.tracker.getIssue(input.repo, input.issueNumber),
+        'tracker read failed',
+      );
+
+      if (!issue.success) {
+        return failure(issue.error);
+      }
+
+      // Claim on pickup so concurrent sessions cannot double-run the same issue.
+      const claimed = await step(env.tracker.claim(issue.data), 'tracker claim failed');
+
+      if (!claimed.success) {
+        return failure(claimed.error);
+      }
+
+      const image = await step(env.sandbox.ensureImage(input.repo), 'image build failed');
+
+      if (!image.success) {
+        return failure(image.error);
+      }
+
+      const clone = await step(
+        env.git.cloneIfMissing(repoPath, project.data.remote),
+        'clone failed',
+      );
+
+      if (!clone.success) {
+        return failure(clone.error);
+      }
+
+      const pull = await step(env.git.pull(repoPath), 'pull failed');
+
+      if (!pull.success) {
+        return failure(pull.error);
+      }
+
+      return success({ issue: issue.data });
+    }),
+    'repo lock failed',
   );
 
-  if (!issue.success) {
-    return issue;
+  if (!guarded.success) {
+    return guarded;
   }
 
-  // Claim on pickup so concurrent sessions cannot double-run the same issue.
-  const claimed = await step(env.tracker.claim(issue.data), 'tracker claim failed');
+  const attempt = guarded.data;
 
-  if (!claimed.success) {
-    return claimed;
+  if (!attempt.success) {
+    return attempt;
   }
 
-  const image = await step(env.sandbox.ensureImage(input.repo), 'image build failed');
-
-  if (!image.success) {
-    return image;
-  }
-
-  const repoPath = join(env.workspaceRoot, 'repos', input.repo);
-  const clone = await step(env.git.cloneIfMissing(repoPath, project.data.remote), 'clone failed');
-
-  if (!clone.success) {
-    return clone;
-  }
-
-  const pull = await step(env.git.pull(repoPath), 'pull failed');
-
-  if (!pull.success) {
-    return pull;
-  }
+  const { issue } = attempt.data;
 
   const startedAt = now();
   const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
@@ -250,7 +279,7 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
         env.tracker
           .openDraftPr({
             repo: input.repo,
-            issue: issue.data,
+            issue,
             branch,
             title: prInput.title,
             body: prInput.body,
@@ -260,6 +289,13 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
 
             return pr;
           }),
+    },
+    forge: {
+      // Flow-authored, optional: the kernel binds the session clone and branch — flows
+      // never touch git — and the adapter owns the host-side push credentials. A push
+      // failure propagates into the flow like any other adapter rejection; the kernel
+      // never pre-checks an unpushed branch (an unknown head fails at the forge).
+      push: () => env.forge.push({ repoPath, branch }),
     },
     run: async (prompt: string) => {
       // Both caps gate before dispatch: the boundary is the kernel's, and flow code must

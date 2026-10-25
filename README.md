@@ -30,15 +30,24 @@ point `SERAPHIM_HOME` elsewhere for tests or a second install.
 
 ## Bring your own Dockerfile + flow
 
-Registration seeds each project's central directory with three editable slots:
+Registration seeds each project's central directory with three editable slots (plus the
+flow-facing handles the flow file itself uses):
 
 - **Dockerfile** — the environment your agent works in; built once per change, reused
   across sessions. A missing Dockerfile fails fast.
 - **Flow** (`flow.ts`) — a typed TypeScript file (`defineFlow`) declaring agent, skills,
   sandbox, and steps; `ctx.run(prompt)` invokes the agent, `ctx.sh(cmd)` runs gate
-  commands (their output rides the session log). The seed is a working flow, so `run`
-  works with no manual step.
+  commands (their output rides the session log), `ctx.forge.push()` publishes the session
+  branch, and `ctx.tracker.openDraftPr({ title, body })` opens the draft PR. The seed is a
+  working flow, so `run` works with no manual step.
 - **`.env`** — environment carried into the session sandbox.
+
+**Container reachability guarantee**: the sandbox reaches exactly the worktree bind-mount
+(`/workspace`) plus the project `.env` file — nothing else. Push credentials never enter
+the container; they stay host-side in the `Forge` adapter. No kernel code path writes env
+values into transcripts or `flow.log`. One caveat, documented rather than engineered
+against: the agent can echo its own environment (e.g. `ctx.sh(['env'])`) — that is
+content-borne, and flows that run untrusted content own that risk.
 
 Re-registering never clobbers edited slots; it only updates the record. Everything runs
 locally or on a server you own.

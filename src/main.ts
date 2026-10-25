@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { engine } from './engine/engine.ts';
 import { type KernelEnvironment } from './engine/env.ts';
 import { fakeKernelEnvironment } from './engine/fakes/env.ts';
+import { forgeAdapter } from './engine/forges/forge.ts';
 import { githubApi } from './engine/forges/github-api.ts';
 import { ghTracker } from './engine/forges/github-tracker.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
@@ -35,7 +36,8 @@ export async function main(argv: readonly string[], env?: KernelEnvironment) {
 
 /**
  * Composition root: builds the real `KernelEnvironment` from the engine's contracts — the Docker sandbox,
- * the git CLI, the GitHub tracker, and the pi agent runtime are all real adapters. The
+ * the git CLI, the forge push (host-side git credentials), the GitHub tracker, and the pi
+ * agent runtime are all real adapters. The
  * runtime launches turns through the sandbox's own exec: the model CLI, its tool calls,
  * and its credentials all run inside the project image, with the per-turn wall-clock
  * stop derived here (per-session flow caps stay kernel-gated in `runSession`). Tracker
@@ -52,6 +54,7 @@ function composeKernelEnvironment() {
     tracker,
     sandbox,
     git: gitAdapter(processGit),
+    forge: forgeAdapter(processGit),
     runtime: piRuntime({ maxTimeMs: 30 * 60_000, exec: sandbox.exec }),
     workspaceRoot: home,
     sessionsRoot: join(home, 'sessions'),

@@ -29,8 +29,12 @@ Post-v1 session state of a PR'd session whose branch/worktree is retained pendin
 _Avoid_: pr-open (ambiguous with running), done
 
 **Tracker**:
-The forge-agnostic abstraction over issue hosts (GitHub, Azure DevOps, GitLab, Forgejo). Adapters are ingest-only and normalize to one uniform format.
+The forge-agnostic abstraction over issue hosts (GitHub, Azure DevOps, GitLab, Forgejo). Adapters are ingest-only and normalize to one uniform format (ADR-0003): they read issues and effect only the kernel's two writes (claim, draft-PR open); branch publication is not theirs — see **Forge**.
 _Avoid_: forge, provider, backend (when naming the abstraction)
+
+**Forge**:
+The forge-facing contract for branch publication (`push`). Adapters run their own `git push` spawn with host credentials — the container never sees them. Push is optional and flow-authored (`ctx.forge.push()`); the kernel never enforces an unpushed branch, so a PR opened against an unknown head fails naturally at the forge. Distinct from **Tracker** (ingest-only): PR-open is flow-invoked but forge-effected.
+_Avoid_: pusher, publisher (when naming the contract)
 
 **Flow**:
 The per-project, centrally-homed TypeScript file (`defineFlow`) declaring agent, model, skills, sandbox, and steps for a session.
@@ -61,7 +65,7 @@ A `seraphim/*` sandbox image tag no registered project's current Dockerfile+lock
 _Avoid_: dead image, unused image
 
 **Contract**:
-A kernel-declared interface describing one outside system (`Tracker`, `Sandbox`, `AgentRuntime`, `Git`), declared in `src/engine/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
+A kernel-declared interface describing one outside system (`Tracker`, `Forge`, `Sandbox`, `AgentRuntime`, `Git`), declared in `src/engine/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
 _Avoid_: seam, port, service interface
 
 **KernelEnvironment**:

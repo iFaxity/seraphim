@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import { z } from 'zod';
 
 import { isFsErrorCode } from '../../lib/fs.ts';
@@ -59,11 +58,8 @@ const SLOTS = [
   },
 ] as const;
 
-/**
- * The home directory's gitignore template, copied over at first register so `git init` in
- * `~/.seraphim` tracks exactly the operator's own files — credentials and kernel-managed
- * state stay untracked. The owner's copy is never clobbered.
- */
+/** Kernel state seeded into the home that stays visible but must never be committed — the
+ * template carries the full list: credentials, sessions, repos, worktrees, and locks. */
 const HOME_GITIGNORE = {
   name: '.gitignore',
   body: await readFile(new URL('../../../templates/home/gitignore', import.meta.url), 'utf8'),
@@ -74,6 +70,14 @@ export type Registration = {
   readonly reactivated: boolean;
   readonly artifacts: readonly string[];
 };
+
+async function seedHomeIgnore(home: string) {
+  const wrote = await tryCatch(
+    writeFile(`${home}/.gitignore`, HOME_GITIGNORE.body, { flag: 'wx' }),
+  );
+
+  return wrote.success || isFsErrorCode(wrote.error, 'EEXIST') ? success(null) : wrote;
+}
 
 /**
  * Registers one project in the central directory: probe the remote (fail fast on an
@@ -121,15 +125,10 @@ export async function registerProject(
     return made;
   }
 
-  // Operator hygiene: seed the home directory's gitignore once so `git init` in ~/.seraphim
-  // tracks only the operator's own files. `wx` never clobbers — an existing .gitignore is an
-  // existing installation's, and its EEXIST is the success case, not an error.
-  const seededIgnore = await tryCatch(
-    writeFile(join(home, '.gitignore'), HOME_GITIGNORE.body, { flag: 'wx' }),
-  );
+  const ignored = await seedHomeIgnore(home);
 
-  if (!seededIgnore.success && !isFsErrorCode(seededIgnore.error, 'EEXIST')) {
-    return seededIgnore;
+  if (!ignored.success) {
+    return ignored;
   }
 
   const existing = await readRecord(dir);
