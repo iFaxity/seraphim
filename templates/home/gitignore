@@ -1,0 +1,9 @@
+# Operator-managed files the kernel generates or rotates: credentials and runtime state.
+#
+# git init in ~/.seraphim now tracks exactly what the operator owns: Dockerfiles, flows,
+# skills, and configs. Edit freely — the kernel never clobbers this file.
+.env
+sessions/
+repos/
+worktrees/
+locks/

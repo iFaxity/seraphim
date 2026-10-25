@@ -58,21 +58,23 @@ const SLOTS = [
   },
 ] as const;
 
+/** Kernel state seeded into the home that stays visible but must never be committed — the
+ * template carries the full list: credentials, sessions, repos, worktrees, and locks. */
+const HOME_GITIGNORE = {
+  name: '.gitignore',
+  body: await readFile(new URL('../../../templates/home/gitignore', import.meta.url), 'utf8'),
+} as const;
+
 export type Registration = {
   readonly record: ProjectRecord;
   readonly reactivated: boolean;
   readonly artifacts: readonly string[];
 };
 
-/** Kernel state seeded into the home that stays visible but must never be committed. */
-const HOME_GITIGNORE = 'locks/\n';
-
-/**
- * Seeds the home `.gitignore` (wx: an owner-curated home ignore is never clobbered). The
- * remaining kernel homes (sessions/, repos/, worktrees/) join this file with their own story.
- */
 async function seedHomeIgnore(home: string) {
-  const wrote = await tryCatch(writeFile(`${home}/.gitignore`, HOME_GITIGNORE, { flag: 'wx' }));
+  const wrote = await tryCatch(
+    writeFile(`${home}/.gitignore`, HOME_GITIGNORE.body, { flag: 'wx' }),
+  );
 
   return wrote.success || isFsErrorCode(wrote.error, 'EEXIST') ? success(null) : wrote;
 }
