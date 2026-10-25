@@ -59,9 +59,15 @@ const SLOTS = [
   },
 ] as const;
 
-/** The home directory's gitignore body, seeded once so `git init` in `~/.seraphim` tracks
- * exactly the operator's own files — credentials and kernel-managed state stay untracked. */
-const HOME_GITIGNORE = '.env\nsessions/\nrepos/\nworktrees/\n';
+/**
+ * The home directory's gitignore template, copied over at first register so `git init` in
+ * `~/.seraphim` tracks exactly the operator's own files — credentials and kernel-managed
+ * state stay untracked. The owner's copy is never clobbered.
+ */
+const HOME_GITIGNORE = {
+  name: '.gitignore',
+  body: await readFile(new URL('../../../templates/home/gitignore', import.meta.url), 'utf8'),
+} as const;
 
 export type Registration = {
   readonly record: ProjectRecord;
@@ -119,7 +125,7 @@ export async function registerProject(
   // tracks only the operator's own files. `wx` never clobbers — an existing .gitignore is an
   // existing installation's, and its EEXIST is the success case, not an error.
   const seededIgnore = await tryCatch(
-    writeFile(join(home, '.gitignore'), HOME_GITIGNORE, { flag: 'wx' }),
+    writeFile(join(home, '.gitignore'), HOME_GITIGNORE.body, { flag: 'wx' }),
   );
 
   if (!seededIgnore.success && !isFsErrorCode(seededIgnore.error, 'EEXIST')) {
