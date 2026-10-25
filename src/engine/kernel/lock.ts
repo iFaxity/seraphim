@@ -5,19 +5,30 @@ import { now, toEpochMs } from '../../lib/time.ts';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 
 /**
- * Per-repo lock serializing exactly the shared mutations across concurrent `run` invocations
- * on one repo — `ensureImage` and clone/pull — while worktrees and turns stay parallel (the
+ * Per-repo lock serializing exactly the shared mutations across concurrent sessions on one
+ * repo — `ensureImage` and clone/pull — while worktrees and turns stay parallel (the
  * content-hashed image is shared across worktrees; parallel issues per repo are the intended
  * use case, spec: Hardening — Per-project lock).
  *
- * Two layers: an in-process mutex queues concurrent sessions inside one process (the file's
- * own pid would otherwise read "live" against itself), and the lock file covers cross-process
- * runs. The file is a hidden sibling of the clone (`repos/.<repo>.lock`), not a file inside
- * the clone root: it must exist before the first clone completes, and git refuses to clone
- * into a non-empty destination. Content is pid + timestamp, so a crashed session's lock
- * reads dead on the next `run` and is broken and taken; a live foreign lock fails fast
- * naming the repo.
+ * The file lives at `locks/<repo>.lock` under the kernel home: visible, never hidden from
+ * the owner, and registration seeds `locks/` into the home `.gitignore` so kernel state
+ * never lands in a commit. Content is pid + timestamp; the holder's age is read from the
+ * timestamp, nothing else is stored.
+ *
+ * Two layers. An in-process mutex queues concurrent sessions inside one process (the file's
+ * own pid would otherwise read "live" against itself). Across processes the taker waits,
+ * polling the file: a dead holder is broken and taken; a released one hands the lock over;
+ * a live holder past the wait cap fails the acquisition naming the pid and holding age, so
+ * the operator can see and kill the culprit. Waiting is safe because a waiter never redoes
+ * the holder's work — `ensureImage` re-runs the content-hash check and reads the just-built
+ * image as a cache hit, `cloneIfMissing` sees the existing work tree and skips to the pull.
  */
+
+/** How long acquiring may wait on a live cross-process holder before giving up naming it. */
+const LOCK_MAX_WAIT_MS = 30 * 60 * 1000;
+
+/** Poll cadence while waiting on a live holder — coarse is fine: the cap is minutes-scale. */
+const LOCK_POLL_MS = 2_000;
 
 /** The on-disk record: who holds the lock and when it was taken (epoch ms, receipt boundary). */
 type LockFile = {
@@ -25,13 +36,25 @@ type LockFile = {
   readonly at: number;
 };
 
-/** Releases the lock; idempotent — an already-broken lock reads released. */
-export type RepoLock = {
-  readonly release: () => Promise<void>;
+/** Test over the wait timing without real clocks: the poll cadence, the give-up cap, and the clock. */
+export type LockTiming = {
+  readonly pollMs?: number;
+  readonly maxWaitMs?: number;
+  readonly delay?: (ms: number) => Promise<void>;
+  /** Elapsed-time source for the wait cap; epoch ms. Defaults to the kernel clock. */
+  readonly clock?: () => number;
 };
 
 /** One mutex tail per lock path: resolves when the current in-process holder releases. */
 const mutexTails = new Map<string, Promise<void>>();
+
+function defaultDelay(ms: number) {
+  const { promise, resolve } = Promise.withResolvers<void>();
+
+  setTimeout(resolve, ms);
+
+  return promise;
+}
 
 /** A pid answers `kill 0` (or EPERM — a foreign-owned process) exactly while its process lives. */
 function pidAlive(pid: number) {
@@ -60,10 +83,12 @@ async function readLock(path: string): Promise<LockFile | null> {
  * Takes the file lock once the in-process turn is ours. A stale lock (dead pid, corrupt
  * content, or an orphaned own-pid file from a crashed earlier session in this process) is
  * broken and taken; the exclusive-create retry resolves the race where a concurrent breaker
- * wins the unlink. A live foreign lock fails fast naming the repo.
+ * wins the unlink. A live foreign holder is waited out up to the cap.
  */
-async function takeFileLock(path: string, repo: string) {
-  for (;;) {
+async function takeFileLock(path: string, repo: string, timing: Required<LockTiming>) {
+  const startedAt = timing.clock();
+
+  while (true) {
     const lock: LockFile = { pid: process.pid, at: toEpochMs(now()) };
 
     try {
@@ -78,47 +103,73 @@ async function takeFileLock(path: string, repo: string) {
 
     const held = await readLock(path);
 
-    if (held !== null && held.pid !== process.pid && pidAlive(held.pid)) {
+    if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
+      await unlink(path).catch(() => {});
+
+      continue;
+    }
+
+    if (timing.clock() - startedAt >= timing.maxWaitMs) {
+      const heldSeconds = Math.round((toEpochMs(now()) - held.at) / 1000);
+
       throw new Error(
-        `repo '${repo}' is locked by a live session (pid ${held.pid}) — a crashed ` +
-          "session's lock is broken and taken automatically, so no action is needed on a dead pid",
+        `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
+          `${heldSeconds}s) — gave up waiting ${Math.round(timing.maxWaitMs / 1000)}s; ` +
+          'the holding session may be killed to release it',
       );
     }
 
-    await unlink(path).catch(() => {});
+    await timing.delay(timing.pollMs);
   }
 }
 
-/** Takes the repo's lock or fails fast naming the live foreign holder. */
-export async function acquireRepoLock(reposRoot: string, repo: string): Promise<RepoLock> {
-  // Repo names cannot start with '.' (registration validates a plain directory name), so the
-  // hidden prefix can never collide with a clone directory in the same root.
-  const path = join(reposRoot, `.${repo}.lock`);
-  await mkdir(reposRoot, { recursive: true });
+/**
+ * Runs `guarded` holding the repo's lock, releasing on every path — manual-release code can
+ * be forgotten further down a flow, so acquisition owns its own try/finally and the holder
+ * never leaks.
+ */
+export async function withRepoLock<T>(
+  home: string,
+  repo: string,
+  guarded: () => Promise<T>,
+  timing: LockTiming = {},
+): Promise<T> {
+  const lockedTiming: Required<LockTiming> = {
+    pollMs: timing.pollMs ?? LOCK_POLL_MS,
+    maxWaitMs: timing.maxWaitMs ?? LOCK_MAX_WAIT_MS,
+    delay: timing.delay ?? defaultDelay,
+    clock: timing.clock ?? (() => toEpochMs(now())),
+  };
+  // Repo names cannot start with '.' (registration validates a plain directory name) — and
+  // now nothing hidden rides along: the lock is a plain named file in `locks/`.
+  const path = join(home, 'locks', `${repo}.lock`);
+
+  await mkdir(join(home, 'locks'), { recursive: true });
 
   const previous = mutexTails.get(path) ?? Promise.resolve();
   const { promise: turn, resolve: releaseTurn } = Promise.withResolvers<void>();
   const tail = previous.then(() => turn);
 
   mutexTails.set(path, tail);
-  await previous;
+
+  let acquired = false;
 
   try {
-    await takeFileLock(path, repo);
-  } catch (error) {
+    await previous;
+    await takeFileLock(path, repo, lockedTiming);
+
+    acquired = true;
+
+    return await guarded();
+  } finally {
+    if (acquired) {
+      await unlink(path).catch(() => {});
+    }
+
     releaseTurn();
 
-    throw error;
+    if (mutexTails.get(path) == tail) {
+      mutexTails.delete(path);
+    }
   }
-
-  return {
-    release: async () => {
-      await unlink(path).catch(() => {});
-      releaseTurn();
-
-      if (mutexTails.get(path) == tail) {
-        mutexTails.delete(path);
-      }
-    },
-  };
 }

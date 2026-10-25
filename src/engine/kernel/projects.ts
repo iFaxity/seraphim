@@ -64,6 +64,19 @@ export type Registration = {
   readonly artifacts: readonly string[];
 };
 
+/** Kernel state seeded into the home that stays visible but must never be committed. */
+const HOME_GITIGNORE = 'locks/\n';
+
+/**
+ * Seeds the home `.gitignore` (wx: an owner-curated home ignore is never clobbered). The
+ * remaining kernel homes (sessions/, repos/, worktrees/) join this file with their own story.
+ */
+async function seedHomeIgnore(home: string) {
+  const wrote = await tryCatch(writeFile(`${home}/.gitignore`, HOME_GITIGNORE, { flag: 'wx' }));
+
+  return wrote.success || isFsErrorCode(wrote.error, 'EEXIST') ? success(null) : wrote;
+}
+
 /**
  * Registers one project in the central directory: probe the remote (fail fast on an
  * unreachable URL before anything is seeded), reject duplicates, seed missing slots, write the
@@ -108,6 +121,12 @@ export async function registerProject(
 
   if (!made.success) {
     return made;
+  }
+
+  const ignored = await seedHomeIgnore(home);
+
+  if (!ignored.success) {
+    return ignored;
   }
 
   const existing = await readRecord(dir);
