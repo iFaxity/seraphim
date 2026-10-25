@@ -60,6 +60,21 @@ describe('registerProject', () => {
     expect(stored).toEqual(result.data.record);
   });
 
+  it('seeds the home .gitignore for lock state, keeping an owner-curated one intact', async () => {
+    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+
+    await registerProject(root, env.git, REMOTE, 'widgets');
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('locks/\n');
+
+    // Owner content is never clobbered by a re-register.
+    await writeFile(join(root, '.gitignore'), 'sessions/\n');
+    await registerProject(root, env.git, REMOTE, 'other').then(
+      () => {},
+      () => {},
+    );
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('sessions/\n');
+  });
+
   it('seeds a flow template that loads with no imports or engine tree present', async () => {
     const { env } = fakeKernelEnvironment({ workspaceRoot: root });
 

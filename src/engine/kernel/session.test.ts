@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
+import { withRepoLock } from './lock.ts';
 import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession } from './session.ts';
@@ -15,7 +16,7 @@ import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { fakeRuntime } from '../fakes/runtime.ts';
 import { fakeSandbox } from '../fakes/sandbox.ts';
 import { fakeTracker, type FakeTracker } from '../fakes/tracker.ts';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises';
 
 /** The remote seedProject registers; tests assert the session clones exactly this URL. */
 function seedRemote(repo: string) {
@@ -27,7 +28,7 @@ function seedRemote(repo: string) {
  * pid was already reused by a live process.
  */
 function deadPid() {
-  for (;;) {
+  while (true) {
     const { pid } = spawnSync('true');
     const gone = pid ?? -1;
 
@@ -83,9 +84,9 @@ function isFakeTracker(value: unknown): value is FakeTracker {
 
 /** Writes a lock file the way any holder — kernel or crash — would have left it on disk. */
 async function writeRepoLock(root: string, repo: string, lock: LockFileBody) {
-  const lockPath = join(root, 'repos', `.${repo}.lock`);
+  const lockPath = join(root, 'locks', `${repo}.lock`);
 
-  await mkdir(join(root, 'repos'), { recursive: true });
+  await mkdir(join(root, 'locks'), { recursive: true });
   await writeFile(lockPath, JSON.stringify(lock));
 
   return lockPath;
@@ -1023,13 +1024,11 @@ describe('per-repo lock', () => {
     expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
 
     // Both sessions released the lock on completion
-    expect(await fileExists(join(root, 'repos', '.demo.lock'))).toBe(false);
+    expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
   });
 
-  it('fails fast naming the repo while a live lock is held — before any effect', async () => {
-    await seedProject(root, 'demo');
-    const { env, tracker, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
-    // A live lock means another live process: a real child, killed once the test ends.
+  it('fails naming pid and holding age once the lock wait cap is spent on a live holder', async () => {
+    // A live holder means another live process: a real child, killed once the test ends.
     const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
 
     if (holder.pid == null) {
@@ -1039,26 +1038,70 @@ describe('per-repo lock', () => {
     try {
       const lockPath = await writeRepoLock(root, 'demo', {
         pid: holder.pid,
-        at: toEpochMs(now()),
+        at: toEpochMs(now()) - 120_000,
       });
-      const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
 
-      expect(result.success).toBe(false);
+      // The wait cap reads actual elapsed time from the injected clock, which the delay advances.
+      let fakeEpochMs = 0;
+      const thrown = await withRepoLock(root, 'demo', () => Promise.resolve(1), {
+        pollMs: 1,
+        maxWaitMs: 5_000,
+        delay: async () => {
+          fakeEpochMs += 10_000;
+        },
+        clock: () => fakeEpochMs,
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
 
-      if (!result.success) {
-        expect(result.error.message).toMatch(
-          new RegExp(`repo 'demo' is locked by a live session \\(pid ${holder.pid}\\)`),
-        );
-      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toContain(
+        `repo 'demo' is locked by a live session (pid ${holder.pid}, holding for 120s)`,
+      );
 
-      // Fails fast: no claim, no clone, and the live holder's lock is left alone
-      if (!isFakeTracker(tracker)) {
-        throw new Error('expected the default FakeTracker with call recording');
-      }
-
-      expect(tracker.calls.claimed).toEqual([]);
-      expect(git.clones).toEqual([]);
+      // The live holder's lock is left alone
       expect(await readFile(lockPath, 'utf8')).toContain(`"pid":${holder.pid}`);
+    } finally {
+      holder.kill('SIGKILL');
+    }
+  });
+
+  it('hands a cross-process waiter the lock once the holder releases', async () => {
+    // A live holder means another live process: a real child, killed once the test ends.
+    const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+
+    if (holder.pid == null) {
+      throw new Error('could not spawn the lock-holder process');
+    }
+
+    try {
+      const lockPath = await writeRepoLock(root, 'demo', { pid: holder.pid, at: toEpochMs(now()) });
+
+      // The first poll simulates the holder releasing: its lock file disappears.
+      let polls = 0;
+      const heldPid = await withRepoLock(
+        root,
+        'demo',
+        async () => JSON.parse(await readFile(lockPath, 'utf8')).pid,
+        {
+          pollMs: 1,
+          maxWaitMs: 60_000,
+          delay: async () => {
+            polls += 1;
+
+            if (polls == 1) {
+              await unlink(lockPath);
+            }
+          },
+        },
+      );
+
+      expect(polls).toBe(1);
+      expect(heldPid).toBe(process.pid);
+
+      // Scoped acquisition releases on exit — nothing manual to forget
+      expect(await fileExists(lockPath)).toBe(false);
     } finally {
       holder.kill('SIGKILL');
     }
