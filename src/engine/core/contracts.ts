@@ -1,4 +1,4 @@
-import { type Result } from '../lib/result.ts';
+import { type Result } from '../../lib/result.ts';
 
 /**
  * The four adapter contracts the session engine drives, plus the internal `Git` contract. All are

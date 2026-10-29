@@ -1,4 +1,4 @@
-import { type Git } from '../contracts.ts';
+import { type Git } from '../core/contracts.ts';
 
 /**
  * Hand-written fake for the git contract (ADR-0002 keeps fakes engine-side): records clones,

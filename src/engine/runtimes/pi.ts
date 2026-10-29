@@ -5,7 +5,7 @@ import {
   type SandboxExec,
   type AgentRuntime,
   type TurnResult,
-} from '../contracts.ts';
+} from '../core/contracts.ts';
 
 /**
  * The real pi adapter behind the `AgentRuntime` contract: turns run inside the project's

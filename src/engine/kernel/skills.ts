@@ -18,16 +18,6 @@ export function poolRoot(home: string) {
   return join(home, 'skills');
 }
 
-/**
- * One pool skill: its name (the directory name, what flows declare) and its directory.
- * Discovery is one level deep — `<pool>/<name>/SKILL.md` — matching both runtimes' own
- * project-skill discovery (pi/omp native `.omp/skills`, claude `.claude/skills`).
- */
-export type PoolSkill = {
-  readonly name: string;
-  readonly dir: string;
-};
-
 /** All pool skills, name order. The pool root itself is optional — an empty pool is valid. */
 export async function listPoolSkills(poolRoot: string) {
   const read = await tryCatch(readdir(poolRoot, { withFileTypes: true }));

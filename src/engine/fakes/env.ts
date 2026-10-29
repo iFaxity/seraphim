@@ -13,7 +13,7 @@ import {
   type Sandbox,
   type Tracker,
   type TurnResult,
-} from '../contracts.ts';
+} from '../core/contracts.ts';
 import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 
 /**
@@ -35,31 +35,33 @@ export function fakeKernelEnvironment(
     readonly runtimeDelayMs: number;
   }>,
 ) {
-  const inner = overrides?.runtime ?? fakeRuntime();
-  const tracker = overrides?.tracker ?? fakeTracker();
-  const forge = overrides?.forge ?? fakeForge();
-  const sandbox = overrides?.sandbox ?? fakeSandbox();
-  const git = overrides?.git ?? fakeGit();
-  const workspaceRoot = overrides?.workspaceRoot ?? '/tmp/seraphim-fake';
-  const sessionsRoot = overrides?.sessionsRoot ?? '/tmp/seraphim-fake-sessions';
-  const poolRoot = overrides?.poolRoot ?? join(workspaceRoot, 'skills');
-  // An offline docker: every image listing comes back empty, so prune's image arm stays inert
-  // in the fakes unless a test scripts a runner.
-  const docker = overrides?.docker ?? {
-    run: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }),
-  };
-  const runtimeDelayMs = overrides?.runtimeDelayMs ?? 0;
+  const {
+    runtime = fakeRuntime(),
+    tracker = fakeTracker(),
+    forge = fakeForge(),
+    sandbox = fakeSandbox(),
+    git = fakeGit(),
+    workspaceRoot = '/tmp/seraphim-fake',
+    sessionsRoot = '/tmp/seraphim-fake-sessions',
+    poolRoot = join(workspaceRoot, 'skills'),
+    // An offline docker: every image listing comes back empty, so prune's image arm
+    // stays inert in the fakes unless a test scripts a runner.
+    docker = {
+      run: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }),
+    },
+    runtimeDelayMs = 0,
+  } = overrides ?? {};
 
   // A real `AgentRuntime` override (e.g. the pi adapter at the composition root) has no
   // recording surface to wrap, so it passes through shaped as a FakeRuntime with empty
   // recordings; the real fake gets the simulated-latency wrap so tests keep
   // `runtime.prompts`. The `in` checks narrow the union only structurally, not to the
   // FakeRuntime alias — the cast names the intent.
-  const isFake = 'prompts' in inner && 'transcript' in inner;
+  const isFake = 'prompts' in runtime && 'transcript' in runtime;
   const recording: FakeRuntime = isFake
-    ? (inner as FakeRuntime)
-    : { ...inner, prompts: [], transcript: [] };
-  const runtime: FakeRuntime =
+    ? (runtime as FakeRuntime)
+    : { ...runtime, prompts: [], transcript: [] };
+  const wrappedRuntime: FakeRuntime =
     runtimeDelayMs > 0
       ? {
           ...recording,
@@ -78,14 +80,14 @@ export function fakeKernelEnvironment(
       tracker,
       forge: forge as FakeForge,
       sandbox,
-      runtime,
+      runtime: wrappedRuntime,
       git: git as FakeGit,
       workspaceRoot,
       sessionsRoot,
       poolRoot,
       docker,
     },
-    runtime,
+    runtime: wrappedRuntime,
     tracker,
     forge: forge as FakeForge,
     sandbox,

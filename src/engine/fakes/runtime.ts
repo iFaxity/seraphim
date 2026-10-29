@@ -1,4 +1,4 @@
-import { type AgentRuntime } from '../contracts.ts';
+import { type AgentRuntime } from '../core/contracts.ts';
 
 /**
  * Hand-written fake for the runtime contract (ADR-0002 keeps fakes engine-side): records prompts

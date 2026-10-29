@@ -3,8 +3,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { engine } from './engine/engine.ts';
-import { type KernelEnvironment } from './engine/env.ts';
+import { engine } from './engine/core/engine.ts';
+import { type KernelEnvironment } from './engine/core/env.ts';
 import { fakeKernelEnvironment } from './engine/fakes/env.ts';
 import { forgeAdapter } from './engine/forges/forge.ts';
 import { githubApi } from './engine/forges/github-api.ts';
@@ -76,122 +76,141 @@ function resolvePoolRoot(home: string) {
     : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
 }
 
-async function render(result: Result<Outcome>, env: KernelEnvironment) {
+type OutcomeRenderer = {
+  [K in Outcome['kind']]: (
+    out: Extract<Outcome, { kind: K }>,
+    env: KernelEnvironment,
+  ) => Result<string> | Promise<Result<string>>;
+};
+
+/**
+ * One renderer per CLI outcome, keyed by `kind`. Adding an outcome means adding a row here —
+ * the mapped type makes a missing renderer a compile error instead of a silent fall-through.
+ */
+const RENDER: OutcomeRenderer = {
+  'help': (out) => {
+    const lines = out.entries.map((e) => `  ${e.usage.padEnd(24)} ${e.summary}`);
+
+    return success([`usage: seraphim ${out.usage}`, '', ...lines].join('\n'));
+  },
+  'command-help': (out) => success(`usage: seraphim ${out.usage}\n\n  ${out.summary}`),
+  'unimplemented': () => success('not implemented yet'),
+  'session-ran': (out) =>
+    success(`session ${out.repo}#${out.issueNumber} ${out.state} — receipts: ${out.receiptDir}`),
+  'registered': (out) =>
+    success(
+      `${out.reactivated ? 'reactivated' : 'registered'} ${out.repo} — ${out.remote}\n${out.artifacts.length > 0 ? `seeded: ${out.artifacts.join(', ')}` : 'existing project assets kept'}`,
+    ),
+  'deactivated': (out) =>
+    success(`deactivated ${out.repo} — sessions will refuse it until re-registered`),
+  'prune-plan': (out, env) => renderPrunePlan(out, env),
+  'prune-done': (out) => {
+    const count =
+      out.removed.sessions.length + out.removed.orphanWorktrees.length + out.removed.images.length;
+    const untagged = new Map<string, number>();
+    for (const image of out.removed.images) {
+      const name = image.tag.slice(0, image.tag.lastIndexOf(':'));
+      untagged.set(name, (untagged.get(name) ?? 0) + 1);
+    }
+    const lines = [
+      ...out.removed.sessions.map(
+        (s) => `removed session ${s.repo}#${s.issueNumber} (${s.worktreePath})`,
+      ),
+      ...out.removed.orphanWorktrees.map((path) => `removed orphan worktree ${path}`),
+      ...[...untagged].map(([name, count]) => `untagged stale images — ${name} ×${count}`),
+      ...out.failed.map((detail) => `failed: ${detail}`),
+    ];
+
+    return success(
+      `prune removed ${count} item(s)\n${lines.join('\n')}${out.failed.length > 0 ? `\n${out.failed.length} failure(s) — the rest completed` : ''}`,
+    );
+  },
+  'projects': (out) => renderProjects(out),
+  'status': (out) => renderStatus(out),
+  'error': (out) => success(`error: ${out.message}`),
+};
+
+async function render(result: Result<Outcome>, env: KernelEnvironment): Promise<Result<string>> {
   if (!result.success) {
     return failure(result.error);
   }
 
   const out = result.data;
+  // The discriminant lookup cannot correlate the union member for TS; the cast local
+  // restores the (out.kind == renderer key) pairing the mapped type guarantees.
+  const renderer = RENDER[out.kind] as (
+    out: Outcome,
+    env: KernelEnvironment,
+  ) => Result<string> | Promise<Result<string>>;
 
-  switch (out.kind) {
-    case 'help': {
-      const lines = out.entries.map((e) => `  ${e.usage.padEnd(24)} ${e.summary}`);
+  return await renderer(out, env);
+}
 
-      return success([`usage: seraphim ${out.usage}`, '', ...lines].join('\n'));
-    }
-    case 'command-help':
-      return success(`usage: seraphim ${out.usage}\n\n  ${out.summary}`);
-    case 'unimplemented':
-      return success('not implemented yet');
-    case 'session-ran':
-      return success(
-        `session ${out.repo}#${out.issueNumber} ${out.state} — receipts: ${out.receiptDir}`,
-      );
-    case 'registered':
-      return success(
-        `${out.reactivated ? 'reactivated' : 'registered'} ${out.repo} — ${out.remote}\n${out.artifacts.length > 0 ? `seeded: ${out.artifacts.join(', ')}` : 'existing project assets kept'}`,
-      );
-    case 'deactivated':
-      return success(`deactivated ${out.repo} — sessions will refuse it until re-registered`);
-    case 'prune-plan': {
-      if (out.json) {
-        return success(JSON.stringify(out.plan, null, 2));
-      }
-
-      const lines = prunePlanLines(out.plan);
-
-      if (lines.length === 0) {
-        return success('nothing eligible for cleanup');
-      }
-
-      const tree = `prune plan — per project, nothing deleted until you confirm:\n\n${lines.join('\n\n')}`;
-
-      // Confirm-then-delete (story 26): the plan is a question, not a decision. Only an
-      // affirmative typed by the operator reaches the second pass that deletes.
-      if (!process.stdin.isTTY) {
-        return success(`${tree}\n\nnothing deleted: rerun with --confirm to delete these`);
-      }
-
-      process.stdout.write(`${tree}\n\ndelete all of the above? [y/N] `);
-      const answer = await readLine();
-
-      if (answer.trim().toLowerCase() !== 'y') {
-        return success('aborted: nothing deleted');
-      }
-
-      const confirmed = await engine(['prune', '--confirm'], env);
-
-      return render(confirmed, env);
-    }
-    case 'prune-done': {
-      const count =
-        out.removed.sessions.length +
-        out.removed.orphanWorktrees.length +
-        out.removed.images.length;
-      const untagged = new Map<string, number>();
-      for (const image of out.removed.images) {
-        const name = image.tag.slice(0, image.tag.lastIndexOf(':'));
-        untagged.set(name, (untagged.get(name) ?? 0) + 1);
-      }
-      const lines = [
-        ...out.removed.sessions.map(
-          (s) => `removed session ${s.repo}#${s.issueNumber} (${s.worktreePath})`,
-        ),
-        ...out.removed.orphanWorktrees.map((path) => `removed orphan worktree ${path}`),
-        ...[...untagged].map(([name, count]) => `untagged stale images — ${name} ×${count}`),
-        ...out.failed.map((detail) => `failed: ${detail}`),
-      ];
-
-      return success(
-        `prune removed ${count} item(s)\n${lines.join('\n')}${out.failed.length > 0 ? `\n${out.failed.length} failure(s) — the rest completed` : ''}`,
-      );
-    }
-    case 'projects': {
-      if (out.json) {
-        return success(JSON.stringify(out, null, 2));
-      }
-
-      if (out.projects.length === 0) {
-        return success(
-          out.skipped ? `no projects (${out.skipped} unreadable skipped)` : 'no projects',
-        );
-      }
-
-      const rows = out.projects.map((p) => `  ${p.repo}  ${p.state}  ${p.remote}`);
-      const skipped = out.skipped ? `\n${out.skipped} unreadable project records skipped` : '';
-
-      return success(`projects:\n${rows.join('\n')}${skipped}`);
-    }
-    case 'status': {
-      if (out.json) {
-        return success(JSON.stringify(out, null, 2));
-      }
-
-      if (out.sessions.length === 0) {
-        return success(
-          out.skipped ? `no sessions (${out.skipped} unreadable skipped)` : 'no sessions',
-        );
-      }
-
-      const lines = out.sessions.map(renderSessionLine);
-      const worktrees = out.sessions.map((s) => `${s.repo}#${s.issueNumber}: ${s.worktreePath}`);
-      const skipped = out.skipped ? `\n${out.skipped} unreadable receipt directories skipped` : '';
-
-      return success(`${lines.join('\n')}\nworktrees:\n${worktrees.join('\n')}${skipped}`);
-    }
-    case 'error':
-      return success(`error: ${out.message}`);
+/**
+ * Confirm-then-delete (story 26): the plan is a question, not a decision. Only an
+ * affirmative typed by the operator reaches the second pass that deletes.
+ */
+async function renderPrunePlan(
+  out: Extract<Outcome, { kind: 'prune-plan' }>,
+  env: KernelEnvironment,
+): Promise<Result<string>> {
+  if (out.json) {
+    return success(JSON.stringify(out.plan, null, 2));
   }
+
+  const lines = prunePlanLines(out.plan);
+
+  if (lines.length === 0) {
+    return success('nothing eligible for cleanup');
+  }
+
+  const tree = `prune plan — per project, nothing deleted until you confirm:\n\n${lines.join('\n\n')}`;
+
+  if (!process.stdin.isTTY) {
+    return success(`${tree}\n\nnothing deleted: rerun with --confirm to delete these`);
+  }
+
+  process.stdout.write(`${tree}\n\ndelete all of the above? [y/N] `);
+  const answer = await readLine();
+
+  if (answer.trim().toLowerCase() !== 'y') {
+    return success('aborted: nothing deleted');
+  }
+
+  const confirmed = await engine(['prune', '--confirm'], env);
+
+  return render(confirmed, env);
+}
+
+function renderProjects(out: Extract<Outcome, { kind: 'projects' }>) {
+  if (out.json) {
+    return success(JSON.stringify(out, null, 2));
+  }
+
+  if (out.projects.length === 0) {
+    return success(out.skipped ? `no projects (${out.skipped} unreadable skipped)` : 'no projects');
+  }
+
+  const rows = out.projects.map((p) => `  ${p.repo}  ${p.state}  ${p.remote}`);
+  const skipped = out.skipped ? `\n${out.skipped} unreadable project records skipped` : '';
+
+  return success(`projects:\n${rows.join('\n')}${skipped}`);
+}
+
+function renderStatus(out: Extract<Outcome, { kind: 'status' }>) {
+  if (out.json) {
+    return success(JSON.stringify(out, null, 2));
+  }
+
+  if (out.sessions.length === 0) {
+    return success(out.skipped ? `no sessions (${out.skipped} unreadable skipped)` : 'no sessions');
+  }
+
+  const lines = out.sessions.map(renderSessionLine);
+  const worktrees = out.sessions.map((s) => `${s.repo}#${s.issueNumber}: ${s.worktreePath}`);
+  const skipped = out.skipped ? `\n${out.skipped} unreadable receipt directories skipped` : '';
+
+  return success(`${lines.join('\n')}\nworktrees:\n${worktrees.join('\n')}${skipped}`);
 }
 
 /**
@@ -199,7 +218,7 @@ async function render(result: Result<Outcome>, env: KernelEnvironment) {
  * removable under it, then strays. Indented rows use ascii pipes; each line names exactly
  * what a confirmed prune deletes.
  */
-function prunePlanLines(plan: {
+type PrunePlan = {
   readonly sessions: readonly {
     readonly repo: string;
     readonly issueNumber: number;
@@ -211,10 +230,24 @@ function prunePlanLines(plan: {
     readonly repo: string;
     readonly claimed: boolean;
   }[];
-}) {
-  type Block = { sessions: string[]; orphans: string[]; imageTags: string[] };
-  const blocks = new Map<string, Block>();
-  function blockFor(name: string): Block {
+};
+
+function prunePlanLines(plan: PrunePlan) {
+  const blocks = planBlocks(plan);
+
+  const lines: string[] = [];
+  for (const [repo, block] of blocks) {
+    lines.push(repo, ...blockRows(block));
+  }
+  return lines;
+}
+
+type PlanBlock = { sessions: string[]; orphans: string[]; imageTags: string[] };
+
+function planBlocks(plan: PrunePlan): Map<string, PlanBlock> {
+  const blocks = new Map<string, PlanBlock>();
+
+  function blockFor(name: string): PlanBlock {
     let block = blocks.get(name);
     if (!block) {
       block = { sessions: [], orphans: [], imageTags: [] };
@@ -237,26 +270,24 @@ function prunePlanLines(plan: {
     blockFor(image.claimed ? image.repo : '(unclaimed images)').imageTags.push(hash);
   }
 
-  const lines: string[] = [];
-  for (const [repo, block] of blocks) {
-    lines.push(repo);
-    const rows = [
-      ...(block.sessions.length > 0
-        ? [`sessions:\n${block.sessions.map((s) => `│ └─ ${s}`).join('\n')}`]
-        : []),
-      ...(block.orphans.length > 0
-        ? [`orphan worktrees:\n${block.orphans.map((p) => `│ └─ ${p}`).join('\n')}`]
-        : []),
-      ...(block.imageTags.length > 0
-        ? [`stale images — reclaimable cache ×${block.imageTags.length} tag(s)`]
-        : []),
-    ];
-    for (const [i, row] of rows.entries()) {
-      const last = i === rows.length - 1;
-      lines.push(row.replaceAll('\n│ ', last ? '\n   ' : '\n│ '));
-    }
-  }
-  return lines;
+  return blocks;
+}
+
+/** One indented ascii-pipe row group per non-empty section; the last section loses its pipe. */
+function blockRows(block: PlanBlock): string[] {
+  const rows = [
+    ...(block.sessions.length > 0
+      ? [`sessions:\n${block.sessions.map((s) => `│ └─ ${s}`).join('\n')}`]
+      : []),
+    ...(block.orphans.length > 0
+      ? [`orphan worktrees:\n${block.orphans.map((p) => `│ └─ ${p}`).join('\n')}`]
+      : []),
+    ...(block.imageTags.length > 0
+      ? [`stale images — reclaimable cache ×${block.imageTags.length} tag(s)`]
+      : []),
+  ];
+
+  return rows.map((row, i) => row.replaceAll('\n│ ', i === rows.length - 1 ? '\n   ' : '\n│ '));
 }
 
 /** Reads one line from stdin — the interactive prune confirmation. Resolves on any keypress. */

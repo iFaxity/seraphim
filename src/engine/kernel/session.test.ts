@@ -10,8 +10,8 @@ import { runSession } from './session.ts';
 
 import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { type Sandbox, type Tracker } from '../contracts.ts';
-import { engine } from '../engine.ts';
+import { type Sandbox, type Tracker } from '../core/contracts.ts';
+import { engine } from '../core/engine.ts';
 import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { fakeRuntime } from '../fakes/runtime.ts';
 import { fakeSandbox } from '../fakes/sandbox.ts';

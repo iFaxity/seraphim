@@ -59,33 +59,13 @@ export function githubApi(token: string) {
       }
 
       const response = sent.data;
-      const { status, headers } = response;
+      const statusError = await statusFailure(response, response.status);
 
-      // Non-2xx bodies are read as text for the error message; a body can only be
-      // consumed once, so the schema parse below stays exclusive to the 2xx path.
-      async function failureWith(prefix: string) {
-        const body = await response.text();
-
-        return failure(new Error(`${prefix}${body.trim()}`));
+      if (statusError) {
+        return failure(statusError);
       }
 
-      if (status == 401 || status == 403) {
-        return await failureWith(`auth failed (HTTP ${status}): `);
-      }
-
-      if (status == 429) {
-        return failure(new Error('rate limited (HTTP 429): back off and retry later'));
-      }
-
-      if (status >= 500) {
-        return await failureWith(`forge unavailable (HTTP ${status}): `);
-      }
-
-      if (status >= 300) {
-        return await failureWith(`HTTP ${status}: `);
-      }
-
-      const contentType = headers.get('content-type');
+      const contentType = response.headers.get('content-type');
 
       if (contentType == null || !contentType.includes('json')) {
         return failure(new Error(`response was not JSON (content-type: ${contentType ?? 'none'})`));
@@ -97,9 +77,43 @@ export function githubApi(token: string) {
         return failure(new Error(`unexpected response shape: ${String(parsed.error)}`));
       }
 
-      return success({ status, data: parsed.data, headers });
+      return success({ status: response.status, data: parsed.data, headers: response.headers });
     },
   };
+}
+
+/**
+ * Maps a non-2xx GitHub status to the error it carries; null for 2xx. Non-2xx bodies are
+ * read as text for the error message; a body can only be consumed once, so the schema
+ * parse in `json` stays exclusive to the 2xx path.
+ */
+async function statusFailure(
+  response: { status: number; text(): Promise<string> },
+  status: number,
+) {
+  async function failureWith(prefix: string) {
+    const body = await response.text();
+
+    return new Error(`${prefix}${body.trim()}`);
+  }
+
+  if (status == 401 || status == 403) {
+    return await failureWith(`auth failed (HTTP ${status}): `);
+  }
+
+  if (status == 429) {
+    return new Error('rate limited (HTTP 429): back off and retry later');
+  }
+
+  if (status >= 500) {
+    return await failureWith(`forge unavailable (HTTP ${status}): `);
+  }
+
+  if (status >= 300) {
+    return await failureWith(`HTTP ${status}: `);
+  }
+
+  return null;
 }
 
 /** Composes one issues-endpoint URL with an optional suffix; repo-scoped, never ambient. */

@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 
 import { fileExists } from '../../lib/fs.ts';
-import { failure, success, tryCatch } from '../../lib/result.ts';
-import { type Sandbox } from '../contracts.ts';
+import { type Result, failure, success, tryCatch } from '../../lib/result.ts';
+import { type Image, type Sandbox } from '../core/contracts.ts';
 import { readFile, stat } from 'node:fs/promises';
 
 /**
@@ -28,11 +28,114 @@ export type DockerSandboxOptions = {
 /** Lockfile names that participate in the image's content hash, checked per project. */
 const LOCKFILES = ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'Cargo.lock'] as const;
 
+/** The `Sandbox.exec` input, as a named type for the module-level helpers below. */
+type ExecInput = {
+  readonly repo: string;
+  readonly worktreePath: string;
+  readonly command: readonly string[];
+};
+
 /** POSIX "command not found" — what a shell would report for an unresolvable binary. */
 const CLI_NOT_FOUND = 127;
 
 /** Per-stream output cap: gates can log hard, but nothing here needs more than this retained. */
 const MAX_STREAM_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Cache probe: an image already tagged for this exact content means no rebuild. A malformed
+ * inspect payload is a docker-side anomaly, not a cache miss; `null` means miss.
+ */
+async function cachedImage(
+  docker: DockerRunner,
+  repo: string,
+  tag: string,
+): Promise<Result<Image, Error> | null> {
+  const inspect = await docker.run(['image', 'inspect', '--format', '{{json .Id}}', tag]);
+
+  if (inspect.exitCode !== 0) {
+    return null;
+  }
+
+  const id = tryCatch(() => imageId(inspect.stdout));
+
+  if (!id.success) {
+    return failure(
+      new Error(`image inspect returned malformed output for '${repo}': ${inspect.stdout}`),
+    );
+  }
+
+  return success({ id: id.data });
+}
+
+/**
+ * Buildx explicitly, --load into the local image store: the build no longer depends on the
+ * daemon's default builder, and `docker run` (exec below) always sees the built image
+ * whatever driver the host has.
+ */
+async function buildImage(
+  docker: DockerRunner,
+  repo: string,
+  dir: string,
+  tag: string,
+): Promise<Result<Image, Error>> {
+  const build = await docker.run(['buildx', 'build', '--load', '-q', '-t', tag, dir]);
+
+  if (build.exitCode != 0) {
+    const detail = build.stderr || build.stdout;
+
+    return failure(new Error(`image build failed for '${repo}': ${detail}`));
+  }
+
+  return success({ id: build.stdout.trim() });
+}
+
+/**
+ * The `docker run` argv for one exec: worktree validation first (a nonexistent bind-mount
+ * source fails the whole container run, so it must never reach docker), then the mount,
+ * uid/gid match, and the project's `env` file when it exists. The image tag comes last so
+ * exec always runs against the project's current image even if ensureImage wasn't called
+ * first.
+ */
+async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[]> {
+  const worktree = await stat(input.worktreePath).then(
+    () => true,
+    () => false,
+  );
+
+  if (!worktree) {
+    throw new Error(`worktree not found: ${input.worktreePath}`);
+  }
+
+  const dir = join(projectsRoot, input.repo);
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+  const args = [
+    'run',
+    '--rm',
+    // The worktree is the only host path the container can touch: read-write at
+    // /workspace, everything else stays inside the container's ephemeral filesystem.
+    '--mount',
+    `type=bind,source=${input.worktreePath},target=/workspace`,
+    '--workdir',
+    '/workspace',
+    // Match the invoking user so files the sandbox writes stay user-owned on the host.
+    '--user',
+    `${uid}:${gid}`,
+  ];
+
+  // Credentials surface: the project's `env` file, mounted only when it exists — the
+  // mount shape is the adapter's contract; what agents do with the variables is not.
+  const envFile = join(dir, 'env');
+  const hasEnvFile = await fileExists(envFile);
+
+  if (hasEnvFile) {
+    args.push('--env-file', envFile);
+  }
+
+  args.push(await imageTagFor(dir), ...input.command);
+
+  return args;
+}
 
 /**
  * Real `Sandbox` adapter over the docker CLI: per-project image build/cache and exec with the
@@ -61,44 +164,17 @@ export function dockerSandbox(options: DockerSandboxOptions) {
       const hasDockerfile = await fileExists(dockerfilePath);
 
       if (!hasDockerfile) {
-        const error = new Error(`no Dockerfile for '${repo}': expected ${dockerfilePath}`);
-
-        return failure(error);
+        return failure(new Error(`no Dockerfile for '${repo}': expected ${dockerfilePath}`));
       }
 
       const tag = await imageTagFor(dir);
+      const cached = await cachedImage(docker, repo, tag);
 
-      // Cache probe first: an image already tagged for this exact content means no rebuild.
-      const inspect = await docker.run(['image', 'inspect', '--format', '{{json .Id}}', tag]);
-
-      if (inspect.exitCode === 0) {
-        const id = tryCatch(() => imageId(inspect.stdout));
-
-        // An unparseable inspect payload is a docker-side anomaly, not a cache miss.
-        if (!id.success) {
-          const error = new Error(
-            `image inspect returned malformed output for '${repo}': ${inspect.stdout}`,
-          );
-
-          return failure(error);
-        }
-
-        return success({ id: id.data });
+      if (cached !== null) {
+        return cached;
       }
 
-      // buildx explicitly, --load into the local image store: the build no longer
-      // depends on the daemon's default builder, and `docker run` (exec below) always
-      // sees the built image whatever driver the host has.
-      const build = await docker.run(['buildx', 'build', '--load', '-q', '-t', tag, dir]);
-
-      if (build.exitCode != 0) {
-        const detail = build.stderr || build.stdout;
-        const error = new Error(`image build failed for '${repo}': ${detail}`);
-
-        return failure(error);
-      }
-
-      return success({ id: build.stdout.trim() });
+      return buildImage(docker, repo, dir, tag);
     },
     exec: async (input) => {
       const name = tryCatch(() => validateRepoName(input.repo));
@@ -107,49 +183,7 @@ export function dockerSandbox(options: DockerSandboxOptions) {
         throw name.error;
       }
 
-      // A nonexistent bind-mount source fails the whole container run, so validate before
-      // docker ever sees it.
-      const worktree = await stat(input.worktreePath).then(
-        () => true,
-        () => false,
-      );
-
-      if (!worktree) {
-        throw new Error(`worktree not found: ${input.worktreePath}`);
-      }
-
-      const dir = join(projectsRoot, input.repo);
-      const uid = process.getuid?.() ?? 0;
-      const gid = process.getgid?.() ?? 0;
-      const args = [
-        'run',
-        '--rm',
-        // The worktree is the only host path the container can touch: read-write at
-        // /workspace, everything else stays inside the container's ephemeral filesystem.
-        '--mount',
-        `type=bind,source=${input.worktreePath},target=/workspace`,
-        '--workdir',
-        '/workspace',
-        // Match the invoking user so files the sandbox writes stay user-owned on the host.
-        '--user',
-        `${uid}:${gid}`,
-      ];
-
-      // Credentials surface: the project's `env` file, mounted only when it exists — the
-      // mount shape is the adapter's contract; what agents do with the variables is not.
-      const envFile = join(dir, 'env');
-      const hasEnvFile = await fileExists(envFile);
-
-      if (hasEnvFile) {
-        args.push('--env-file', envFile);
-      }
-
-      // The image named by the same content-hash scheme ensureImage builds — exec always
-      // runs against the project's current image even if ensureImage wasn't called first.
-      const tag = await imageTagFor(dir);
-
-      args.push(tag, ...input.command);
-
+      const args = await execArgs(projectsRoot, input);
       const run = await docker.run(args);
 
       return {

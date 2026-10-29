@@ -1,5 +1,5 @@
 import { success } from '../../lib/result.ts';
-import { type Sandbox } from '../contracts.ts';
+import { type Sandbox } from '../core/contracts.ts';
 
 /**
  * Hand-written fake for the sandbox contract (ADR-0002 keeps fakes engine-side): records the

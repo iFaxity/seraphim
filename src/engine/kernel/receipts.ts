@@ -1,3 +1,4 @@
+import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -15,7 +16,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
  */
 
 /** One agent invocation within a session (CONTEXT.md: turn). */
-export const TurnRecordSchema = z.object({
+const TurnRecordSchema = z.object({
   index: z.number().int().min(1),
   prompt: z.string(),
   agent: z.string().min(1),
@@ -97,7 +98,7 @@ export function sessionDir(sessionsRoot: string, relDir: string) {
 }
 
 /** Reads one receipt directory's manifest. Invalid JSON or shape is a failure Result. */
-export async function readManifest(sessionPath: string) {
+async function readManifest(sessionPath: string) {
   const raw = await tryCatch(readFile(join(sessionPath, MANIFEST_FILE), 'utf8'));
 
   if (!raw.success) {
@@ -140,7 +141,48 @@ export type SessionListing = {
   /** Last line of the session's free-text `flow.log`, if any, for status rendering. */
   readonly lastLog: string | null;
 };
+type Skipped = { count: number };
 
+/** One receipt directory into a listing, or an empty array when its manifest is unreadable. */
+async function listOneSession(
+  sessionsRoot: string,
+  repoName: string,
+  dirEntry: Dirent,
+  skipped: Skipped,
+) {
+  const dir = join(sessionsRoot, repoName, dirEntry.name);
+  const read = await readManifest(dir);
+
+  if (!read.success) {
+    skipped.count++;
+
+    return [];
+  }
+
+  return [{ repo: repoName, dir, manifest: read.data, lastLog: await lastLog(dir) }];
+}
+
+/** One repo directory into session listings, or an empty array when it is unreadable. */
+async function listRepoSessions(sessionsRoot: string, repoEntry: Dirent, skipped: Skipped) {
+  const repoRoot = join(sessionsRoot, repoEntry.name);
+  const dirs = await tryCatch(readdir(repoRoot, { withFileTypes: true }));
+
+  if (!dirs.success) {
+    skipped.count++;
+
+    return [];
+  }
+
+  const listings = await Promise.all(
+    dirs.data
+      .filter((dirEntry) => dirEntry.isDirectory())
+      .map(async (dirEntry) => listOneSession(sessionsRoot, repoEntry.name, dirEntry, skipped)),
+  );
+
+  return listings.flat();
+}
+
+/** All sessions across all repos under the receipts root, newest first. */
 export async function listSessions(sessionsRoot: string) {
   const repos = await tryCatch(readdir(sessionsRoot, { withFileTypes: true }));
 
@@ -150,48 +192,13 @@ export async function listSessions(sessionsRoot: string) {
       : failure(new Error(`unreadable sessions root ${sessionsRoot}: ${String(repos.error)}`));
   }
 
-  let skipped = 0;
+  const skipped = { count: 0 };
 
   const listings = (
     await Promise.all(
       repos.data
         .filter((repoEntry) => repoEntry.isDirectory())
-        .map(async (repoEntry) => {
-          const repoRoot = join(sessionsRoot, repoEntry.name);
-          const dirs = await tryCatch(readdir(repoRoot, { withFileTypes: true }));
-
-          if (!dirs.success) {
-            skipped++;
-
-            return [];
-          }
-
-          const listings = await Promise.all(
-            dirs.data
-              .filter((dirEntry) => dirEntry.isDirectory())
-              .map(async (dirEntry) => {
-                const dir = join(repoRoot, dirEntry.name);
-                const read = await readManifest(dir);
-
-                if (!read.success) {
-                  skipped++;
-
-                  return [];
-                }
-
-                return [
-                  {
-                    repo: repoEntry.name,
-                    dir,
-                    manifest: read.data,
-                    lastLog: await lastLog(dir),
-                  },
-                ];
-              }),
-          );
-
-          return listings.flat();
-        }),
+        .map((repoEntry) => listRepoSessions(sessionsRoot, repoEntry, skipped)),
     )
   ).flat();
 
@@ -199,7 +206,7 @@ export async function listSessions(sessionsRoot: string) {
     ...success(
       listings.sort((a, b) => toEpochMs(b.manifest.startedAt) - toEpochMs(a.manifest.startedAt)),
     ),
-    skipped,
+    skipped: skipped.count,
   };
 }
 
@@ -226,18 +233,10 @@ function toDiskTurn(turn: Turn) {
 }
 
 /**
- * The disk boundary: converts kernel instants into the epoch-ms receipt schema, validates the
- * persisted shape, then writes every file — the disk sees only plain numbers, checked here.
+ * Converts the kernel manifest to its disk shape, validates it, creates the receipt directory,
+ * and writes the manifest file. Returns the failure instead of a Result — writeReceipt reports it.
  */
-export async function writeReceipt(
-  sessionsRoot: string,
-  relDir: string,
-  manifest: Session,
-  turns: readonly Turn[],
-  logs: readonly string[],
-  transcripts: readonly TranscriptFile[],
-) {
-  const dir = sessionDir(sessionsRoot, relDir);
+async function writeSessionManifest(dir: string, manifest: Session) {
   const diskManifest = {
     ...manifest,
     startedAt: toEpochMs(manifest.startedAt),
@@ -247,13 +246,13 @@ export async function writeReceipt(
   const validated = SessionManifestSchema.safeParse(diskManifest);
 
   if (!validated.success) {
-    return failure(new Error(`session manifest invalid: ${validated.error.message}`));
+    return new Error(`session manifest invalid: ${validated.error.message}`);
   }
 
   const mkdirResult = await tryCatch(mkdir(dir, { recursive: true }));
 
   if (!mkdirResult.success) {
-    return failure(new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`));
+    return new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`);
   }
 
   const manifestWrite = await tryCatch(
@@ -261,9 +260,22 @@ export async function writeReceipt(
   );
 
   if (!manifestWrite.success) {
-    return failure(new Error(`manifest write failed: ${String(manifestWrite.error)}`));
+    return new Error(`manifest write failed: ${String(manifestWrite.error)}`);
   }
 
+  return null;
+}
+
+/**
+ * Writes turn records, the optional flow log, and transcripts into an existing receipt
+ * directory. Returns the failure instead of a Result — writeReceipt reports it.
+ */
+async function writeReceiptFiles(
+  dir: string,
+  turns: readonly Turn[],
+  logs: readonly string[],
+  transcripts: readonly TranscriptFile[],
+) {
   const turnWrite = await writeAll(
     dir,
     turns.map((turn) => ({
@@ -273,7 +285,7 @@ export async function writeReceipt(
   );
 
   if (!turnWrite.success) {
-    return failure(new Error(`turn record write failed: ${String(turnWrite.error)}`));
+    return new Error(`turn record write failed: ${String(turnWrite.error)}`);
   }
 
   if (logs.length > 0) {
@@ -282,7 +294,7 @@ export async function writeReceipt(
     );
 
     if (!logWrite.success) {
-      return failure(new Error(`log write failed: ${String(logWrite.error)}`));
+      return new Error(`log write failed: ${String(logWrite.error)}`);
     }
   }
 
@@ -293,7 +305,31 @@ export async function writeReceipt(
   );
 
   if (!transcriptWrite.success) {
-    return failure(new Error(`transcript write failed: ${String(transcriptWrite.error)}`));
+    return new Error(`transcript write failed: ${String(transcriptWrite.error)}`);
+  }
+
+  return null;
+}
+
+export async function writeReceipt(
+  sessionsRoot: string,
+  relDir: string,
+  manifest: Session,
+  turns: readonly Turn[],
+  logs: readonly string[],
+  transcripts: readonly TranscriptFile[],
+) {
+  const dir = sessionDir(sessionsRoot, relDir);
+  const manifestError = await writeSessionManifest(dir, manifest);
+
+  if (manifestError !== null) {
+    return failure(manifestError);
+  }
+
+  const filesError = await writeReceiptFiles(dir, turns, logs, transcripts);
+
+  if (filesError !== null) {
+    return failure(filesError);
   }
 
   return success();

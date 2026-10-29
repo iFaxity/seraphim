@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { API_ROOT, issuesUrl, nextLink, type GitHubClient } from './github-api.ts';
 
-import { type Issue, type Tracker } from '../contracts.ts';
+import { type Issue, type Tracker } from '../core/contracts.ts';
 
 /**
  * The real `Tracker` adapter over the GitHub REST API (ADR-0003: adapters are ingest-only
@@ -22,7 +22,7 @@ const CLAIM_COMMENT =
   'Claimed by a seraphim session — a worktree branch is being cut for this issue.';
 
 /** The GitHub REST label object: at minimum a name; color/description aren't consumed. */
-export const GitHubLabelSchema = z.object({
+const GitHubLabelSchema = z.object({
   name: z.string(),
 });
 
@@ -31,7 +31,7 @@ export const GitHubLabelSchema = z.object({
  * `pull_request?: unknown`, present exactly when the entry is a PR (GitHub's issues
  * endpoints return both): the discriminating key for `isTrueIssue`'s read filter.
  */
-export const GitHubIssueSchema = z.object({
+const GitHubIssueSchema = z.object({
   number: z.number(),
   title: z.string(),
   body: z.string().nullable(),
@@ -41,7 +41,7 @@ export const GitHubIssueSchema = z.object({
 
 /** The created-PR response, reduced to what the contract's `PullRequest` carries. Draft is
  * checked by the schema so a non-draft create response fails validation loudly. */
-export const GitHubPullSchema = z.object({
+const GitHubPullSchema = z.object({
   number: z.number(),
   html_url: z.string(),
   draft: z.boolean(),
@@ -94,6 +94,125 @@ function fetchIssuePage(client: GitHubClient, url: string) {
   return client.json({ method: 'GET', url, body: null, schema: z.array(GitHubIssueSchema) });
 }
 
+/** The draft-PR creation input, as the `Tracker` contract states it. */
+type DraftPrInput = {
+  readonly repo: string;
+  readonly issue: Issue;
+  readonly branch: string;
+  readonly title: string;
+  readonly body: string;
+};
+
+/**
+ * `listReady`'s body: full pagination, no silent truncation. Claimed and blocked are the
+ * two skip rules the "ready" contract is.
+ */
+async function listReadyIssues(client: GitHubClient, repo: string) {
+  const ready: Issue[] = [];
+  let nextUrl: null | string = issuesUrl(repo, `?state=open&per_page=${PAGE_SIZE}`);
+
+  while (nextUrl != null) {
+    const fetched = await fetchIssuePage(client, nextUrl);
+
+    if (!fetched.success) {
+      throw new Error(`issue list failed: ${fetched.error.message}`);
+    }
+
+    const page = fetched.data;
+    const issues = page.data.filter(isTrueIssue).map((raw) => toIssue(repo, raw));
+
+    ready.push(
+      ...issues.filter(
+        (issue) => !issue.labels.includes(CLAIMED_LABEL) && issue.blockedBy.length === 0,
+      ),
+    );
+    nextUrl = nextLink(page.headers);
+  }
+
+  return ready;
+}
+
+/** `getIssue`'s body: one repo-scoped GET, normalized to the contract's `Issue`. */
+async function readIssue(client: GitHubClient, repo: string, issueNumber: number) {
+  const read = await client.json({
+    method: 'GET',
+    url: issuesUrl(repo, `/${issueNumber}`),
+    body: null,
+    schema: GitHubIssueSchema,
+  });
+
+  if (!read.success) {
+    throw new Error(`issue read failed (#${issueNumber}): ${read.error.message}`);
+  }
+
+  return toIssue(repo, read.data.data);
+}
+
+/**
+ * `claim`'s body: the label/comment dance. Exclusivity: a claim attempt on an
+ * already-claimed issue refuses here, so the direct-run path (`getIssue` → `claim`) gets
+ * the same double-session guard the `listReady` filter gives the queue fetch.
+ */
+async function claimIssue(client: GitHubClient, issue: Issue) {
+  if (issue.labels.includes(CLAIMED_LABEL)) {
+    throw new Error(`issue #${issue.number} already claimed (${CLAIMED_LABEL})`);
+  }
+
+  const labeled = await client.json({
+    method: 'POST',
+    url: issuesUrl(issue.repo, `/${issue.number}/labels`),
+    body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
+    schema: z.unknown(),
+  });
+
+  if (!labeled.success) {
+    throw new Error(`issue claim failed (#${issue.number}): ${labeled.error.message}`);
+  }
+
+  const commented = await client.json({
+    method: 'POST',
+    url: issuesUrl(issue.repo, `/${issue.number}/comments`),
+    body: JSON.stringify({ body: CLAIM_COMMENT }),
+    schema: z.unknown(),
+  });
+
+  if (!commented.success) {
+    throw new Error(`issue claim comment failed (#${issue.number}): ${commented.error.message}`);
+  }
+}
+
+/**
+ * `openDraftPr`'s body: one POST to the repo's pulls endpoint, the response reduced to the
+ * contract's `PullRequest`. PR creation is skill-driven inside flows; the adapter supplies
+ * only the forge effect. Base stays the forge default; `Closes #N` in the body is the
+ * forge-native issue link — no watcher, no extra adapter method.
+ */
+async function openDraftPull(client: GitHubClient, input: DraftPrInput) {
+  const created = await client.json({
+    method: 'POST',
+    url: `${API_ROOT}/repos/${input.repo}/pulls`,
+    body: JSON.stringify({
+      title: input.title,
+      head: input.branch,
+      draft: true,
+      body: input.body,
+    }),
+    schema: GitHubPullSchema,
+  });
+
+  if (!created.success) {
+    throw new Error(`draft PR creation failed: ${created.error.message}`);
+  }
+
+  // The created-PR response carries the forge-native URL and number directly; the
+  // schema's `draft: true` expectation was already enforced by validation.
+  return {
+    url: created.data.data.html_url,
+    number: created.data.data.number,
+    state: 'draft' as const,
+  };
+}
+
 /**
  * Real `Tracker` adapter over the GitHub REST API. Reads are GETs with full pagination on
  * the list; the claim dance (label + comment) and the draft-PR create are the adapter's
@@ -101,105 +220,9 @@ function fetchIssuePage(client: GitHubClient, url: string) {
  */
 export function ghTracker(client: GitHubClient) {
   return {
-    listReady: async (repo) => {
-      const ready: Issue[] = [];
-      let nextUrl: null | string = issuesUrl(repo, `?state=open&per_page=${PAGE_SIZE}`);
-
-      // Full pagination: no silent truncation. Claimed and blocked are the two skip
-      // rules the "ready" contract is.
-      while (nextUrl != null) {
-        const fetched = await fetchIssuePage(client, nextUrl);
-
-        if (!fetched.success) {
-          throw new Error(`issue list failed: ${fetched.error.message}`);
-        }
-
-        const page = fetched.data;
-        const issues = page.data.filter(isTrueIssue).map((raw) => toIssue(repo, raw));
-
-        ready.push(
-          ...issues.filter(
-            (issue) => !issue.labels.includes(CLAIMED_LABEL) && issue.blockedBy.length === 0,
-          ),
-        );
-        nextUrl = nextLink(page.headers);
-      }
-
-      return ready;
-    },
-    getIssue: async (repo, issueNumber) => {
-      const read = await client.json({
-        method: 'GET',
-        url: issuesUrl(repo, `/${issueNumber}`),
-        body: null,
-        schema: GitHubIssueSchema,
-      });
-
-      if (!read.success) {
-        throw new Error(`issue read failed (#${issueNumber}): ${read.error.message}`);
-      }
-
-      return toIssue(repo, read.data.data);
-    },
-    claim: async (issue) => {
-      // Exclusivity: a claim attempt on an already-claimed issue refuses here, so the
-      // direct-run path (`getIssue` → `claim`) gets the same double-session guard the
-      // `listReady` filter gives the queue fetch.
-      if (issue.labels.includes(CLAIMED_LABEL)) {
-        throw new Error(`issue #${issue.number} already claimed (${CLAIMED_LABEL})`);
-      }
-
-      const labeled = await client.json({
-        method: 'POST',
-        url: issuesUrl(issue.repo, `/${issue.number}/labels`),
-        body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
-        schema: z.unknown(),
-      });
-
-      if (!labeled.success) {
-        throw new Error(`issue claim failed (#${issue.number}): ${labeled.error.message}`);
-      }
-
-      const commented = await client.json({
-        method: 'POST',
-        url: issuesUrl(issue.repo, `/${issue.number}/comments`),
-        body: JSON.stringify({ body: CLAIM_COMMENT }),
-        schema: z.unknown(),
-      });
-
-      if (!commented.success) {
-        throw new Error(
-          `issue claim comment failed (#${issue.number}): ${commented.error.message}`,
-        );
-      }
-    },
-    openDraftPr: async (input) => {
-      // PR creation is skill-driven inside flows; the adapter supplies only the forge
-      // effect. Base stays the forge default; `Closes #N` in the body is the forge-native
-      // issue link — no watcher, no extra adapter method.
-      const created = await client.json({
-        method: 'POST',
-        url: `${API_ROOT}/repos/${input.repo}/pulls`,
-        body: JSON.stringify({
-          title: input.title,
-          head: input.branch,
-          draft: true,
-          body: input.body,
-        }),
-        schema: GitHubPullSchema,
-      });
-
-      if (!created.success) {
-        throw new Error(`draft PR creation failed: ${created.error.message}`);
-      }
-
-      // The created-PR response carries the forge-native URL and number directly; the
-      // schema's `draft: true` expectation was already enforced by validation.
-      return {
-        url: created.data.data.html_url,
-        number: created.data.data.number,
-        state: 'draft' as const,
-      };
-    },
+    listReady: (repo: string) => listReadyIssues(client, repo),
+    getIssue: (repo: string, issueNumber: number) => readIssue(client, repo, issueNumber),
+    claim: (issue: Issue) => claimIssue(client, issue),
+    openDraftPr: (input: DraftPrInput) => openDraftPull(client, input),
   } satisfies Tracker;
 }
