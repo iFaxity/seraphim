@@ -1,0 +1,25 @@
+# Quality gate that cannot be skipped client-side: the pre-commit hook runs the
+# same audit, but --no-verify bypasses it. Branch protection should require this check.
+name: fallow
+
+on:
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fallow audit needs the base ref to diff the changeset against.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Real CRAP scores come from vitest V8 coverage; audit errors instead of
+      # estimating when the coverage directory is absent.
+      - run: pnpm exec vp test run --coverage
+      - run: pnpm exec fallow audit

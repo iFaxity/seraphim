@@ -52,7 +52,14 @@ export default defineConfig({
   test: {
     // Default suite is hermetic: no network, no daemon, no cost. The integration tier
     // integration/vitest.config.ts and run only through the `test:integration` script.
-    exclude: ['**/node_modules/**', 'integration/**'],
+    exclude: ['**/node_modules/**', 'integration/**', '.agents/**'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**', 'bin/**'],
+      reporter: ['json'],
+      // Kept out of git (see .gitignore); regenerated via `pnpm test:coverage`.
+      reportsDirectory: 'coverage',
+    },
   },
   lint: {
     plugins: ['eslint', 'promise', 'unicorn', 'typescript', 'oxc', 'import'],

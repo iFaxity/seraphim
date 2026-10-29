@@ -1,0 +1,133 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  // Scaffolding copied into new projects — not wired into this repo's import graph.
+  "ignorePatterns": ["templates/**"],
+  "rules": {
+    "require-suppression-reason": "error",
+    // Engine is an importable library (ADR 0002): exported signatures must not
+    // leak private types into the public API surface.
+    "private-type-leaks": "warn",
+    // Report runtime files no test reaches; runs under `fallow health` with
+    // coverage data, advisory so it informs rather than gates.
+    "coverage-gaps": "warn",
+  },
+  "health": {
+    "maxCyclomatic": 15,
+    "maxCognitive": 10,
+    "maxCrap": 30,
+    // Real per-function CRAP from vitest V8 coverage (`pnpm test:coverage`); fallow
+    // falls back to export-reference estimation when the dir is missing.
+    "coverage": "coverage",
+    // Test suites are naturally long (describe/it wrappers); keep them off the
+    // large-functions list. Complexity + CRAP still run on test files.
+    "thresholdOverrides": [
+      {
+        "files": ["**/*.test.ts"],
+        "maxUnitSize": 10000,
+        "reason": "colocated vitest suites: unit size is not a test-suite concern",
+      },
+    ],
+  },
+  "overrides": [
+    // Test files are unreachable from runtime entry points, so the static CRAP
+    // estimator scores every test function as "untested" — noise, not signal.
+    {
+      "files": ["**/*.test.ts"],
+      "rules": {
+        "complexity-crap": "off",
+      },
+    },
+  ],
+  "boundaries": {
+    "zones": [
+      {
+        "name": "entry",
+        "patterns": ["bin/**", "src/main.ts", "src/main.test.ts"],
+      },
+      {
+        "name": "lib",
+        "patterns": ["src/lib/**"],
+      },
+      {
+        "name": "engine/core",
+        "patterns": ["src/engine/core/**"],
+      },
+      {
+        "name": "engine/fakes",
+        "patterns": ["src/engine/fakes/**"],
+      },
+      {
+        "name": "engine/forges",
+        "patterns": ["src/engine/forges/**"],
+      },
+      {
+        "name": "engine/kernel",
+        "patterns": ["src/engine/kernel/**"],
+      },
+      {
+        "name": "engine/runtimes",
+        "patterns": ["src/engine/runtimes/**"],
+      },
+      {
+        "name": "engine/sandboxes",
+        "patterns": ["src/engine/sandboxes/**"],
+      },
+    ],
+    "rules": [
+      {
+        "from": "lib",
+        "allow": [],
+      },
+      // TODO(follow-up): engine.ts/env.ts/flow-api.ts reach into kernel + sandboxes —
+      // invert those deps (or move the files) and shrink this allow list
+      {
+        "from": "engine/core",
+        "allow": ["lib", "engine/kernel", "engine/sandboxes"],
+      },
+      // kernel orchestrates all engine submodules + core + lib
+      {
+        "from": "engine/kernel",
+        "allow": [
+          "engine/core",
+          "lib",
+          "engine/fakes",
+          "engine/sandboxes",
+          "engine/forges",
+          "engine/runtimes",
+        ],
+      },
+      // TODO(follow-up): forges imports kernel/git.ts — move git.ts down a layer, then drop "engine/kernel"
+      {
+        "from": "engine/forges",
+        "allow": ["engine/core", "lib", "engine/kernel"],
+      },
+      // TODO(follow-up): fakes imports sandboxes/docker-sandbox.ts — decouple, then drop "engine/sandboxes"
+      {
+        "from": "engine/fakes",
+        "allow": ["engine/core", "lib", "engine/sandboxes"],
+      },
+      {
+        "from": "engine/runtimes",
+        "allow": ["engine/core", "lib"],
+      },
+      {
+        "from": "engine/sandboxes",
+        "allow": ["engine/core", "lib"],
+      },
+      // Architecture: downward-only imports; engine submodules reach core + lib; only
+      // kernel orchestrates sandboxes/fakes.
+      {
+        "from": "entry",
+        "allow": [
+          "engine/core",
+          "lib",
+          "engine/kernel",
+          "engine/fakes",
+          "engine/forges",
+          "engine/runtimes",
+          "engine/sandboxes",
+        ],
+      },
+    ],
+  },
+}
