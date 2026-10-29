@@ -9,7 +9,7 @@ import { statusCommand } from './commands/status.ts';
 import { tickCommand } from './commands/tick.ts';
 
 import { failure, success } from '../../lib/result.ts';
-import { type KernelEnvironment } from '../env.ts';
+import { type KernelEnvironment } from '../core/env.ts';
 
 /**
  * The dispatcher — the engine's whole externally visible command surface. Adding a command

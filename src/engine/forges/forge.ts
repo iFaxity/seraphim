@@ -1,4 +1,4 @@
-import { type Forge } from '../contracts.ts';
+import { type Forge } from '../core/contracts.ts';
 import { expectOk, type GitRunner } from '../kernel/git.ts';
 
 /**

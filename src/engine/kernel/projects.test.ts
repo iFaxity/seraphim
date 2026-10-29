@@ -11,7 +11,7 @@ import {
   registerProject,
 } from './projects.ts';
 
-import { engine } from '../engine.ts';
+import { engine } from '../core/engine.ts';
 import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 

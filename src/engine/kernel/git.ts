@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 
-import { type Git } from '../contracts.ts';
+import { type Git } from '../core/contracts.ts';
 import { stat } from 'node:fs/promises';
 
 /** True when the path exists and is a directory — prune's idempotence check for worktrees. */
@@ -88,6 +88,39 @@ export function expectOk(label: string, run: GitRun) {
   return run;
 }
 
+/** Removes one worktree dir and its branch ref; a missing dir is nothing to remove. */
+async function removeWorktree(
+  runner: GitRunner,
+  input: { readonly repoPath: string; readonly path: string },
+) {
+  // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
+  const worktreeExists = await directoryExists(input.path);
+
+  if (!worktreeExists) {
+    return;
+  }
+
+  const run = await runner.run(['worktree', 'remove', '--force', input.path], input.repoPath);
+  expectOk('worktree removal failed', run);
+}
+
+/** Force-deletes one branch; an already-deleted branch is nothing to delete (idempotent prune). */
+async function deleteBranch(
+  runner: GitRunner,
+  input: { readonly repoPath: string; readonly branch: string },
+) {
+  const listing = await runner.run(['branch', '--list', input.branch], input.repoPath);
+  expectOk('branch listing failed', listing);
+
+  // An already-deleted branch is nothing to delete — prune stays idempotent on a rerun.
+  if (listing.stdout.trim() === '') {
+    return;
+  }
+
+  const run = await runner.run(['branch', '-D', input.branch], input.repoPath);
+  expectOk('branch deletion failed', run);
+}
+
 /**
  * Real `Git` adapter. Every operation maps one git invocation to `void` (the receipt-visible
  * state is the filesystem, not git's stdout) except `defaultBranch`, which reads `origin/HEAD`.
@@ -134,29 +167,8 @@ export function gitAdapter(runner: GitRunner) {
       const run = await runner.run(args, input.repoPath);
       expectOk('worktree creation failed', run);
     },
-    removeWorktree: async (input) => {
-      // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-      const worktreeExists = await directoryExists(input.path);
-
-      if (!worktreeExists) {
-        return;
-      }
-
-      const run = await runner.run(['worktree', 'remove', '--force', input.path], input.repoPath);
-      expectOk('worktree removal failed', run);
-    },
-    deleteBranch: async (input) => {
-      const listing = await runner.run(['branch', '--list', input.branch], input.repoPath);
-      expectOk('branch listing failed', listing);
-
-      // An already-deleted branch is nothing to delete — prune stays idempotent on a rerun.
-      if (listing.stdout.trim() === '') {
-        return;
-      }
-
-      const run = await runner.run(['branch', '-D', input.branch], input.repoPath);
-      expectOk('branch deletion failed', run);
-    },
+    removeWorktree: (input) => removeWorktree(runner, input),
+    deleteBranch: (input) => deleteBranch(runner, input),
     probeRemote: async (url) => {
       const run = await runner.run(['ls-remote', '--heads', url]);
       expectOk('remote not reachable', run);

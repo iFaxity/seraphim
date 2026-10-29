@@ -1,4 +1,4 @@
-import { type Issue, type Tracker } from '../contracts.ts';
+import { type Issue, type Tracker } from '../core/contracts.ts';
 
 /**
  * Hand-written fake for the tracker contract (ADR-0002 keeps fakes engine-side): records the

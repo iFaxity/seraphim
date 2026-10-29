@@ -18,15 +18,3 @@ export function fromEpochMs(epochMs: number) {
 export function toEpochMs(instant: Temporal.Instant) {
   return instant.epochMilliseconds;
 }
-
-/**
- * The one formatter: `Intl.DateTimeFormat` configured at this contract instead of ad hoc at every
- * render site. Presentation-only — records and comparisons stay instants and epoch numbers.
- */
-export function formatInstant(
-  instant: Temporal.Instant,
-  options?: Intl.DateTimeFormatOptions,
-  locale?: string,
-) {
-  return new Intl.DateTimeFormat(locale, options).format(instant);
-}

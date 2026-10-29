@@ -4,7 +4,7 @@ import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 
 import { success } from '../../lib/result.ts';
-import { type Git } from '../contracts.ts';
+import { type Git } from '../core/contracts.ts';
 import { imageTagFor, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 import { readdir, rm } from 'node:fs/promises';
 

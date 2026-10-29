@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 import { type Tracker } from './contracts.ts';
-import { CapsSchema } from './kernel/receipts.ts';
+
+import { CapsSchema } from '../kernel/receipts.ts';
 
 /**
  * The flow-facing API: the only module a flow file needs. Flows `export default
@@ -110,39 +111,10 @@ export type SessionContext = {
 
 /**
  * The per-project, centrally-homed flow file: one `config` plus one `run` over the
- * session context. Declare it with {@link defineFlow} for typecheck-time shape errors.
+ * session context. `export default { ... }` it directly — the kernel zod-checks the
+ * config at load time, so shape errors surface before any turn runs.
  */
 export type Flow = {
   readonly config: FlowConfig;
   readonly run: (ctx: SessionContext) => Promise<void>;
 };
-
-/**
- * Identity helper for flow files: `export default defineFlow({ ... })` typechecks the
- * config (agent, model, skills, sandbox, required caps) and the run signature before the
- * engine ever loads the file. The kernel never calls it.
- *
- * @example
- * ```ts
- * import { defineFlow } from 'seraphim';
- *
- * export default defineFlow({
- *   config: {
- *     agent: 'pi',
- *     model: 'anthropic/sonnet-5.5',
- *     skills: ['implement'],
- *     sandbox: 'docker',
- *     caps: { maxTurns: 10, wallClockMs: 600_000 },
- *   },
- *   run: async (ctx) => {
- *     await ctx.run('implement the issue');
- *     if ((await ctx.sh(['pnpm', 'lint'])) != 0) throw new Error('lint gate failed');
- *     await ctx.forge.push();
- *     await ctx.tracker.openDraftPr({ title: 'feat: done', body: 'Closes the issue.' });
- *   },
- * });
- * ```
- */
-export function defineFlow(flow: Flow) {
-  return flow;
-}

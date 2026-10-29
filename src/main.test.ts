@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
 
-import { engine } from './engine/engine.ts';
+import { engine } from './engine/core/engine.ts';
 import { fakeKernelEnvironment } from './engine/fakes/env.ts';
 import { main } from './main.ts';
 

@@ -1,4 +1,4 @@
-import { type Forge } from '../contracts.ts';
+import { type Forge } from '../core/contracts.ts';
 
 /**
  * Hand-written fake for the forge contract (ADR-0002 keeps fakes engine-side): records the

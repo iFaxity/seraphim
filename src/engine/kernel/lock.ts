@@ -85,24 +85,34 @@ async function readLock(path: string): Promise<LockFile | null> {
  * broken and taken; the exclusive-create retry resolves the race where a concurrent breaker
  * wins the unlink. A live foreign holder is waited out up to the cap.
  */
+/** One exclusive-create attempt; rethrows anything but an existing lock. */
+async function createExclusive(path: string, lock: LockFile) {
+  try {
+    await writeFile(path, JSON.stringify(lock), { flag: 'wx' });
+
+    return true;
+  } catch (error) {
+    if (!isFsErrorCode(error, 'EEXIST')) {
+      throw error;
+    }
+
+    return false;
+  }
+}
+
 async function takeFileLock(path: string, repo: string, timing: Required<LockTiming>) {
   const startedAt = timing.clock();
 
   while (true) {
-    const lock: LockFile = { pid: process.pid, at: toEpochMs(now()) };
-
-    try {
-      await writeFile(path, JSON.stringify(lock), { flag: 'wx' });
-
+    if (await createExclusive(path, { pid: process.pid, at: toEpochMs(now()) })) {
       return;
-    } catch (error) {
-      if (!isFsErrorCode(error, 'EEXIST')) {
-        throw error;
-      }
     }
 
     const held = await readLock(path);
 
+    // A stale lock (dead pid, corrupt content, or an orphaned own-pid file from a crashed
+    // earlier session in this process) is broken and taken; the exclusive-create retry
+    // resolves the race where a concurrent breaker wins the unlink.
     if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
       await unlink(path).catch(() => {});
 
@@ -110,17 +120,21 @@ async function takeFileLock(path: string, repo: string, timing: Required<LockTim
     }
 
     if (timing.clock() - startedAt >= timing.maxWaitMs) {
-      const heldSeconds = Math.round((toEpochMs(now()) - held.at) / 1000);
-
-      throw new Error(
-        `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
-          `${heldSeconds}s) — gave up waiting ${Math.round(timing.maxWaitMs / 1000)}s; ` +
-          'the holding session may be killed to release it',
-      );
+      throw lockHeldError(repo, held, timing.maxWaitMs);
     }
 
     await timing.delay(timing.pollMs);
   }
+}
+
+function lockHeldError(repo: string, held: LockFile, maxWaitMs: number) {
+  const heldSeconds = Math.round((toEpochMs(now()) - held.at) / 1000);
+
+  return new Error(
+    `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
+      `${heldSeconds}s) — gave up waiting ${Math.round(maxWaitMs / 1000)}s; ` +
+      'the holding session may be killed to release it',
+  );
 }
 
 /**

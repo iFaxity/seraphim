@@ -2,8 +2,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { failure, success, tryCatch } from '../../lib/result.ts';
-import { FlowConfigSchema } from '../flow-api.ts';
-import { type Flow } from '../flow-api.ts';
+import { type Flow, type FlowConfig, FlowConfigSchema } from '../core/flow-api.ts';
 import { readFile } from 'node:fs/promises';
 
 /** The untrusted default-export shape of a flow file, schema-checked at the load edge. */
@@ -12,8 +11,14 @@ const FlowModuleSchema = z.object({
   run: z.custom<Flow['run']>((value) => typeof value == 'function'),
 });
 
+/** A schema-checked flow module, as returned by `loadFlow`. */
+export type LoadedFlow = {
+  config: FlowConfig;
+  run: Flow['run'];
+};
+
 /** Where the central directory homes a project's flow file. */
-export function flowPath(home: string, repo: string) {
+function flowPath(home: string, repo: string) {
   return join(home, 'projects', repo, 'flow.ts');
 }
 

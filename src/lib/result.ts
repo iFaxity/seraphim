@@ -1,4 +1,4 @@
-type Action<T> = () => T;
+export type Action<T> = () => T;
 
 /**
  * Discriminated on `success` so callers branch exhaustively: narrowing on the tag gives the data

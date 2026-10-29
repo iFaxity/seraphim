@@ -5,7 +5,8 @@ import {
   type Sandbox,
   type Tracker,
 } from './contracts.ts';
-import { type DockerRunner } from './sandboxes/docker-sandbox.ts';
+
+import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 
 /**
  * The engine-wide composition interface (ADR-0002): the adapter contracts the kernel drives plus

@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { isFsErrorCode } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
-import { type Git } from '../contracts.ts';
+import { type Git } from '../core/contracts.ts';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 
 /**
@@ -20,7 +20,7 @@ export const ProjectRecordSchema = z.object({
 
 export type ProjectRecord = z.infer<typeof ProjectRecordSchema>;
 
-export const RECORD_FILE = 'project.json';
+const RECORD_FILE = 'project.json';
 
 function projectPath(home: string, repo: string) {
   return `${home}/projects/${repo}`;
@@ -58,12 +58,6 @@ const SLOTS = [
   },
 ] as const;
 
-export type Registration = {
-  readonly record: ProjectRecord;
-  readonly reactivated: boolean;
-  readonly artifacts: readonly string[];
-};
-
 /** Kernel state seeded into the home that stays visible but must never be committed. */
 const HOME_GITIGNORE = 'locks/\n';
 
@@ -77,6 +71,60 @@ async function seedHomeIgnore(home: string) {
   return wrote.success || isFsErrorCode(wrote.error, 'EEXIST') ? success(null) : wrote;
 }
 
+/** Maps the derived name to the repo id, or the fail-fast naming the fix. */
+function checkedRepo(url: string, name: string | undefined) {
+  const derived = name ?? deriveName(url);
+
+  if (!derived) {
+    return failure(
+      new Error(
+        `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
+      ),
+    );
+  }
+
+  if (!NAME_PATTERN.test(derived)) {
+    return failure(
+      new Error(
+        `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
+      ),
+    );
+  }
+
+  return success(derived);
+}
+
+/**
+ * Creates the project directory and seeds the home ignore, before anything else touches
+ * the filesystem. The first failure wins — nothing further is seeded.
+ */
+async function makeDirAndSeedHome(home: string, repo: string) {
+  const dir = projectPath(home, repo);
+  const made = await tryCatch(mkdir(dir, { recursive: true }));
+
+  if (!made.success) {
+    return made;
+  }
+
+  return seedHomeIgnore(home);
+}
+
+/**
+ * Seeds every slot into the project directory. A slot already on disk is the owner's
+ * content — skipped, never clobbered (`wx`). Fails if any slot could not be seeded.
+ */
+async function seedSlots(dir: string, repo: string) {
+  // A slot already on disk is the owner's content — skip it, never clobber (wx).
+  const written = await Promise.all(SLOTS.map((slot) => seedSlot(dir, repo, slot)));
+  const seeded = written.filter((artifact) => artifact != null);
+
+  if (seeded.length < SLOTS.length) {
+    return failure(new Error(`could not seed the project directory ${dir}`));
+  }
+
+  return success(seeded);
+}
+
 /**
  * Registers one project in the central directory: probe the remote (fail fast on an
  * unreachable URL before anything is seeded), reject duplicates, seed missing slots, write the
@@ -88,25 +136,13 @@ export async function registerProject(
   url: string,
   name?: string,
 ) {
-  const derived = name ?? deriveName(url);
+  const repoCheck = checkedRepo(url, name);
 
-  if (!derived) {
-    const error = new Error(
-      `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
-    );
-
-    return failure(error);
+  if (!repoCheck.success) {
+    return repoCheck;
   }
 
-  if (!NAME_PATTERN.test(derived)) {
-    const error = new Error(
-      `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
-    );
-
-    return failure(error);
-  }
-
-  const repo = derived;
+  const repo = repoCheck.data;
 
   const probe = await tryCatch(git.probeRemote(url));
 
@@ -117,13 +153,7 @@ export async function registerProject(
   }
 
   const dir = projectPath(home, repo);
-  const made = await tryCatch(mkdir(dir, { recursive: true }));
-
-  if (!made.success) {
-    return made;
-  }
-
-  const ignored = await seedHomeIgnore(home);
+  const ignored = await makeDirAndSeedHome(home, repo);
 
   if (!ignored.success) {
     return ignored;
@@ -141,14 +171,10 @@ export async function registerProject(
     return failure(error);
   }
 
-  // A slot already on disk is the owner's content — skip it, never clobber (wx).
-  const written = await Promise.all(SLOTS.map((slot) => seedSlot(dir, repo, slot)));
-  const seeded = written.filter((artifact) => artifact != null);
+  const seeded = await seedSlots(dir, repo);
 
-  if (seeded.length < SLOTS.length) {
-    const error = new Error(`could not seed the project directory ${dir}`);
-
-    return failure(error);
+  if (!seeded.success) {
+    return seeded;
   }
 
   const record: ProjectRecord = { repo, remote: url, state: 'active' };
@@ -158,7 +184,7 @@ export async function registerProject(
     return wrote;
   }
 
-  return success({ record, reactivated: existing.success, artifacts: seeded });
+  return success({ record, reactivated: existing.success, artifacts: seeded.data });
 }
 
 /** The absent-file case of isFsErrorCode: everything else (corrupt record, bad dir) keeps its error. */

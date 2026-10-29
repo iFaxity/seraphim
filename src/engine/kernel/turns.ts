@@ -2,7 +2,7 @@ import { type Caps, type Turn } from './receipts.ts';
 
 import { failure, success, type Result } from '../../lib/result.ts';
 import { toEpochMs } from '../../lib/time.ts';
-import { type TurnResult } from '../contracts.ts';
+import { type TurnResult } from '../core/contracts.ts';
 
 /** Free-text artifacts that sit alongside — never replace — the schema'd receipt JSON. */
 export type TranscriptFile = {
@@ -33,7 +33,7 @@ export class TurnAborted extends Error {
 }
 
 /** The kernel `Turn` is the receipt schema's record with instants; this input builds one. */
-export type TurnInput = {
+type TurnInput = {
   readonly prompt: string;
   /** When the gate opened — the instant dispatch began, captured by `gate`. */
   readonly startedAt: Temporal.Instant;
@@ -71,6 +71,72 @@ export type TurnEngine = {
  * Creates the turn engine over one session's budget. `now` defaults to the kernel clock;
  * tests inject a fake to make cap-overshoot deterministic.
  */
+/** The shared ledger state the gate and record closures read and append to. */
+type Ledger = {
+  readonly turns: Turn[];
+  readonly transcripts: TranscriptFile[];
+  readonly sessionTranscript: string[];
+};
+
+/** Records the cap breach in the session transcript and fails the engine state. */
+function capAbort(ledger: Ledger, reason: string) {
+  ledger.sessionTranscript.push(`## cap hit\n\n> ${reason}\n`);
+
+  return failure<TurnAborted>(new TurnAborted('cap', 'cap-hit', reason));
+}
+
+/** Fails the turn on either cap: wall-clock exhausted, or the turn budget reached. */
+function gateCaps(
+  ledger: Ledger,
+  caps: Caps,
+  now: () => Temporal.Instant,
+  deadline: number,
+): Result<{ readonly startedAt: Temporal.Instant }, TurnAborted> {
+  if (toEpochMs(now()) >= deadline) {
+    return capAbort(
+      ledger,
+      `wall-clock cap of ${caps.wallClockMs}ms exhausted before turn ${ledger.turns.length + 1}`,
+    );
+  }
+
+  if (ledger.turns.length >= caps.maxTurns) {
+    return capAbort(
+      ledger,
+      `turn cap of ${caps.maxTurns} reached before turn ${ledger.turns.length + 1}`,
+    );
+  }
+
+  return success({ startedAt: now() });
+}
+
+/**
+ * Captures the turn's transcript alongside the schema'd receipt: the per-turn file (empty
+ * body on a runtime crash rather than a missing file, so diagnostics always have something
+ * to read) and the prompt as the runtime received it, so the session file is the conversation.
+ */
+function captureTranscripts(ledger: Ledger, prompt: string, transcript: string) {
+  ledger.transcripts.push({
+    name: `turn-${ledger.turns.length}.transcript.md`,
+    body: transcript,
+  });
+  ledger.sessionTranscript.push(
+    `## turn ${ledger.turns.length}\n\n> prompt: ${prompt}\n\n${transcript}\n`,
+  );
+}
+
+/** Appends one turn row to the ledger, assigning the next turn index and end instant. */
+function appendTurn(
+  ledger: Ledger,
+  turn: Omit<Turn, 'index' | 'endedAt'>,
+  now: () => Temporal.Instant,
+) {
+  ledger.turns.push({ ...turn, index: ledger.turns.length + 1, endedAt: now() });
+}
+
+/**
+ * Creates the turn engine over one session's budget. `now` defaults to the kernel clock;
+ * tests inject a fake to make cap-overshoot deterministic.
+ */
 export function createTurnEngine(config: {
   readonly caps: Caps;
   readonly agent: string;
@@ -79,51 +145,25 @@ export function createTurnEngine(config: {
 }) {
   const { caps, agent, model, now } = config;
 
-  const turns: Turn[] = [];
-  const transcripts: TranscriptFile[] = [];
-  const sessionTranscript: string[] = [];
+  const ledger: Ledger = {
+    turns: [],
+    transcripts: [],
+    sessionTranscript: [],
+  };
   const deadline = toEpochMs(now()) + caps.wallClockMs;
 
-  function capAbort(reason: string) {
-    sessionTranscript.push(`## cap hit\n\n> ${reason}\n`);
-
-    return failure<TurnAborted>(new TurnAborted('cap', 'cap-hit', reason));
-  }
-
   function gate() {
-    if (toEpochMs(now()) >= deadline) {
-      return capAbort(
-        `wall-clock cap of ${caps.wallClockMs}ms exhausted before turn ${turns.length + 1}`,
-      );
-    }
-
-    if (turns.length >= caps.maxTurns) {
-      return capAbort(`turn cap of ${caps.maxTurns} reached before turn ${turns.length + 1}`);
-    }
-
-    return success({ startedAt: now() });
+    return gateCaps(ledger, caps, now, deadline);
   }
 
   function record({ prompt, startedAt, outcome }: TurnInput) {
     const exitState = !outcome.success ? ('failed' as const) : outcome.data.exitState;
 
-    turns.push({
-      index: turns.length + 1,
-      prompt,
-      agent,
-      model,
-      exitState,
-      startedAt,
-      endedAt: now(),
-    });
+    appendTurn(ledger, { prompt, agent, model, exitState, startedAt }, now);
 
-    // Transcript capture alongside the schema files — empty body on a runtime crash
-    // rather than a missing file, so diagnostics always have something to read.
     const transcript = outcome.success ? outcome.data.transcript : String(outcome.error);
 
-    transcripts.push({ name: `turn-${turns.length}.transcript.md`, body: transcript });
-    // The prompt as the runtime received it, so the session file is the conversation.
-    sessionTranscript.push(`## turn ${turns.length}\n\n> prompt: ${prompt}\n\n${transcript}\n`);
+    captureTranscripts(ledger, prompt, transcript);
 
     if (exitState != 'completed') {
       return failure<TurnAborted>(new TurnAborted('turn', exitState));
@@ -133,7 +173,10 @@ export function createTurnEngine(config: {
     // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
     // completed (spec: exceeding wall clock is a cap hit with the retention contract).
     if (toEpochMs(now()) >= deadline) {
-      return capAbort(`wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${turns.length}`);
+      return capAbort(
+        ledger,
+        `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${ledger.turns.length}`,
+      );
     }
 
     return success({ exitState });
@@ -141,10 +184,10 @@ export function createTurnEngine(config: {
 
   function snapshot() {
     return {
-      turns: [...turns],
+      turns: [...ledger.turns],
       transcripts: [
-        ...transcripts,
-        { name: 'session.transcript.md', body: sessionTranscript.join('\n') },
+        ...ledger.transcripts,
+        { name: 'session.transcript.md', body: ledger.sessionTranscript.join('\n') },
       ],
     };
   }

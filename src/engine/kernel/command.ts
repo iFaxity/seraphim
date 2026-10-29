@@ -1,7 +1,7 @@
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 
 import { failure, success, tryCatch, type Result } from '../../lib/result.ts';
-import { type KernelEnvironment } from '../env.ts';
+import { type KernelEnvironment } from '../core/env.ts';
 
 /**
  * What a session command reports back to its caller. Commands never format CLI prose —

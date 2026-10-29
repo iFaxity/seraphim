@@ -1,7 +1,7 @@
 import { type KernelEnvironment } from './env.ts';
-import { dispatch, getCommand } from './kernel/dispatcher.ts';
 
-import { success, failure } from '../lib/result.ts';
+import { success, failure } from '../../lib/result.ts';
+import { dispatch, getCommand } from '../kernel/dispatcher.ts';
 
 /**
  * Parses raw argv into an invocation, or a failure Result for expected input errors (unknown
@@ -9,7 +9,7 @@ import { success, failure } from '../lib/result.ts';
  * command's handler owns its own strict `parseArgs` pass, so `status --json` reaches its
  * handler intact while a stray top-level flag fails there with one clean error line.
  */
-export function parse(argv: readonly string[]) {
+function parse(argv: readonly string[]) {
   if (argv.length === 0) {
     return success({ command: 'help' as const, args: [] });
   }

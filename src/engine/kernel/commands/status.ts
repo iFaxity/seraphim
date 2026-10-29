@@ -21,7 +21,7 @@ export type SessionLine = {
 };
 
 /** The status-command view of one listing: the manifest row, presentation-free. */
-export function toSessionLine(listing: SessionListing) {
+function toSessionLine(listing: SessionListing) {
   const { manifest } = listing;
 
   return {

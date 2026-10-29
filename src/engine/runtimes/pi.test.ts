@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import { classifyTurn, parseTranscript, piRuntime } from './pi.ts';
 
-import { type SandboxExec } from '../contracts.ts';
+import { type SandboxExec } from '../core/contracts.ts';
 
 /**
  * Tests for the omp `--mode json` transcript parsing and turn classification. The fixtures
