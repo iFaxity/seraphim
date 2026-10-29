@@ -6,7 +6,7 @@ Self-hosted agentic software factory: one orchestrator (the kernel) that clones,
 
 ## Worktrees
 
-All worktrees created in this repo go under `.agents/worktrees/<name>` (one flat folder, no nesting) — never siblings of the main checkout or any other location. Keep `.agents/` gitignored.
+All worktrees created in this repo go under `.agents/worktrees/<name>` (one flat folder, no nesting) — never siblings of the main checkout or any other location. Keep `.agents/` gitignored. Create them with the guarded recipe in `docs/agents/worktrees.md` — a plain `git worktree add -b` can self-copy and balloon to gigabytes.
 
 ## Agent skills
 
@@ -21,3 +21,11 @@ Default five-label triage vocabulary, label strings equal to their names. See `d
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
+
+### Fallow (code health gate)
+
+Fallow enforces architecture boundaries, complexity ceilings, and dead-code regression gates. Config: `.fallowrc.jsonc` (cyclomatic 15, cognitive 10, CRAP 30; boundaries: lib isolated, downward-only imports). Existing debt is baselined in `.fallow/*-baseline.json` — only NEW findings fail.
+
+- Before opening a PR: `pnpm audit` (exit 0 = clean). Before committing: it runs in the `pre-commit` hook.
+- Real CRAP scores need fresh coverage: `pnpm test:coverage` regenerates `coverage/`.
+- Debug a finding: `npx fallow explain <issue-type>`; trace with `npx fallow trace --path <from> <to>`.
