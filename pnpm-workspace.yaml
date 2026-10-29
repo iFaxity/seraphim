@@ -1,7 +1,9 @@
 frozenLockfile: true
+saveExact: true
 catalog:
+  # fallow-ignore-next-line unused-catalog-entry -- consumed by overrides: vite@* below
   vite: npm:@voidzero-dev/vite-plus-core@1.2.0
-  vite-plus: 1.2.0
+  vite-plus: 1.4.0
 overrides:
   vite@*: 'catalog:'
 peerDependencyRules:
