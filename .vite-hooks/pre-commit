@@ -1,2 +1,6 @@
 #!/usr/bin/env sh
-vp staged
+vp staged || exit 1
+
+# Fallow quality gate: fail on NEW dead-code/complexity/boundary issues vs main
+# (existing debt is baselined in .fallow/*-baseline.json).
+pnpm exec fallow audit --quiet || exit 1
