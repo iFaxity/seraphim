@@ -5,6 +5,7 @@ import { afterAll, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine/core/engine.ts';
 import { fakeKernelEnvironment } from './engine/fakes/env.ts';
+import { registerProject } from './engine/kernel/projects.ts';
 import { main } from './main.ts';
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -152,6 +153,50 @@ describe('status listing', () => {
     const json = await main(['status', '--json'], env);
 
     expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });
+  });
+});
+
+describe('projects listing', () => {
+  const REMOTE = 'https://example.invalid/acme/widgets.git';
+  let root: string;
+
+  afterAll(async () => {
+    if (root) {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  function envFor() {
+    return fakeKernelEnvironment({ workspaceRoot: root }).env;
+  }
+
+  it('renders an empty project list', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-list-'));
+
+    expect(await main(['list'], envFor())).toBe('no projects');
+  });
+
+  it('renders registered projects with state and remote', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-list-'));
+    const env = envFor();
+
+    const registered = await registerProject(root, env.git, REMOTE);
+
+    expect(registered.success).toBe(true);
+
+    const result = await main(['list'], env);
+
+    expect(result).toContain('acme/widgets');
+    expect(result).toContain('active');
+    expect(result).toContain(REMOTE);
+  });
+
+  it('renders json output for the projects outcome', async () => {
+    root = await mkdtemp(join(tmpdir(), 'seraphim-list-'));
+
+    const result = await main(['list', '--json'], envFor());
+
+    expect(JSON.parse(result)).toMatchObject({ kind: 'projects', projects: [] });
   });
 });
 
