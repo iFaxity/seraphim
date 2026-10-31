@@ -53,6 +53,17 @@ export function failure<T = Error>(ex: unknown) {
 }
 
 /**
+ * Unwraps one layer of nesting — `Result<Result<T>>` — into a flat `Result<T>`. Use when a
+ * guard (a lock, a retry) wraps an operation that itself reports a `Result`: the guard's
+ * rejection and the operation's failure collapse into one layer.
+ */
+export function flatten<TResult, TError = Error>(
+  result: Result<Result<TResult, TError>, TError>,
+): Result<TResult, TError> {
+  return result.success ? result.data : result;
+}
+
+/**
  * Runs a synchronous action or awaits a promise, catching any thrown error/rejection and returning
  * it as a `Result`/`AsyncResult` instead of letting it propagate. Lets callers handle failure
  * explicitly (`result.success`) rather than via try/catch.
