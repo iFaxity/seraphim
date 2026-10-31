@@ -90,11 +90,9 @@ async function buildImage(
 }
 
 /**
- * The `docker run` argv for one exec: worktree validation first (a nonexistent bind-mount
- * source fails the whole container run, so it must never reach docker), then the mount,
- * uid/gid match, and the project's `env` file when it exists. The image tag comes last so
- * exec always runs against the project's current image even if ensureImage wasn't called
- * first.
+ * Order is load-bearing: the worktree must exist before docker sees it (a nonexistent
+ * bind-mount source fails the whole container run), and the image tag comes last so exec
+ * runs against the project's current image even without a prior ensureImage.
  */
 async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[]> {
   const worktree = await stat(input.worktreePath).then(
