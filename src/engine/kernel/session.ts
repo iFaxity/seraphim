@@ -8,7 +8,7 @@ import { checkDeclaredSkills, stageSkills } from './skills.ts';
 import { createTurnEngine, type TurnAborted, type TurnEngine } from './turns.ts';
 
 import { fileExists } from '../../lib/fs.ts';
-import { failure, success, tryCatch, type Result } from '../../lib/result.ts';
+import { failure, flatten, success, tryCatch, type Result } from '../../lib/result.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import { type Issue } from '../core/contracts.ts';
 import { type KernelEnvironment } from '../core/env.ts';
@@ -233,15 +233,15 @@ async function claimAndSyncIssue(
     'repo lock failed',
   );
 
-  // `step` wraps the inner Result in another Result for the lock rejection; unwrap that
-  // layer so callers see one flat Result.
-  return locked.success ? locked.data : locked;
+  // `step` wraps the inner Result in another Result for the lock rejection; flatten
+  // collapses that layer so callers see one flat Result.
+  return flatten(locked);
 }
 
 /**
  * Creates the session worktree off the repo's default branch and stages the flow's declared
  * skills into it. Declared skills land at the runtime's project-level skills path before any
- * turn runs, so the agent session discovers them without global installation (story 16).
+ * turn runs, so the agent session discovers them without global installation.
  * The worktree is host filesystem here; the sandbox bind-mounts it at /workspace.
  */
 async function prepareWorktree(
