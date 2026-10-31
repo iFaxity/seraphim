@@ -44,10 +44,26 @@ type RunnableFlow = {
 };
 
 /**
+ * The session-scoped state the ctx helpers read and mutate, as one traveller: the
+ * manifest records exit state and PR URL, the logs array gathers the session log, and
+ * `turnsEngine` gates and records turns. Passing them as one struct keeps dispatch, gate
+ * commands, and finalization reading the same session.
+ */
+type SessionRun = {
+  readonly env: KernelEnvironment;
+  readonly input: SessionInput;
+  readonly worktreePath: string;
+  readonly model: string;
+  readonly manifest: Session;
+  readonly turnsEngine: TurnEngine;
+  readonly logs: string[];
+};
+
+/**
  * Everything that must hold before any effect: registration resolves the remote (and
  * fail-fast names the register fix for unregistered repos), the flow file loads, a flow
  * naming a skill the pool does not have stops before a claim, a clone, or a worktree
- * exists (story 15, fail-fast), and the runtime adapter for the configured agent is
+ * exists, and the runtime adapter for the configured agent is
  * present — the adapter's own report is trusted, the kernel never branches on a backend
  * name.
  */
@@ -140,22 +156,21 @@ export async function runSession(env: KernelEnvironment, input: SessionInput) {
   // empty-turns snapshot.
   const manifest = createSessionManifest(input, flow, { startedAt, branch, worktreePath });
 
-  const ctx = createFlowContext({
+  const run: SessionRun = {
     env,
     input,
-    issue,
-    branch,
     worktreePath,
-    repoPath,
     model: flow.config.model,
     manifest,
     turnsEngine,
     logs,
-  });
+  };
+
+  const ctx = createFlowContext(run, { issue, branch, repoPath });
 
   const flowRun = await tryCatch(flow.run(ctx));
 
-  return finalizeSessionReceipt(env, relDir, manifest, turnsEngine, logs, flowRun);
+  return finalizeSessionReceipt(run, relDir, flowRun);
 }
 
 /** Thrown by ctx.run when a turn fails or hits a cap — the flow stops, state is recorded. */
@@ -338,30 +353,21 @@ function createSessionManifest(
  * closures mutate the manifest (the receipt) and the session log; `ctx.run` gates and
  * records every turn through the turn engine.
  */
-function createFlowContext(deps: {
-  readonly env: KernelEnvironment;
-  readonly input: SessionInput;
-  readonly issue: Issue;
-  readonly branch: string;
-  readonly worktreePath: string;
-  readonly repoPath: string;
-  readonly model: string;
-  readonly manifest: Session;
-  readonly turnsEngine: TurnEngine;
-  readonly logs: string[];
-}): SessionContext {
-  const { env, input, issue, branch, worktreePath, repoPath, model, manifest, turnsEngine, logs } =
-    deps;
+function createFlowContext(
+  run: SessionRun,
+  identity: { readonly issue: Issue; readonly branch: string; readonly repoPath: string },
+): SessionContext {
+  const { env, input, worktreePath, manifest } = run;
+  const { issue, branch, repoPath } = identity;
 
   return {
     repo: input.repo,
     issueNumber: input.issueNumber,
     worktreePath,
     log: (message: string) => {
-      logs.push(message);
+      run.logs.push(message);
     },
-    sh: (command: readonly string[]) =>
-      runGateCommand(env, input.repo, worktreePath, logs, command),
+    sh: (command: readonly string[]) => runGateCommand(run, command),
     tracker: {
       openDraftPr: (prInput: { readonly title: string; readonly body: string }) =>
         env.tracker
@@ -385,8 +391,7 @@ function createFlowContext(deps: {
       // never pre-checks an unpushed branch (an unknown head fails at the forge).
       push: () => env.forge.push({ repoPath, branch }),
     },
-    run: (prompt: string) =>
-      dispatchTurn({ env, repo: input.repo, worktreePath, model, manifest, turnsEngine }, prompt),
+    run: (prompt: string) => dispatchTurn(run, prompt),
   };
 }
 
@@ -411,23 +416,23 @@ function abort(manifest: Session, aborted: TurnAborted): never {
  * `/workspace`. Returns the exit code; nonzero means the gate failed — the flow decides
  * what that means.
  */
-async function runGateCommand(
-  env: KernelEnvironment,
-  repo: string,
-  worktreePath: string,
-  logs: string[],
-  command: readonly string[],
-) {
-  const executed = await env.sandbox.exec({ repo, worktreePath, command });
+async function runGateCommand(run: SessionRun, command: readonly string[]) {
+  const executed = await run.env.sandbox.exec({
+    repo: run.input.repo,
+    worktreePath: run.worktreePath,
+    command,
+  });
 
   // Gate output rides the session log: a red exit code with no captured output is a
-  // diagnosis dead end for a human taking over (prototype friction, story 32).
+  // diagnosis dead end for a human taking over.
   const detail = [executed.stdout, executed.stderr]
     .map((stream) => stream.trim())
     .filter((stream) => stream !== '')
     .join('\n');
 
-  logs.push(`gate: ${command.join(' ')} → exit ${executed.exitCode}${detail ? `\n${detail}` : ''}`);
+  run.logs.push(
+    `gate: ${command.join(' ')} → exit ${executed.exitCode}${detail ? `\n${detail}` : ''}`,
+  );
 
   return executed.exitCode;
 }
@@ -438,18 +443,8 @@ async function runGateCommand(
  * Result, because flow code (`flow.run(ctx)`) is untrusted and must not be able to
  * swallow the abort; tryCatch at the flow-run call site converts it back.
  */
-async function dispatchTurn(
-  deps: {
-    readonly env: KernelEnvironment;
-    readonly repo: string;
-    readonly worktreePath: string;
-    readonly model: string;
-    readonly manifest: Session;
-    readonly turnsEngine: TurnEngine;
-  },
-  prompt: string,
-) {
-  const { env, repo, worktreePath, model, manifest, turnsEngine } = deps;
+async function dispatchTurn(run: SessionRun, prompt: string) {
+  const { env, input, worktreePath, model, manifest, turnsEngine } = run;
 
   // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
   // not be able to dispatch past a budget by catching the abort (spec: caps live in
@@ -464,7 +459,7 @@ async function dispatchTurn(
   // non-interactive contract, flows stay prompt-pure.
   const turn = await tryCatch(
     env.runtime.run({
-      repo,
+      repo: input.repo,
       cwd: worktreePath,
       prompt: `${AFK_PREAMBLE}\n\n${prompt}`,
       model,
@@ -489,13 +484,12 @@ async function dispatchTurn(
  * The manifest is the receipt; this only settles and persists it.
  */
 async function finalizeSessionReceipt(
-  env: KernelEnvironment,
+  run: SessionRun,
   relDir: string,
-  manifest: Session,
-  turnsEngine: TurnEngine,
-  logs: readonly string[],
   flowRun: Result<void, Error>,
 ) {
+  const { env, manifest, turnsEngine, logs } = run;
+
   // A turn that already set a terminal state keeps it — cap-hit stays cap-hit.
   if (!flowRun.success && manifest.state == 'running') {
     manifest.state = 'failed';
