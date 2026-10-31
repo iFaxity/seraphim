@@ -78,9 +78,10 @@ const OmpTurnEndSchema = z.object({
 
 /**
  * The turn-end shape the classifier consumes: stop reason plus the CLI's error text,
- * null when the stop carried none.
+ * null when the stop carried none. Exported because `classifyTurn`'s public signature
+ * embeds it.
  */
-type TurnEnd = { readonly stopReason: string; readonly errorMessage: string | null };
+export type TurnEnd = { readonly stopReason: string; readonly errorMessage: string | null };
 
 /**
  * Classifies one finished turn over its exit code and structured stop signal. Headless

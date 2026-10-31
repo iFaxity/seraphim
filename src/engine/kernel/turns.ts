@@ -33,7 +33,7 @@ export class TurnAborted extends Error {
 }
 
 /** The kernel `Turn` is the receipt schema's record with instants; this input builds one. */
-type TurnInput = {
+export type TurnInput = {
   readonly prompt: string;
   /** When the gate opened — the instant dispatch began, captured by `gate`. */
   readonly startedAt: Temporal.Instant;
