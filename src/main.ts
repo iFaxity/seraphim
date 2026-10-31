@@ -147,7 +147,7 @@ async function render(result: Result<Outcome>, env: KernelEnvironment): Promise<
 }
 
 /**
- * Confirm-then-delete (story 26): the plan is a question, not a decision. Only an
+ * Confirm-then-delete: the plan is a question, not a decision. Only an
  * affirmative typed by the operator reaches the second pass that deletes.
  */
 async function renderPrunePlan(
