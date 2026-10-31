@@ -4,9 +4,12 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
-  checks:
+  # Format, lint, and typecheck fail in seconds; this runs parallel to the
+  # test job so a style nit never waits behind the slow lane.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -23,6 +26,19 @@ jobs:
 
       - name: Check (format + lint)
         run: vp check
+
+  # The expensive lane: the default suite includes docker-sandbox tests.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ['--frozen-lockfile']
 
       - name: Test
         run: vp test run
