@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
   // Scaffolding copied into new projects — not wired into this repo's import graph.
-  "ignorePatterns": ["templates/**"],
+  "ignorePatterns": ["templates/**", ".omp/**"],
   "rules": {
     "require-suppression-reason": "error",
     // Engine is an importable library (ADR 0002): exported signatures must not
