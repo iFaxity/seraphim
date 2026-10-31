@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   # Format, lint, and typecheck fail in seconds; this runs parallel to the
@@ -27,11 +26,16 @@ jobs:
       - name: Check (format + lint)
         run: vp check
 
-  # The expensive lane: the default suite includes docker-sandbox tests.
+  # The expensive lane: the default suite includes docker-sandbox tests. Fallow
+  # audit reuses that coverage run, so it shares the job instead of spinning the
+  # suite up a second time.
   tests:
     runs-on: ubuntu-latest
     steps:
+      # Full history: fallow audit diffs the changeset against the merge-base.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
@@ -41,4 +45,10 @@ jobs:
             - args: ['--frozen-lockfile']
 
       - name: Test
-        run: vp test run
+        run: vp test run --coverage
+
+      # Quality gate that cannot be skipped client-side: the pre-commit hook
+      # runs the same audit, but --no-verify bypasses it. Branch protection
+      # should require this job.
+      - name: Fallow audit
+        run: vp exec fallow audit
