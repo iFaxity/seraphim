@@ -86,9 +86,18 @@ export function strictFlags(
  * whole (rather than inferring an outcome parameter from it) so a multi-shape execute —
  * several success variants — keeps its full union in the derived dispatcher.
  */
-type Execute<P> = (env: KernelEnvironment, parsed: P) => Promise<Result<{ readonly kind: string }>>;
+/** The kernel executes a command: env in, one CLI outcome out.
+ * Exported because `Command`'s public signature embeds it.
+ */
+export type Execute<P> = (
+  env: KernelEnvironment,
+  parsed: P,
+) => Promise<Result<{ readonly kind: string }>>;
 
-type OutcomeOf<E extends Execute<never>> = E extends (
+/** Reduced from the executor's Result type to the dispatcher's outcome union.
+ * Exported because `command`'s public signature embeds it.
+ */
+export type OutcomeOf<E extends Execute<never>> = E extends (
   ...args: never
 ) => Promise<Result<infer O, infer _TError>>
   ? O

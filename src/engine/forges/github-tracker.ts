@@ -95,7 +95,7 @@ function fetchIssuePage(client: GitHubClient, url: string) {
 }
 
 /** The draft-PR creation input, as the `Tracker` contract states it. */
-type DraftPrInput = {
+export type DraftPrInput = {
   readonly repo: string;
   readonly issue: Issue;
   readonly branch: string;
