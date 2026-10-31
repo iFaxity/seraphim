@@ -26,7 +26,7 @@ jobs:
       - name: Check (format + lint)
         run: vp check
 
-  # The expensive lane: the default suite includes docker-sandbox tests. Fallow
+  # The slow lane: the suite takes minutes while lint fails in seconds. Fallow
   # audit reuses that coverage run, so it shares the job instead of spinning the
   # suite up a second time.
   tests:
