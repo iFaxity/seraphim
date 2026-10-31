@@ -141,14 +141,15 @@ export type SessionListing = {
   /** Last line of the session's free-text `flow.log`, if any, for status rendering. */
   readonly lastLog: string | null;
 };
-type Skipped = { count: number };
+/** Mutable unreadable-count accumulator, shared by the listing helpers. */
+type UnreadableCount = { count: number };
 
 /** One receipt directory into a listing, or an empty array when its manifest is unreadable. */
 async function listOneSession(
   sessionsRoot: string,
   repoName: string,
   dirEntry: Dirent,
-  skipped: Skipped,
+  skipped: UnreadableCount,
 ) {
   const dir = join(sessionsRoot, repoName, dirEntry.name);
   const read = await readManifest(dir);
@@ -163,7 +164,7 @@ async function listOneSession(
 }
 
 /** One repo directory into session listings, or an empty array when it is unreadable. */
-async function listRepoSessions(sessionsRoot: string, repoEntry: Dirent, skipped: Skipped) {
+async function listRepoSessions(sessionsRoot: string, repoEntry: Dirent, skipped: UnreadableCount) {
   const repoRoot = join(sessionsRoot, repoEntry.name);
   const dirs = await tryCatch(readdir(repoRoot, { withFileTypes: true }));
 
@@ -233,8 +234,9 @@ function toDiskTurn(turn: Turn) {
 }
 
 /**
- * Converts the kernel manifest to its disk shape, validates it, creates the receipt directory,
- * and writes the manifest file. Returns the failure instead of a Result — writeReceipt reports it.
+ * Converts the kernel manifest to its disk shape and writes it, validating at the write
+ * boundary so the persisted shape is always the checked one. Failures are returned as
+ * plain errors so writeReceipt can layer the Result over both helpers uniformly.
  */
 async function writeSessionManifest(dir: string, manifest: Session) {
   const diskManifest = {
@@ -268,7 +270,8 @@ async function writeSessionManifest(dir: string, manifest: Session) {
 
 /**
  * Writes turn records, the optional flow log, and transcripts into an existing receipt
- * directory. Returns the failure instead of a Result — writeReceipt reports it.
+ * directory. Failures are returned as plain errors so writeReceipt can layer the Result
+ * over both helpers uniformly.
  */
 async function writeReceiptFiles(
   dir: string,
