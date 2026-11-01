@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
  */
 
 /** The crash-detection staleness threshold default: 30 minutes. */
-export const CRASH_STALE_MS_DEFAULT = 30 * 60_000;
+const CRASH_STALE_MS_DEFAULT = 30 * 60_000;
 
 /** One configured notify channel: the webhook target URL and its bearer credential. */
 export type NotifyChannel = {
@@ -18,7 +18,7 @@ export type NotifyChannel = {
   readonly token: string;
 };
 
-export const KernelConfigSchema = z.object({
+const KernelConfigSchema = z.object({
   /**
    * The notify channel: the webhook target URL (e.g. an ntfy topic) and its bearer token.
    * Null/unset means the kernel composes a silent notifier — no channel, no pages.
@@ -33,8 +33,6 @@ export const KernelConfigSchema = z.object({
   /** Sessions un-refreshed longer than this are crash candidates for the crash sweep. */
   crashStaleMs: z.number().int().positive().default(CRASH_STALE_MS_DEFAULT),
 });
-
-export type KernelConfig = z.infer<typeof KernelConfigSchema>;
 
 /**
  * Loads the global kernel config from `<home>/config.json`. An absent file is the defaults
