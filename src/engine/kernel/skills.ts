@@ -1,8 +1,7 @@
 import { basename, join } from 'node:path';
 
-import { isFsErrorCode } from '../../lib/fs.ts';
-import { failure, success, tryCatch } from '../../lib/result.ts';
-import { cp, mkdir, readdir, stat } from 'node:fs/promises';
+import { fileExists, isFsErrorCode, tryCp, tryMkdir, tryReadDir } from '../../lib/fs.ts';
+import { failure, success } from '../../lib/result.ts';
 
 /**
  * The curated skill pool (stories 14–16): one directory per skill, one `SKILL.md`
@@ -20,7 +19,7 @@ export function poolRoot(home: string) {
 
 /** All pool skills, name order. The pool root itself is optional — an empty pool is valid. */
 export async function listPoolSkills(poolRoot: string) {
-  const read = await tryCatch(readdir(poolRoot, { withFileTypes: true }));
+  const read = await tryReadDir(poolRoot);
 
   if (!read.success) {
     return isFsErrorCode(read.error, 'ENOENT')
@@ -32,10 +31,8 @@ export async function listPoolSkills(poolRoot: string) {
     read.data
       .filter((entry) => entry.isDirectory())
       .map(async (entry) => {
-        const hasSkill = await stat(join(poolRoot, entry.name, 'SKILL.md')).then(
-          () => true,
-          () => false,
-        );
+        const path = join(poolRoot, entry.name, 'SKILL.md');
+        const hasSkill = await fileExists(path);
 
         return hasSkill ? [{ name: entry.name, dir: join(poolRoot, entry.name) }] : [];
       }),
@@ -96,7 +93,11 @@ export async function stageSkills(input: {
   }
 
   const staging = join(input.worktreePath, STAGING_PATH_BY_AGENT[input.agent]);
-  await mkdir(staging, { recursive: true });
+  const made = await tryMkdir(staging);
+
+  if (!made.success) {
+    return made;
+  }
 
   const staged: string[] = [];
 
@@ -108,7 +109,11 @@ export async function stageSkills(input: {
       return failure(new Error(`skill vanished from pool between check and staging: ${name}`));
     }
 
-    await cp(skill.dir, join(staging, basename(skill.dir)), { recursive: true });
+    const copied = await tryCp({ path: skill.dir, to: join(staging, basename(skill.dir)) });
+
+    if (!copied.success) {
+      return copied;
+    }
     staged.push(name);
   }
 

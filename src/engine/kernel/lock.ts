@@ -1,8 +1,7 @@
 import { join } from 'node:path';
 
-import { isFsErrorCode } from '../../lib/fs.ts';
+import { isFsErrorCode, tryMkdir, tryReadFile, tryUnlink, tryWriteFile } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 
 /**
  * Per-repo lock serializing exactly the shared mutations across concurrent sessions on one
@@ -69,8 +68,14 @@ function pidAlive(pid: number) {
 
 /** Missing or corrupt lock files read unheld — a crash mid-write cannot wedge the repo. */
 async function readLock(path: string): Promise<LockFile | null> {
+  const read = await tryReadFile(path);
+
+  if (!read.success) {
+    return null;
+  }
+
   try {
-    const lock = JSON.parse(await readFile(path, 'utf8')) as LockFile;
+    const lock = JSON.parse(read.data) as LockFile;
 
     // A pid must be a positive integer — anything else (or signal-all values like -1) reads corrupt.
     return Number.isInteger(lock.pid) && lock.pid > 0 ? lock : null;
@@ -87,17 +92,17 @@ async function readLock(path: string): Promise<LockFile | null> {
  */
 /** One exclusive-create attempt; rethrows anything but an existing lock. */
 async function createExclusive(path: string, lock: LockFile) {
-  try {
-    await writeFile(path, JSON.stringify(lock), { flag: 'wx' });
+  const wrote = await tryWriteFile({ path, data: JSON.stringify(lock), flag: 'wx' });
 
+  if (wrote.success) {
     return true;
-  } catch (error) {
-    if (!isFsErrorCode(error, 'EEXIST')) {
-      throw error;
-    }
-
-    return false;
   }
+
+  if (!isFsErrorCode(wrote.error, 'EEXIST')) {
+    throw wrote.error;
+  }
+
+  return false;
 }
 
 async function takeFileLock(path: string, repo: string, timing: Required<LockTiming>) {
@@ -114,7 +119,7 @@ async function takeFileLock(path: string, repo: string, timing: Required<LockTim
     // earlier session in this process) is broken and taken; the exclusive-create retry
     // resolves the race where a concurrent breaker wins the unlink.
     if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
-      await unlink(path).catch(() => {});
+      await tryUnlink(path);
 
       continue;
     }
@@ -158,7 +163,11 @@ export async function withRepoLock<T>(
   // now nothing hidden rides along: the lock is a plain named file in `locks/`.
   const path = join(home, 'locks', `${repo}.lock`);
 
-  await mkdir(join(home, 'locks'), { recursive: true });
+  const made = await tryMkdir(join(home, 'locks'));
+
+  if (!made.success) {
+    throw made.error;
+  }
 
   const previous = mutexTails.get(path) ?? Promise.resolve();
   const { promise: turn, resolve: releaseTurn } = Promise.withResolvers<void>();
@@ -177,7 +186,7 @@ export async function withRepoLock<T>(
     return await guarded();
   } finally {
     if (acquired) {
-      await unlink(path).catch(() => {});
+      await tryUnlink(path);
     }
 
     releaseTurn();

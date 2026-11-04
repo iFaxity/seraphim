@@ -4,9 +4,9 @@ import { z } from 'zod';
 
 import { type TranscriptFile } from './turns.ts';
 
+import { tryMkdir, tryReadDir, tryReadFile, tryWriteFile } from '../../lib/fs.ts';
 import { tryCatch, success, failure } from '../../lib/result.ts';
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 
 /**
  * Receipts are the filesystem-as-database (ADR-0001): a zod-validated session manifest
@@ -99,7 +99,7 @@ export function sessionDir(sessionsRoot: string, relDir: string) {
 
 /** Reads one receipt directory's manifest. Invalid JSON or shape is a failure Result. */
 async function readManifest(sessionPath: string) {
-  const raw = await tryCatch(readFile(join(sessionPath, MANIFEST_FILE), 'utf8'));
+  const raw = await tryReadFile(join(sessionPath, MANIFEST_FILE));
 
   if (!raw.success) {
     return failure(new Error(`unreadable manifest in ${sessionPath}: ${String(raw.error)}`));
@@ -166,7 +166,7 @@ async function listOneSession(
 /** One repo directory into session listings, or an empty array when it is unreadable. */
 async function listRepoSessions(sessionsRoot: string, repoEntry: Dirent, skipped: UnreadableCount) {
   const repoRoot = join(sessionsRoot, repoEntry.name);
-  const dirs = await tryCatch(readdir(repoRoot, { withFileTypes: true }));
+  const dirs = await tryReadDir(repoRoot);
 
   if (!dirs.success) {
     skipped.count++;
@@ -185,7 +185,7 @@ async function listRepoSessions(sessionsRoot: string, repoEntry: Dirent, skipped
 
 /** All sessions across all repos under the receipts root, newest first. */
 export async function listSessions(sessionsRoot: string) {
-  const repos = await tryCatch(readdir(sessionsRoot, { withFileTypes: true }));
+  const repos = await tryReadDir(sessionsRoot);
 
   if (!repos.success) {
     return repos.error instanceof Error && 'code' in repos.error && repos.error.code == 'ENOENT'
@@ -217,7 +217,7 @@ function successEmpty() {
 
 /** Last line of a session's `flow.log`, or null when there is none. */
 async function lastLog(dir: string) {
-  const read = await tryCatch(readFile(join(dir, 'flow.log'), 'utf8'));
+  const read = await tryReadFile(join(dir, 'flow.log'));
 
   if (!read.success) {
     return null;
@@ -251,15 +251,16 @@ async function writeSessionManifest(dir: string, manifest: Session) {
     return new Error(`session manifest invalid: ${validated.error.message}`);
   }
 
-  const mkdirResult = await tryCatch(mkdir(dir, { recursive: true }));
+  const mkdirResult = await tryMkdir(dir);
 
   if (!mkdirResult.success) {
     return new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`);
   }
 
-  const manifestWrite = await tryCatch(
-    writeFile(join(dir, MANIFEST_FILE), `${JSON.stringify(validated.data, null, 2)}\n`, 'utf8'),
-  );
+  const manifestWrite = await tryWriteFile({
+    path: join(dir, MANIFEST_FILE),
+    data: `${JSON.stringify(validated.data, null, 2)}\n`,
+  });
 
   if (!manifestWrite.success) {
     return new Error(`manifest write failed: ${String(manifestWrite.error)}`);
@@ -292,9 +293,10 @@ async function writeReceiptFiles(
   }
 
   if (logs.length > 0) {
-    const logWrite = await tryCatch(
-      writeFile(join(dir, 'flow.log'), `${logs.join('\n')}\n`, 'utf8'),
-    );
+    const logWrite = await tryWriteFile({
+      path: join(dir, 'flow.log'),
+      data: `${logs.join('\n')}\n`,
+    });
 
     if (!logWrite.success) {
       return new Error(`log write failed: ${String(logWrite.error)}`);
@@ -344,7 +346,7 @@ export async function writeReceipt(
  */
 async function writeAll(dir: string, files: readonly { name: string; body: string }[]) {
   const writes = await Promise.all(
-    files.map((file) => tryCatch(writeFile(join(dir, file.name), file.body, 'utf8'))),
+    files.map((file) => tryWriteFile({ path: join(dir, file.name), data: file.body })),
   );
   const failed = writes.find((write) => !write.success);
 

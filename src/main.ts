@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +15,7 @@ import { poolRoot } from './engine/kernel/skills.ts';
 import { piRuntime } from './engine/runtimes/pi.ts';
 import { cliDocker, dockerSandbox } from './engine/sandboxes/docker-sandbox.ts';
 import { readEnvFile } from './lib/env-file.ts';
+import { fileExistsSync } from './lib/fs.ts';
 import { failure, success, type Result } from './lib/result.ts';
 
 /**
@@ -71,7 +71,7 @@ function composeKernelEnvironment() {
 function resolvePoolRoot(home: string) {
   const homePool = poolRoot(home);
 
-  return existsSync(homePool)
+  return fileExistsSync(homePool)
     ? homePool
     : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
 }
