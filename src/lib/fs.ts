@@ -2,7 +2,17 @@ import { existsSync, readFileSync } from 'node:fs';
 
 import { failure, success, tryCatch, type Result } from './result.ts';
 
-import { cp, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 
 /** True when the path exists and is a regular file; missing or other node kinds read false. */
 export async function fileExists(path: string) {
@@ -58,6 +68,17 @@ export async function tryRm(
 
   if (!rmResult.success) {
     return rmResult;
+  }
+
+  return success();
+}
+
+/** Renames one path to another as a Result — the atomic move the record writer owns. */
+export async function tryRename({ path, to }: { path: string | URL; to: string | URL }) {
+  const renameResult = await tryCatch(rename(path, to));
+
+  if (!renameResult.success) {
+    return renameResult;
   }
 
   return success();

@@ -1,9 +1,15 @@
 import { z } from 'zod';
 
-import { isFsErrorCode } from '../../lib/fs.ts';
+import {
+  isFsErrorCode,
+  tryMkdir,
+  tryReadDir,
+  tryReadFile,
+  tryRename,
+  tryWriteFile,
+} from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
 import { type Git } from '../core/contracts.ts';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 
 /**
  * Projects are the filesystem-as-database (ADR-0001): one zod-validated record per project at
@@ -37,38 +43,78 @@ function deriveName(url: string) {
   return name && !/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(name) ? name : undefined;
 }
 
+/** Reads one project template's body at module load — boot seeding fails fast on an
+ * unreadable template instead of registering with an empty slot later. */
+async function templateBody(fileName: string) {
+  const read = await tryReadFile(
+    new URL(`../../../templates/project/${fileName}`, import.meta.url),
+  );
+
+  if (!read.success) {
+    throw read.error;
+  }
+
+  return read.data;
+}
+
 /**
- * Seeds a new project's central directory: flow template, Dockerfile slot, env-file slot, and
- * the registration record. `wx` keeps owner edits intact on a re-register of a partial
- * directory — a slot already on disk is that owner's content, not scaffolding to clobber.
+ * The slot files seeded into a new project's directory — flow template, Dockerfile slot,
+ * env-file slot — read once at module load. `wx` during seeding keeps owner edits intact on
+ * a re-register of a partial directory — a slot already on disk is that owner's content,
+ * not scaffolding to clobber.
  */
-/** The slot files seeded into a new project's directory, read once at module load. */
 const SLOTS = [
   {
     name: 'flow.ts',
-    body: await readFile(new URL('../../../templates/project/flow.ts', import.meta.url), 'utf8'),
+    body: await templateBody('flow.ts'),
   },
   {
     name: 'Dockerfile',
-    body: await readFile(new URL('../../../templates/project/Dockerfile', import.meta.url), 'utf8'),
+    body: await templateBody('Dockerfile'),
   },
   {
     name: '.env',
-    body: await readFile(new URL('../../../templates/project/env', import.meta.url), 'utf8'),
+    body: await templateBody('env'),
   },
 ] as const;
 
-/** Kernel state seeded into the home that stays visible but must never be committed. */
-const HOME_GITIGNORE = 'locks/\n';
-
 /**
- * Seeds the home `.gitignore` (wx: an owner-curated home ignore is never clobbered). The
- * remaining kernel homes (sessions/, repos/, worktrees/) join this file with their own story.
+ * Seeds every file in `templates/home/` into the home directory — a template file's name is
+ * its destination (`templates/home/.gitignore` → `<home>/.gitignore`). Per-file `wx`: an
+ * owner-curated copy is never clobbered, its EEXIST is the success case.
  */
-async function seedHomeIgnore(home: string) {
-  const wrote = await tryCatch(writeFile(`${home}/.gitignore`, HOME_GITIGNORE, { flag: 'wx' }));
+const HOME_TEMPLATES = new URL('../../../templates/home/', import.meta.url);
 
-  return wrote.success || isFsErrorCode(wrote.error, 'EEXIST') ? success(null) : wrote;
+async function seedHome(home: string) {
+  const entries = await tryReadDir(HOME_TEMPLATES);
+
+  if (!entries.success) {
+    return entries;
+  }
+
+  for (const entry of entries.data) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const read = await tryReadFile(new URL(entry.name, HOME_TEMPLATES));
+
+    if (!read.success) {
+      return read;
+    }
+
+    const seeded = await tryWriteFile({
+      path: `${home}/${entry.name}`,
+      data: read.data,
+      flag: 'wx',
+    });
+
+    if (!seeded.success && !isFsErrorCode(seeded.error, 'EEXIST')) {
+      return seeded;
+    }
+  }
+
+  return success(null);
 }
 
 /** Maps the derived name to the repo id, or the fail-fast naming the fix. */
@@ -100,13 +146,13 @@ function checkedRepo(url: string, name: string | undefined) {
  */
 async function makeDirAndSeedHome(home: string, repo: string) {
   const dir = projectPath(home, repo);
-  const made = await tryCatch(mkdir(dir, { recursive: true }));
+  const made = await tryMkdir(dir);
 
   if (!made.success) {
     return made;
   }
 
-  return seedHomeIgnore(home);
+  return seedHome(home);
 }
 
 /**
@@ -237,7 +283,7 @@ export async function deactivateProject(home: string, repo: string) {
 /** All registered projects, repo order. Corrupt records are skipped, never fatal. */
 export async function listProjects(home: string) {
   const root = `${home}/projects`;
-  const dirs = await tryCatch(readdir(root, { withFileTypes: true }));
+  const dirs = await tryReadDir(root);
 
   if (!dirs.success) {
     return isMissing(dirs.error)
@@ -259,7 +305,7 @@ export async function listProjects(home: string) {
 
 /** Reads and schema-checks one `project.json`. Invalid shape is a failure Result. */
 async function readRecord(dir: string) {
-  const raw = await tryCatch(readFile(`${dir}/${RECORD_FILE}`, 'utf8'));
+  const raw = await tryReadFile(`${dir}/${RECORD_FILE}`);
 
   if (!raw.success) {
     return raw;
@@ -289,7 +335,7 @@ async function seedSlot(
   repo: string,
   slot: { readonly name: string; readonly body: string },
 ) {
-  const wrote = await tryCatch(writeFile(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }));
+  const wrote = await tryWriteFile({ path: `${dir}/${slot.name}`, data: slot.body, flag: 'wx' });
 
   if (wrote.success || isFsErrorCode(wrote.error, 'EEXIST')) {
     return `projects/${repo}/${slot.name}`;
@@ -300,15 +346,20 @@ async function seedSlot(
 
 /** Persists one record atomically: temp file then rename, so readers never see a torn row. */
 async function writeRecord(dir: string, record: ProjectRecord) {
-  const write = await tryCatch(persistAtomically(dir, JSON.stringify(record, null, 2)));
+  const wrote = await persistAtomically(dir, JSON.stringify(record, null, 2));
 
-  return write.success ? success(record) : write;
+  return wrote.success ? success(record) : wrote;
 }
 
 /** Writes the record to a temp file, then renames it into place in one filesystem-visible step. */
 async function persistAtomically(dir: string, body: string) {
   const tmpPath = `${dir}/${RECORD_FILE}.tmp`;
 
-  await writeFile(tmpPath, `${body}\n`);
-  await rename(tmpPath, `${dir}/${RECORD_FILE}`);
+  const wrote = await tryWriteFile({ path: tmpPath, data: `${body}\n` });
+
+  if (!wrote.success) {
+    return wrote;
+  }
+
+  return tryRename({ path: tmpPath, to: `${dir}/${RECORD_FILE}` });
 }
