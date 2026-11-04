@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
+import { isFsErrorCode, tryReadFile } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
-import { readFile } from 'node:fs/promises';
 
 /**
  * The global kernel config: one zod-validated record at `<home>/config.json`, read once at
@@ -41,7 +41,7 @@ const KernelConfigSchema = z.object({
  */
 export async function loadKernelConfig(home: string) {
   const path = `${home}/config.json`;
-  const read = await tryCatch(readFile(path, 'utf8'));
+  const read = await tryReadFile(path);
 
   if (read.success) {
     const json = await tryCatch(Promise.resolve().then(() => JSON.parse(read.data) as unknown));
@@ -57,11 +57,9 @@ export async function loadKernelConfig(home: string) {
       : failure(new Error(`invalid kernel config at '${path}': ${parsed.error.message}`));
   }
 
-  const error = read.error;
-
-  if (error instanceof Error && 'code' in error && error.code == 'ENOENT') {
+  if (isFsErrorCode(read.error, 'ENOENT')) {
     return success(KernelConfigSchema.parse({}));
   }
 
-  return failure(new Error(`kernel config unreadable at '${path}': ${String(error)}`));
+  return failure(new Error(`kernel config unreadable at '${path}': ${String(read.error)}`));
 }
