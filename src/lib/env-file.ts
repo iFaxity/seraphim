@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { tryReadFileSync } from './fs.ts';
 
 /**
  * Parses one dotenv-style env file: `KEY=value` per line, whole-line and inline `#`
@@ -41,11 +41,13 @@ export function parseEnvFile(content: string) {
  * error — the file is optional configuration by contract.
  */
 export function readEnvFile(path: string) {
-  if (!existsSync(path)) {
+  const read = tryReadFileSync(path);
+
+  if (!read.success) {
     return new Map<string, string>();
   }
 
-  return parseEnvFile(readFileSync(path, 'utf8'));
+  return parseEnvFile(read.data);
 }
 
 /**

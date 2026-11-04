@@ -1,15 +1,7 @@
 import { spawn } from 'node:child_process';
 
+import { dirExists } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
-import { stat } from 'node:fs/promises';
-
-/** True when the path exists and is a directory — prune's idempotence check for worktrees. */
-async function directoryExists(path: string) {
-  return stat(path).then(
-    (info) => info.isDirectory(),
-    () => false,
-  );
-}
 
 /** Per-stream output cap: clone/ls-remote output is diagnostics only, never retained wholesale. */
 const MAX_STREAM_BYTES = 10 * 1024 * 1024;
@@ -94,7 +86,7 @@ async function removeWorktree(
   input: { readonly repoPath: string; readonly path: string },
 ) {
   // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-  const worktreeExists = await directoryExists(input.path);
+  const worktreeExists = await dirExists(input.path);
 
   if (!worktreeExists) {
     return;

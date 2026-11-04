@@ -2,10 +2,9 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 
-import { fileExists } from '../../lib/fs.ts';
+import { dirExists, fileExists, tryReadFile } from '../../lib/fs.ts';
 import { type Result, failure, success, tryCatch } from '../../lib/result.ts';
 import { type Image, type Sandbox } from '../core/contracts.ts';
-import { readFile, stat } from 'node:fs/promises';
 
 /**
  * The `docker` CLI surface the adapter needs. Injected so tests script docker's behavior
@@ -95,10 +94,7 @@ async function buildImage(
  * runs against the project's current image even without a prior ensureImage.
  */
 async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[]> {
-  const worktree = await stat(input.worktreePath).then(
-    () => true,
-    () => false,
-  );
+  const worktree = await dirExists(input.worktreePath);
 
   if (!worktree) {
     throw new Error(`worktree not found: ${input.worktreePath}`);
@@ -122,7 +118,7 @@ async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[
   ];
 
   // Credentials surface: the project's `.env` file, mounted only when it exists — the
-  // mount shape is the adapter's contract; what agents do with the variables is not.
+  // `--env-file` argv is the adapter's contract; what agents do with the variables is not.
   const envFile = join(dir, '.env');
   const hasEnvFile = await fileExists(envFile);
 
@@ -217,9 +213,9 @@ export async function imageTagFor(dir: string) {
 
   const lockfilePaths = LOCKFILES.map((name) => join(dir, name));
   const paths = [dockerfilePath, ...lockfilePaths];
-  const reads = paths.map((path) => readFile(path, 'utf8').catch(() => null));
+  const reads = paths.map(tryReadFile);
   const bodies = await Promise.all(reads);
-  const parts = bodies.filter((body) => body != null);
+  const parts = bodies.filter((body) => body.success).map((body) => body.data);
   const hash = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 16);
 
   return `seraphim/${basename(dir)}:${hash}`;

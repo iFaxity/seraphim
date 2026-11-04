@@ -1,9 +1,9 @@
 import { join } from 'node:path';
 import { z } from 'zod';
 
+import { tryReadFile } from '../../lib/fs.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
 import { type Flow, type FlowConfig, FlowConfigSchema } from '../core/flow-api.ts';
-import { readFile } from 'node:fs/promises';
 
 /** The untrusted default-export shape of a flow file, schema-checked at the load edge. */
 const FlowModuleSchema = z.object({
@@ -30,7 +30,7 @@ function flowPath(home: string, repo: string) {
 export async function loadFlow(home: string, repo: string) {
   const path = flowPath(home, repo);
 
-  const read = await tryCatch(readFile(path, 'utf8'));
+  const read = await tryReadFile(path);
 
   if (!read.success) {
     return failure(new Error(`no project flow for '${repo}': expected ${path}`));

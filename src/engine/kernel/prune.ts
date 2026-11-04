@@ -1,12 +1,13 @@
+import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 
-import { success } from '../../lib/result.ts';
+import { isFsErrorCode, tryReadDir, tryRm } from '../../lib/fs.ts';
+import { failure, success, type Result } from '../../lib/result.ts';
 import { type Git } from '../core/contracts.ts';
 import { imageTagFor, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
-import { readdir, rm } from 'node:fs/promises';
 
 /**
  * Manual garbage collection (story 26): list worktrees, session receipts, and stale sandbox
@@ -89,12 +90,69 @@ export async function planPrune(env: PruneEnv) {
     return !retainedWorktrees.has(path) && !sessionWorktrees.has(path);
   });
 
+  if (!orphanWorktrees.success) {
+    return orphanWorktrees;
+  }
+
   let images: PruneImage[] = [];
   if (env.docker) {
     images = await staleImages(env.workspaceRoot, env.docker);
   }
 
-  return success({ sessions, orphanWorktrees, images, skipped: listed.skipped });
+  return success({
+    sessions,
+    orphanWorktrees: orphanWorktrees.data,
+    images,
+    skipped: listed.skipped,
+  });
+}
+
+/** Removes one session's worktree, branch, and receipt directory. Failures collect, never
+ * fatal — one stuck worktree must not block the rest of the cleanup. */
+async function pruneSession(env: PruneEnv, session: PruneSession, failed: string[]) {
+  const repoPath = join(env.workspaceRoot, 'repos', session.repo);
+
+  await env.git
+    .removeWorktree({ repoPath, path: session.worktreePath })
+    .catch((error: unknown) => failed.push(`${session.worktreePath}: ${String(error)}`));
+  await env.git
+    .deleteBranch({ repoPath, branch: session.branch })
+    .catch((error: unknown) => failed.push(`${session.branch}: ${String(error)}`));
+
+  const removedReceipts = await tryRm(session.dir);
+
+  if (!removedReceipts.success) {
+    failed.push(`${session.dir}: ${String(removedReceipts.error)}`);
+  }
+}
+
+/** Deletes one orphan worktree directory. Through git, not rm alone: an orphan directory may
+ * still be a registered worktree, and git owns prunable `.git/worktrees` metadata — the
+ * kernel replaces that layer entirely. */
+async function pruneOrphan(env: PruneEnv, path: string, failed: string[]) {
+  const repo = path.slice(join(env.workspaceRoot, 'worktrees').length + 1).split('/')[0] ?? '';
+  const repoPath = join(env.workspaceRoot, 'repos', repo);
+
+  await env.git
+    .removeWorktree({ repoPath, path })
+    .catch((error: unknown) => failed.push(`${path}: ${String(error)}`));
+
+  const removed = await tryRm(path);
+
+  if (!removed.success) {
+    failed.push(`${path}: ${String(removed.error)}`);
+  }
+}
+
+/** Untags every stale image; docker's exit code is the failure record. */
+async function pruneImages(docker: DockerRunner, images: readonly PruneImage[], failed: string[]) {
+  for (const image of images) {
+    const untag = await docker.run(['image', 'rm', image.tag]);
+
+    if (untag.exitCode != 0) {
+      failed.push(`${image.tag}: ${untag.stderr || untag.stdout}`);
+    }
+  }
 }
 
 /**
@@ -106,75 +164,75 @@ export async function runPrune(env: PruneEnv, plan: PrunePlan) {
   const failed: string[] = [];
 
   for (const session of plan.sessions) {
-    const repoPath = join(env.workspaceRoot, 'repos', session.repo);
-
-    await env.git
-      .removeWorktree({ repoPath, path: session.worktreePath })
-      .catch((error: unknown) => failed.push(`${session.worktreePath}: ${String(error)}`));
-    await env.git
-      .deleteBranch({ repoPath, branch: session.branch })
-      .catch((error: unknown) => failed.push(`${session.branch}: ${String(error)}`));
-    await rm(session.dir, { recursive: true, force: true }).catch((error: unknown) =>
-      failed.push(`${session.dir}: ${String(error)}`),
-    );
+    await pruneSession(env, session, failed);
   }
 
   for (const path of plan.orphanWorktrees) {
-    // Through git, not rm: an orphan directory may still be a registered worktree, and git
-    // owns prunable `.git/worktrees` metadata — the kernel replaces that layer entirely.
-    const repo = path.slice(join(env.workspaceRoot, 'worktrees').length + 1).split('/')[0] ?? '';
-    const repoPath = join(env.workspaceRoot, 'repos', repo);
-
-    await env.git
-      .removeWorktree({ repoPath, path })
-      .catch((error: unknown) => failed.push(`${path}: ${String(error)}`));
-    await rm(path, { recursive: true, force: true }).catch((error: unknown) =>
-      failed.push(`${path}: ${String(error)}`),
-    );
+    await pruneOrphan(env, path, failed);
   }
 
   if (env.docker) {
-    for (const image of plan.images) {
-      const untag = await env.docker.run(['image', 'rm', image.tag]);
-
-      if (untag.exitCode != 0) {
-        failed.push(`${image.tag}: ${untag.stderr || untag.stdout}`);
-      }
-    }
+    await pruneImages(env.docker, plan.images, failed);
   }
 
   return success({ removed: plan, failed });
 }
 
-/**
- * Worktree directories under the worktrees root referenced by no session manifest. The root
- * is optional — a factory that has never run a session has nothing to collect.
- */
-async function listOrphanWorktrees(
+/** Reads one repo directory under worktrees root: its orphan candidate dirs. A missing repo
+ * directory is a skipped read; any other failure is real and propagates. */
+async function readRepoOrphans(
   worktreesRoot: string,
+  repoEntry: Dirent,
   isOrphan: (path: string) => boolean,
-): Promise<string[]> {
-  const repos = await readdir(worktreesRoot, { withFileTypes: true }).catch(() => null);
+): Promise<Result<string[], Error>> {
+  const repoRoot = join(worktreesRoot, repoEntry.name);
+  const dirs = await tryReadDir(repoRoot);
 
-  if (repos === null) {
-    return [];
+  if (!dirs.success) {
+    return isFsErrorCode(dirs.error, 'ENOENT')
+      ? success([])
+      : failure(new Error(`unreadable worktree repo ${repoRoot}: ${String(dirs.error)}`));
   }
 
-  const orphans = await Promise.all(
-    repos
+  return success(
+    dirs.data
       .filter((entry) => entry.isDirectory())
-      .map(async (repoEntry) => {
-        const repoRoot = join(worktreesRoot, repoEntry.name);
-        const dirs = await readdir(repoRoot, { withFileTypes: true }).catch(() => []);
+      .map((entry) => join(repoRoot, entry.name))
+      .filter(isOrphan),
+  );
+}
 
-        return dirs
-          .filter((entry) => entry.isDirectory())
-          .map((entry) => join(repoRoot, entry.name))
-          .filter(isOrphan);
-      }),
+/**
+ * Worktree directories under the worktrees root referenced by no session manifest. The root
+ * is optional — a factory that has never run a session has nothing to collect, so its
+ * absence reads as an empty list; any other read failure is a real failure and propagates.
+ */
+async function listOrphanWorktrees(worktreesRoot: string, isOrphan: (path: string) => boolean) {
+  const repos = await tryReadDir(worktreesRoot);
+
+  if (!repos.success) {
+    return isFsErrorCode(repos.error, 'ENOENT')
+      ? success([])
+      : failure(new Error(`unreadable worktrees root ${worktreesRoot}: ${String(repos.error)}`));
+  }
+
+  const reads = await Promise.all(
+    repos.data
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => readRepoOrphans(worktreesRoot, entry, isOrphan)),
   );
 
-  return orphans.flat();
+  const orphans: string[] = [];
+
+  for (const read of reads) {
+    if (!read.success) {
+      return read;
+    }
+
+    orphans.push(...read.data);
+  }
+
+  return success(orphans);
 }
 
 /**
