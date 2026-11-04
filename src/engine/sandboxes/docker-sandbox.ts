@@ -121,9 +121,9 @@ async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[
     `${uid}:${gid}`,
   ];
 
-  // Credentials surface: the project's `env` file, mounted only when it exists — the
+  // Credentials surface: the project's `.env` file, mounted only when it exists — the
   // mount shape is the adapter's contract; what agents do with the variables is not.
-  const envFile = join(dir, 'env');
+  const envFile = join(dir, '.env');
   const hasEnvFile = await fileExists(envFile);
 
   if (hasEnvFile) {
@@ -138,8 +138,8 @@ async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[
 /**
  * Real `Sandbox` adapter over the docker CLI: per-project image build/cache and exec with the
  * session worktree bind-mounted. Project assets come from the central directory's project
- * directory — Dockerfile plus optional `env` file for credentials; the adapter mounts the
- * file, it does not verify how agents authenticate with it.
+ * directory — Dockerfile plus optional `.env` file for credentials; the adapter passes the
+ * file via `--env-file`, it does not verify how agents authenticate with it.
  *
  * Inputs crossing the docker CLI boundary are validated here: the repo name must be a plain
  * directory name (it composes both the image tag and the asset path), and the worktree path

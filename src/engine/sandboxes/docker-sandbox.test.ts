@@ -222,7 +222,7 @@ describe('dockerSandbox.exec', () => {
 
   it('mounts the project env file when present so credentials reach the container', async () => {
     await seedDockerfile('withenv', 'FROM node:26\n');
-    await writeFile(join(projectsRoot, 'withenv', 'env'), 'AGENT_KEY=secret\n');
+    await writeFile(join(projectsRoot, 'withenv', '.env'), 'AGENT_KEY=secret\n');
     const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
     const sandbox = dockerSandbox({ projectsRoot, docker });
 
@@ -235,7 +235,7 @@ describe('dockerSandbox.exec', () => {
     const run = docker.invocations[0] ?? [];
 
     expect(run).toContain('--env-file');
-    expect(run[run.indexOf('--env-file') + 1]).toBe(join(projectsRoot, 'withenv', 'env'));
+    expect(run[run.indexOf('--env-file') + 1]).toBe(join(projectsRoot, 'withenv', '.env'));
   });
 });
 
