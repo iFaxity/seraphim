@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, type Stats } from 'node:fs';
+import { Effect } from 'effect';
 
 import { failure, success, tryCatch, type Result } from './result.ts';
 
@@ -23,17 +24,6 @@ export async function fileExists(path: string) {
   }
 
   return statResult.data.isFile();
-}
-
-/** True when the path exists and is a directory; missing or other node kinds read false. */
-export async function dirExists(path: string) {
-  const statResult = await tryCatch(stat(path));
-
-  if (!statResult.success) {
-    return false;
-  }
-
-  return statResult.data.isDirectory();
 }
 
 /** Reads one UTF-8 text file as a Result — an absent or unreadable file fails, never throws. */
@@ -129,7 +119,34 @@ export async function tryCp({ path, to }: CopyOptions) {
   return success();
 }
 
-/** True when the path exists; the sync probe the startup path owns. */
+// — Effect-side fs primitives —
+// Same semantics as the `try*` helpers above, for modules composed in Effect: absence is a
+// `false` or a failed read per the helper, never a throw, and the error channel is the
+// caller's to map onto its contract's taxonomy.
+
+/** Reads one UTF-8 text file; an absent or unreadable file fails, never throws. */
+export function readFileE(path: string | URL): Effect.Effect<string, Error> {
+  return Effect.tryPromise({ try: () => readFile(path, 'utf8'), catch: (error) => error as Error });
+}
+
+/** Shared stat probe under the `is*` read: missing/unreadable paths read as not-a-kind. */
+function statKind(path: string | URL, kind: (stats: Stats) => boolean): Effect.Effect<boolean> {
+  return Effect.match(
+    Effect.tryPromise({ try: () => stat(path), catch: (error) => error as Error }),
+    { onFailure: () => false, onSuccess: kind },
+  );
+}
+
+/** True when the path exists and is a regular file; missing or other node kinds read false. */
+export function fileExistsE(path: string | URL): Effect.Effect<boolean> {
+  return statKind(path, (stats) => stats.isFile());
+}
+
+/** True when the path exists and is a directory; missing or other node kinds read false. */
+export function dirExistsE(path: string | URL): Effect.Effect<boolean> {
+  return statKind(path, (stats) => stats.isDirectory());
+}
+
 export function fileExistsSync(path: string) {
   return existsSync(path);
 }

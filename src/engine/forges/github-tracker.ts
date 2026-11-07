@@ -1,20 +1,28 @@
-import { Effect, Schema } from 'effect';
-
-import { API_ROOT, issuesUrl, nextLink, type ApiError, type GitHubClient } from './github-api.ts';
+import { Effect, Layer, Schema } from 'effect';
 
 import {
+  GitHubClientService,
+  GithubApiRoot,
+  issuesUrl,
+  nextLink,
+  type GitHubClient,
+} from './github-api.ts';
+
+import {
+  ApiError,
   AuthError,
   ClaimConflictError,
   RateLimitError,
   UnavailableError,
 } from '../../lib/errors.ts';
 import { type Issue, type Tracker, type TrackerError } from '../core/contracts.ts';
+import { TrackerService } from '../core/services.ts';
 
 /**
  * The real `Tracker` adapter over the GitHub REST API (ADR-0003: adapters are ingest-only
- * and normalize to one uniform format — forge specifics end here, the kernel never branches
- * on a backend). Responses are JSON-validated at the forge boundary (`github-api.ts`); the
- * schemas below are that validation's contract.
+ * normalizers; scope, branching, and planning live elsewhere). Its internals are Effects
+ * that fail with the forge client's tagged `ApiError`; the one adapter-edge mapping turns
+ * those into the contract's `TrackerError` vocabulary.
  */
 
 /** Page size for issue listing — one request covers all but huge repos; paging follows. */
@@ -92,28 +100,32 @@ function isTrueIssue(raw: Schema.Schema.Type<typeof GitHubIssueSchema>) {
 }
 
 /**
- * One issues-list page: its own function so the awaited call's type is stated once, which
- * keeps the pagination loop's `nextUrl = nextLink(page.headers)` assignment from feeding
- * the await's inference back into itself (TS7022).
+ * One issues-list page: its own function so the pagination loop's `nextUrl` reassignment
+ * reads as one named step.
  */
 function fetchIssuePage(client: GitHubClient, url: string) {
   return client.json({ method: 'GET', url, body: null, schema: Schema.Array(GitHubIssueSchema) });
 }
 
 /**
- * Wraps a client failure's diagnostic for the stack, carrying its `ApiError.status` onto
- * the wrapper: the edge mapping (`trackerFailure`) branches on that field, so it must
- * survive the wrap. The original error rides as `cause`.
+ * Adds the failing operation's label to a client failure's diagnostic while carrying its
+ * `ApiError.status` through — the edge mapping (`trackerFailure`) still branches on that
+ * field, so the wrap must not flatten it. Four adapters operations share the wrap so the
+ * `cause` diagnostics read uniformly.
  */
-function rethrow(message: string, error: unknown): Error {
-  throw Object.assign(new Error(message), {
-    status: (error as Partial<ApiError>).status ?? null,
+function withContext(message: string, error: ApiError): ApiError {
+  return new ApiError({
+    status: error.status,
+    message: `${message}: ${error.message}`,
     cause: error,
   });
 }
 
-/** The draft-PR creation input, as the `Tracker` contract states it. */
-export type DraftPrInput = {
+/**
+ * `openDraftPr`'s input, as the `Tracker` contract states it — adapter-internal, so the
+ * flow-facing alias rides no public surface.
+ */
+type DraftPrInput = {
   readonly repo: string;
   readonly issue: Issue;
   readonly branch: string;
@@ -125,45 +137,50 @@ export type DraftPrInput = {
  * `listReady`'s body: full pagination, no silent truncation. Claimed and blocked are the
  * two skip rules the "ready" contract is.
  */
-async function listReadyIssues(client: GitHubClient, repo: string) {
-  const ready: Issue[] = [];
-  let nextUrl: null | string = issuesUrl(repo, `?state=open&per_page=${PAGE_SIZE}`);
+function listReadyIssues(
+  client: GitHubClient,
+  root: string,
+  repo: string,
+): Effect.Effect<Issue[], ApiError> {
+  return Effect.gen(function* () {
+    const ready: Issue[] = [];
+    let nextUrl: null | string = issuesUrl(repo, `?state=open&per_page=${PAGE_SIZE}`, root);
 
-  while (nextUrl != null) {
-    const fetched = await fetchIssuePage(client, nextUrl);
+    while (nextUrl != null) {
+      const page = yield* Effect.mapError(fetchIssuePage(client, nextUrl), (error) =>
+        withContext('issue list failed', error),
+      );
 
-    if (!fetched.success) {
-      throw rethrow(`issue list failed: ${fetched.error.message}`, fetched.error);
+      const issues = page.data.filter(isTrueIssue).map((raw) => toIssue(repo, raw));
+
+      ready.push(
+        ...issues.filter(
+          (issue) => !issue.labels.includes(CLAIMED_LABEL) && issue.blockedBy.length === 0,
+        ),
+      );
+      nextUrl = nextLink(page.headers);
     }
 
-    const page = fetched.data;
-    const issues = page.data.filter(isTrueIssue).map((raw) => toIssue(repo, raw));
-
-    ready.push(
-      ...issues.filter(
-        (issue) => !issue.labels.includes(CLAIMED_LABEL) && issue.blockedBy.length === 0,
-      ),
-    );
-    nextUrl = nextLink(page.headers);
-  }
-
-  return ready;
+    return ready;
+  });
 }
 
 /** `getIssue`'s body: one repo-scoped GET, normalized to the contract's `Issue`. */
-async function readIssue(client: GitHubClient, repo: string, issueNumber: number) {
-  const read = await client.json({
-    method: 'GET',
-    url: issuesUrl(repo, `/${issueNumber}`),
-    body: null,
-    schema: GitHubIssueSchema,
-  });
-
-  if (!read.success) {
-    throw rethrow(`issue read failed (#${issueNumber}): ${read.error.message}`, read.error);
-  }
-
-  return toIssue(repo, read.data.data);
+function readIssue(
+  client: GitHubClient,
+  root: string,
+  repo: string,
+  issueNumber: number,
+): Effect.Effect<Issue, ApiError> {
+  return Effect.mapError(
+    client.json({
+      method: 'GET',
+      url: issuesUrl(repo, `/${issueNumber}`, root),
+      body: null,
+      schema: GitHubIssueSchema,
+    }),
+    (error) => withContext(`issue read failed (#${issueNumber})`, error),
+  ).pipe(Effect.map((read) => toIssue(repo, read.data)));
 }
 
 /**
@@ -171,31 +188,28 @@ async function readIssue(client: GitHubClient, repo: string, issueNumber: number
  * already-claimed refusal is `Effect.fail` at the `claim` boundary), so this is the
  * forge-effecting half only: a failure here is the forge refusing the write.
  */
-async function claimIssue(client: GitHubClient, issue: Issue) {
-  const labeled = await client.json({
-    method: 'POST',
-    url: issuesUrl(issue.repo, `/${issue.number}/labels`),
-    body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
-    schema: Schema.Unknown,
-  });
-
-  if (!labeled.success) {
-    throw rethrow(`issue claim failed (#${issue.number}): ${labeled.error.message}`, labeled.error);
-  }
-
-  const commented = await client.json({
-    method: 'POST',
-    url: issuesUrl(issue.repo, `/${issue.number}/comments`),
-    body: JSON.stringify({ body: CLAIM_COMMENT }),
-    schema: Schema.Unknown,
-  });
-
-  if (!commented.success) {
-    throw rethrow(
-      `issue claim comment failed (#${issue.number}): ${commented.error.message}`,
-      commented.error,
+function claimIssue(client: GitHubClient, issue: Issue): Effect.Effect<void, ApiError> {
+  return Effect.gen(function* () {
+    yield* Effect.mapError(
+      client.json({
+        method: 'POST',
+        url: issuesUrl(issue.repo, `/${issue.number}/labels`),
+        body: JSON.stringify({ labels: [CLAIMED_LABEL] }),
+        schema: Schema.Unknown,
+      }),
+      (error) => withContext(`issue claim failed (#${issue.number})`, error),
     );
-  }
+
+    yield* Effect.mapError(
+      client.json({
+        method: 'POST',
+        url: issuesUrl(issue.repo, `/${issue.number}/comments`),
+        body: JSON.stringify({ body: CLAIM_COMMENT }),
+        schema: Schema.Unknown,
+      }),
+      (error) => withContext(`issue claim comment failed (#${issue.number})`, error),
+    );
+  });
 }
 
 /**
@@ -204,30 +218,33 @@ async function claimIssue(client: GitHubClient, issue: Issue) {
  * only the forge effect. Base stays the forge default; `Closes #N` in the body is the
  * forge-native issue link — no watcher, no extra adapter method.
  */
-async function openDraftPull(client: GitHubClient, input: DraftPrInput) {
-  const created = await client.json({
-    method: 'POST',
-    url: `${API_ROOT}/repos/${input.repo}/pulls`,
-    body: JSON.stringify({
-      title: input.title,
-      head: input.branch,
-      draft: true,
-      body: input.body,
+function openDraftPull(
+  client: GitHubClient,
+  root: string,
+  input: DraftPrInput,
+): Effect.Effect<{ url: string; number: number; state: 'draft' }, ApiError> {
+  return Effect.mapError(
+    client.json({
+      method: 'POST',
+      url: `${root}/repos/${input.repo}/pulls`,
+      body: JSON.stringify({
+        title: input.title,
+        head: input.branch,
+        draft: true,
+        body: input.body,
+      }),
+      schema: GitHubPullSchema,
     }),
-    schema: GitHubPullSchema,
-  });
-
-  if (!created.success) {
-    throw rethrow(`draft PR creation failed: ${created.error.message}`, created.error);
-  }
-
-  // The created-PR response carries the forge-native URL and number directly; the
-  // schema's `draft: true` expectation was already enforced by validation.
-  return {
-    url: created.data.data.html_url,
-    number: created.data.data.number,
-    state: 'draft' as const,
-  };
+    (error) => withContext('draft PR creation failed', error),
+  ).pipe(
+    // The created-PR response carries the forge-native URL and number directly; the
+    // schema's `draft: true` expectation was already enforced by validation.
+    Effect.map((created) => ({
+      url: created.data.html_url,
+      number: created.data.number,
+      state: 'draft' as const,
+    })),
+  );
 }
 
 /**
@@ -238,36 +255,31 @@ async function openDraftPull(client: GitHubClient, input: DraftPrInput) {
  * forge/service state the kernel treats as unavailable. The original diagnostic rides as
  * `cause` so logging keeps the detail the tagged name drops.
  */
-function trackerFailure(error: unknown): TrackerError {
-  const status = (error as Partial<ApiError> | undefined)?.status;
-
-  if (status === 401 || status === 403) {
+function trackerFailure(error: ApiError): TrackerError {
+  if (error.status === 401 || error.status === 403) {
     return new AuthError({ cause: error });
   }
 
-  if (status === 429) {
+  if (error.status === 429) {
     return new RateLimitError({ cause: error });
   }
 
   return new UnavailableError({ cause: error });
 }
 
-/**
- * Real `Tracker` adapter over the GitHub REST API. Reads are GETs with full pagination on
- * the list; the claim dance (label + comment) and the draft-PR create are the adapter's
- * only writes. Every URL is repo-scoped — no ambient repository context.
- *
- * The claim guard runs on the contract's `Issue` before any HTTP call: the double-session
- * refusal is a kernel-side conflict, not a forge effectiveness, so it fails with
- * `ClaimConflictError` rather than riding the tracker's status mapping.
- */
-export function ghTracker(client: GitHubClient) {
+/** The one adapter-edge mapping: the forge client's tagged failure to the contract's vocabulary. */
+function toTrackerError<A, R>(
+  effect: Effect.Effect<A, ApiError, R>,
+): Effect.Effect<A, TrackerError, R> {
+  return Effect.catchTag(effect, 'ApiError', (error) => Effect.fail(trackerFailure(error)));
+}
+
+/** The real `Tracker` adapter over `client`, composing repo-scoped URLs from `root`. */
+function buildTracker(client: GitHubClient, root: string): Tracker {
   return {
-    listReady: (repo: string) =>
-      Effect.tryPromise({ try: () => listReadyIssues(client, repo), catch: trackerFailure }),
-    getIssue: (repo: string, issueNumber: number) =>
-      Effect.tryPromise({ try: () => readIssue(client, repo, issueNumber), catch: trackerFailure }),
-    claim: (issue: Issue): Effect.Effect<void, TrackerError | ClaimConflictError> => {
+    listReady: (repo) => toTrackerError(listReadyIssues(client, root, repo)),
+    getIssue: (repo, issueNumber) => toTrackerError(readIssue(client, root, repo, issueNumber)),
+    claim: (issue): Effect.Effect<void, TrackerError | ClaimConflictError> => {
       if (issue.labels.includes(CLAIMED_LABEL)) {
         return Effect.fail(
           new ClaimConflictError({
@@ -276,9 +288,25 @@ export function ghTracker(client: GitHubClient) {
         );
       }
 
-      return Effect.tryPromise({ try: () => claimIssue(client, issue), catch: trackerFailure });
+      return toTrackerError(claimIssue(client, issue));
     },
-    openDraftPr: (input: DraftPrInput) =>
-      Effect.tryPromise({ try: () => openDraftPull(client, input), catch: trackerFailure }),
-  } satisfies Tracker;
+    openDraftPr: (input) => toTrackerError(openDraftPull(client, root, input)),
+  };
 }
+
+/**
+ * The adapter as a `Context` service: the scripted-real construction path. Depends on the
+ * forge client service; the API root is a `Context.Reference` whose default (`API_ROOT`)
+ * resolves without wiring — a composition can override it with
+ * `Layer.succeed(GithubApiRoot, otherRoot)`. The composition root wires `apiLayer` into
+ * `trackerLayer`; tests wire a scripted client.
+ */
+export const trackerLayer: Layer.Layer<TrackerService, never, GitHubClientService> = Layer.effect(
+  TrackerService,
+  Effect.gen(function* () {
+    const client = yield* GitHubClientService;
+    const root = yield* GithubApiRoot;
+
+    return buildTracker(client, root);
+  }),
+);

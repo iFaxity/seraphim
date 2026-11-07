@@ -32,7 +32,7 @@ export type FakeEnvironmentOverrides = Partial<{
 
 /** An offline docker: every image listing comes back empty, so prune's image arm stays inert. */
 const fakeDocker: DockerRunner = {
-  run: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }),
+  run: () => Effect.succeed({ exitCode: 0, stdout: '', stderr: '' }),
 };
 
 /**
