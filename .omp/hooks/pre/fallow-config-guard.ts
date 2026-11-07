@@ -10,12 +10,13 @@ function isProtectedPath(path: string): boolean {
   return path.includes('.fallowrc.jsonc') || path.includes('.fallow/');
 }
 
-/** Shell commands can touch protected files without naming them in a tool path. */
+/**
+ * Shell commands name the protected file themselves when they would touch it, so the
+ * file path is the only signal: heuristics over the word `fallow` or generic redirect
+ * characters both misfire on ordinary gate commands (`vp run fallow:audit`, `2>&1`).
+ */
 function commandTouchesProtected(cmd: string): boolean {
-  return (
-    /\.fallowrc\.jsonc|\bfallow\b/.test(cmd) &&
-    /[>|]|sed|perl|awk|rm |mv |tee |patch|truncate|dd /.test(cmd)
-  );
+  return /\.fallowrc\.jsonc|\.fallow\//.test(cmd);
 }
 
 export default function fallowConfigGuard(pi: {
