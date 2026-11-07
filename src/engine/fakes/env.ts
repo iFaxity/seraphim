@@ -8,7 +8,6 @@ import { fakeRuntime, type FakeRuntime } from './runtime.ts';
 import { fakeSandbox, type FakeSandbox } from './sandbox.ts';
 import { fakeTracker, type FakeTracker } from './tracker.ts';
 
-import { TurnRuntimeError } from '../../lib/errors.ts';
 import {
   type AgentRuntime,
   type Forge,
@@ -16,7 +15,6 @@ import {
   type Notifier,
   type Sandbox,
   type Tracker,
-  type TurnResult,
 } from '../core/contracts.ts';
 import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 
@@ -57,15 +55,10 @@ function wrapRuntime(runtime: FakeRuntime | AgentRuntime, runtimeDelayMs: number
 
   return {
     ...recording,
-    // The delay stays promise-based (the wrap predates the Effect contracts); the deferred
-    // promise is lifted back into the contract's error channel, which `recording.run` never fails.
-    run: (input) => {
-      const { promise, resolve } = Promise.withResolvers<TurnResult>();
-
-      setTimeout(() => resolve(Effect.runPromise(recording.run(input))), runtimeDelayMs);
-
-      return Effect.tryPromise({ try: () => promise, catch: () => new TurnRuntimeError() });
-    },
+    // Simulated latency is an Effect sleep, not a promise timer: it composes with the
+    // runtime's Clock (TestClock controls it deterministically from the test tier) and
+    // no promise seam wraps the wrapped effect.
+    run: (input) => Effect.sleep(runtimeDelayMs).pipe(Effect.andThen(recording.run(input))),
   };
 }
 
