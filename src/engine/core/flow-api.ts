@@ -1,8 +1,9 @@
+import { Schema } from 'effect';
 import { z } from 'zod';
 
-import { type Tracker } from './contracts.ts';
+import { type PullRequest } from './contracts.ts';
 
-import { CapsSchema } from '../kernel/receipts.ts';
+import { CapsSchema, type Caps } from '../kernel/receipts.ts';
 
 /**
  * The flow-facing API: the only module a flow file needs. Flows `export default
@@ -24,8 +25,10 @@ export const FlowConfigSchema = z.object({
   sandbox: z.enum(['docker']),
   // Kernel-enforced budget: flows declare it, the kernel owns enforcement (spec: caps live
   // in the kernel, invisible to flow code). Required — every flow states its own budget,
-  // no silent default hides the cost of running it.
-  caps: CapsSchema,
+  // no silent default hides the cost of running it. The caps record's schema lives in the
+  // receipts module (the machine contract for the persisted manifest); the zod surface
+  // delegates to it so the flow file is held to exactly the persisted shape.
+  caps: z.custom<Caps>((value) => Schema.is(CapsSchema)(value)),
 });
 
 export type FlowConfig = z.infer<typeof FlowConfigSchema>;
@@ -69,7 +72,8 @@ export type SessionContext = {
   readonly sh: (command: readonly string[]) => Promise<number>;
   /**
    * Tracker handle for this session's issue. The kernel fills in the repo, the claimed
-   * issue, and the session branch — the flow supplies only the PR text.
+   * issue, and the session branch — the flow supplies only the PR text. Promise-shaped:
+   * flows see rejections, never the kernel's internals.
    *
    * @example
    * ```ts
@@ -80,7 +84,12 @@ export type SessionContext = {
    * ctx.log(`draft PR: ${pr.url}`);
    * ```
    */
-  readonly tracker: Pick<Tracker, 'openDraftPr'>;
+  readonly tracker: {
+    readonly openDraftPr: (input: {
+      readonly title: string;
+      readonly body: string;
+    }) => Promise<PullRequest>;
+  };
   /**
    * Forge handle for this session's branch — the flow decides whether and when to publish
    * (`ctx.forge.push()`); spike flows may never push. The kernel binds the session branch

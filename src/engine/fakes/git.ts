@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { type Git } from '../core/contracts.ts';
 
 /**
@@ -16,7 +18,7 @@ export type FakeGit = Git & {
   readonly removedBranches: readonly string[];
 };
 
-export function fakeGit(defaultBranch = 'main') {
+export function fakeGit(defaultBranch = 'main'): FakeGit {
   const clones: FakeGit['clones'] = [];
   const worktrees: FakeGit['worktrees'] = [];
   const removedWorktrees: string[] = [];
@@ -27,28 +29,28 @@ export function fakeGit(defaultBranch = 'main') {
     worktrees,
     removedWorktrees,
     removedBranches,
-    defaultBranch: () => Promise.resolve(defaultBranch),
+    defaultBranch: () => Effect.succeed(defaultBranch),
     cloneIfMissing: (path, url) => {
       clones.push({ path, url });
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
-    pull: () => Promise.resolve(),
+    pull: () => Effect.succeed(undefined),
     createWorktree: (input) => {
       worktrees.push({ branch: input.branch, baseBranch: input.baseBranch, path: input.path });
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
     removeWorktree: (input) => {
       removedWorktrees.push(input.path);
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
     deleteBranch: (input) => {
       removedBranches.push(input.branch);
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
-    probeRemote: () => Promise.resolve(),
+    probeRemote: () => Effect.succeed(undefined),
   } satisfies FakeGit;
 }

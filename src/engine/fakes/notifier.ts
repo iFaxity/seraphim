@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { type Notification, type Notifier } from '../core/contracts.ts';
 
 /**
@@ -18,7 +20,7 @@ export function fakeNotifier(): FakeNotifier {
     notify: (notification) => {
       events.push(notification);
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
   } satisfies FakeNotifier;
 }

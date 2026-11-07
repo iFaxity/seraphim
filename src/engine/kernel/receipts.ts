@@ -1,6 +1,6 @@
 import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { z } from 'zod';
+import { Schema } from 'effect';
 
 import { type TranscriptFile } from './turns.ts';
 
@@ -9,53 +9,68 @@ import { tryCatch, success, failure } from '../../lib/result.ts';
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
 
 /**
- * Receipts are the filesystem-as-database (ADR-0001): a zod-validated session manifest
+ * Receipts are the filesystem-as-database (ADR-0001): a schema-validated session manifest
  * plus per-turn records under `sessions/<repo>/<issue#>-<timestamp>/`, with free-text
  * transcript and logs sitting alongside — never replacing — the schema files. A future
  * control plane reads these same files, so the schemas are the machine contract.
  */
 
+/**
+ * URL string filter: the equivalence of the old `string().url()` — validates via `new URL`
+ * while keeping the TS type `string`, so the manifest shape is unchanged.
+ */
+const UrlStringSchema = Schema.String.check(
+  Schema.makeFilter((value: string) => {
+    try {
+      new URL(value);
+      return undefined;
+    } catch {
+      return { path: [], issue: 'expected a valid URL string' };
+    }
+  }),
+);
+
 /** One agent invocation within a session (CONTEXT.md: turn). */
-const TurnRecordSchema = z.object({
-  index: z.number().int().min(1),
-  prompt: z.string(),
-  agent: z.string().min(1),
-  model: z.string().min(1),
-  exitState: z.enum(['completed', 'failed', 'cap-hit']),
-  startedAt: z.number().int(),
-  endedAt: z.number().int(),
+const TurnRecordSchema = Schema.Struct({
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  prompt: Schema.String,
+  agent: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+  exitState: Schema.Literals(['completed', 'failed', 'cap-hit']),
+  startedAt: Schema.Int,
+  endedAt: Schema.Int,
 });
 
-export type TurnRecord = z.infer<typeof TurnRecordSchema>;
+export type TurnRecord = Schema.Schema.Type<typeof TurnRecordSchema>;
 
-export const CapsSchema = z.object({
-  maxTurns: z.number().int().min(1),
-  wallClockMs: z.number().int().min(0),
+export const CapsSchema = Schema.Struct({
+  maxTurns: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  wallClockMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });
 
-export type Caps = z.infer<typeof CapsSchema>;
+export type Caps = Schema.Schema.Type<typeof CapsSchema>;
 
 /** The session manifest: one file per session, the row `seraphim status` lists. */
-export const SessionManifestSchema = z.object({
-  repo: z.string().min(1),
-  issueNumber: z.number().int().min(1),
-  flow: z.string().min(1),
-  agent: z.string().min(1),
-  model: z.string().min(1),
-  state: z.enum(['running', 'completed', 'failed', 'cap-hit']),
-  branch: z.string().min(1),
-  worktreePath: z.string().min(1),
-  startedAt: z.number().int(),
-  endedAt: z.number().int().nullable(),
-  prUrl: z.string().url().nullable(),
+export const SessionManifestSchema = Schema.Struct({
+  repo: Schema.NonEmptyString,
+  issueNumber: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  flow: Schema.NonEmptyString,
+  agent: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+  state: Schema.Literals(['running', 'completed', 'failed', 'cap-hit']),
+  branch: Schema.NonEmptyString,
+  worktreePath: Schema.NonEmptyString,
+  startedAt: Schema.Int,
+  endedAt: Schema.NullOr(Schema.Int),
+  prUrl: Schema.NullOr(UrlStringSchema),
   /** The effective budget: what the kernel enforced, not merely what the flow asked for. */
   caps: CapsSchema,
   /** Why the session hit its budget — present exactly when state is `cap-hit`. */
-  capHit: z.string().nullable(),
-  turns: z.array(TurnRecordSchema),
+  capHit: Schema.NullOr(Schema.String),
+  turns: Schema.Array(TurnRecordSchema),
 });
 
-export type SessionManifest = z.infer<typeof SessionManifestSchema>;
+export type SessionManifest = Schema.Schema.Type<typeof SessionManifestSchema>;
 
 /**
  * Kernel-facing turn: timestamps as instants. Disk schemas stay epoch numbers (JSON
@@ -111,7 +126,9 @@ async function readManifest(sessionPath: string) {
     return failure(new Error(`invalid manifest JSON in ${sessionPath}: ${String(json.error)}`));
   }
 
-  const parsed = SessionManifestSchema.safeParse(json.data);
+  // Schema.decodeUnknownSync throws on invalid shape; tryCatch turns that into the
+  // failure Result the read contract publishes.
+  const parsed = tryCatch(() => Schema.decodeUnknownSync(SessionManifestSchema)(json.data));
 
   if (!parsed.success) {
     return failure(new Error(`invalid manifest in ${sessionPath}: ${parsed.error.message}`));
@@ -245,7 +262,9 @@ async function writeSessionManifest(dir: string, manifest: Session) {
     endedAt: manifest.endedAt == null ? null : toEpochMs(manifest.endedAt),
     turns: manifest.turns.map(toDiskTurn),
   };
-  const validated = SessionManifestSchema.safeParse(diskManifest);
+  // Same decode boundary as readManifest: a SchemaError here means the kernel-drafted
+  // manifest does not match the persisted contract.
+  const validated = tryCatch(() => Schema.decodeUnknownSync(SessionManifestSchema)(diskManifest));
 
   if (!validated.success) {
     return new Error(`session manifest invalid: ${validated.error.message}`);

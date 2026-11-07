@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { Effect } from 'effect';
 
+import { GitError } from '../../lib/errors.ts';
 import { dirExists } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
 
@@ -117,53 +119,70 @@ async function deleteBranch(
  * Real `Git` adapter. Every operation maps one git invocation to `void` (the receipt-visible
  * state is the filesystem, not git's stdout) except `defaultBranch`, which reads `origin/HEAD`.
  */
+function effectOfGit<T>(body: () => Promise<T>) {
+  // Interim seam: the adapter logic stays promise-based; the contract's Effect surface wraps
+  // it at the return edge, mapping any throw onto the contract's error channel.
+  return Effect.tryPromise({
+    try: body,
+    catch: (cause) =>
+      new GitError({
+        message: cause instanceof Error ? cause.message : String(cause),
+      }),
+  });
+}
+
 export function gitAdapter(runner: GitRunner) {
   return {
-    defaultBranch: async (repoPath) => {
-      // `--short` yields `origin/<branch>`; the adapter contract is the branch name (the fake
-      // returns 'main' and createWorktree re-prefixes origin/), so strip the remote here.
-      const run = await runner.run(
-        ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
-        repoPath,
-      );
-      expectOk('default branch lookup failed', run);
+    defaultBranch: (repoPath) =>
+      effectOfGit(async () => {
+        // `--short` yields `origin/<branch>`; the adapter contract is the branch name (the fake
+        // returns 'main' and createWorktree re-prefixes origin/), so strip the remote here.
+        const run = await runner.run(
+          ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+          repoPath,
+        );
+        expectOk('default branch lookup failed', run);
 
-      return run.stdout.trim().replace(/^origin\//, '');
-    },
-    cloneIfMissing: async (repoPath, url) => {
-      // `rev-parse -C <path>` (no cwd): passing the target as cwd makes a missing directory
-      // a spawn ENOENT with `path: 'git'` — the binary's name, not the culprit — which also
-      // crashes on an unhandled child 'error' event instead of a clean failure.
-      const present = await runner.run(['rev-parse', '-C', repoPath, '--is-inside-work-tree']);
+        return run.stdout.trim().replace(/^origin\//, '');
+      }),
+    cloneIfMissing: (repoPath, url) =>
+      effectOfGit(async () => {
+        // `rev-parse -C <path>` (no cwd): passing the target as cwd makes a missing directory
+        // a spawn ENOENT with `path: 'git'` — the binary's name, not the culprit — which also
+        // crashes on an unhandled child 'error' event instead of a clean failure.
+        const present = await runner.run(['rev-parse', '-C', repoPath, '--is-inside-work-tree']);
 
-      if (present.exitCode == 0) {
-        return;
-      }
+        if (present.exitCode == 0) {
+          return;
+        }
 
-      const clone = await runner.run(['clone', url, repoPath]);
-      expectOk('clone failed', clone);
-    },
-    pull: async (repoPath) => {
-      const run = await runner.run(['pull', '--ff-only'], repoPath);
-      expectOk('pull failed', run);
-    },
-    createWorktree: async (input) => {
-      const args = [
-        'worktree',
-        'add',
-        '-b',
-        input.branch,
-        input.path,
-        `origin/${input.baseBranch}`,
-      ];
-      const run = await runner.run(args, input.repoPath);
-      expectOk('worktree creation failed', run);
-    },
-    removeWorktree: (input) => removeWorktree(runner, input),
-    deleteBranch: (input) => deleteBranch(runner, input),
-    probeRemote: async (url) => {
-      const run = await runner.run(['ls-remote', '--heads', url]);
-      expectOk('remote not reachable', run);
-    },
+        const clone = await runner.run(['clone', url, repoPath]);
+        expectOk('clone failed', clone);
+      }),
+    pull: (repoPath) =>
+      effectOfGit(async () => {
+        const run = await runner.run(['pull', '--ff-only'], repoPath);
+        expectOk('pull failed', run);
+      }),
+    createWorktree: (input) =>
+      effectOfGit(async () => {
+        const args = [
+          'worktree',
+          'add',
+          '-b',
+          input.branch,
+          input.path,
+          `origin/${input.baseBranch}`,
+        ];
+        const run = await runner.run(args, input.repoPath);
+        expectOk('worktree creation failed', run);
+      }),
+    removeWorktree: (input) => effectOfGit(() => removeWorktree(runner, input)),
+    deleteBranch: (input) => effectOfGit(() => deleteBranch(runner, input)),
+    probeRemote: (url) =>
+      effectOfGit(async () => {
+        const run = await runner.run(['ls-remote', '--heads', url]);
+        expectOk('remote not reachable', run);
+      }),
   } satisfies Git;
 }

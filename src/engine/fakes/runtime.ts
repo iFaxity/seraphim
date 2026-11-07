@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { type AgentRuntime } from '../core/contracts.ts';
 
 /**
@@ -24,7 +26,7 @@ export function fakeRuntime(exitState: 'completed' | 'failed' | 'cap-hit' = 'com
       prompts.push(`${input.cwd}::${input.prompt}::${input.model}`);
       transcript.push(input.prompt);
 
-      return Promise.resolve({ exitState, transcript: `transcript of: ${input.prompt}` });
+      return Effect.succeed({ exitState, transcript: `transcript of: ${input.prompt}` });
     },
   } satisfies FakeRuntime;
 }

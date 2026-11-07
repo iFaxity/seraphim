@@ -20,7 +20,7 @@ describe('error vocabulary', () => {
 
   it.effect('auth failures carry AuthError', () =>
     Effect.gen(function* () {
-      const tagged = yield* Effect.fail(new AuthError()).pipe(
+      const tagged = yield* Effect.fail(new AuthError({})).pipe(
         Effect.catchTag('AuthError', (caught) => Effect.succeed(caught._tag)),
       );
       expect(tagged).toBe('AuthError');
@@ -29,7 +29,7 @@ describe('error vocabulary', () => {
 
   it.effect('rate-limit failures carry RateLimitError', () =>
     Effect.gen(function* () {
-      const tagged = yield* Effect.fail(new RateLimitError()).pipe(
+      const tagged = yield* Effect.fail(new RateLimitError({})).pipe(
         Effect.catchTag('RateLimitError', (caught) => Effect.succeed(caught._tag)),
       );
       expect(tagged).toBe('RateLimitError');
@@ -38,7 +38,7 @@ describe('error vocabulary', () => {
 
   it.effect('unavailable failures carry UnavailableError', () =>
     Effect.gen(function* () {
-      const tagged = yield* Effect.fail(new UnavailableError()).pipe(
+      const tagged = yield* Effect.fail(new UnavailableError({})).pipe(
         Effect.catchTag('UnavailableError', (caught) => Effect.succeed(caught._tag)),
       );
       expect(tagged).toBe('UnavailableError');
@@ -47,9 +47,9 @@ describe('error vocabulary', () => {
 
   it.effect('claim conflicts carry ClaimConflictError', () =>
     Effect.gen(function* () {
-      const tagged = yield* Effect.fail(new ClaimConflictError()).pipe(
-        Effect.catchTag('ClaimConflictError', (caught) => Effect.succeed(caught._tag)),
-      );
+      const tagged = yield* Effect.fail(
+        new ClaimConflictError({ message: 'already claimed' }),
+      ).pipe(Effect.catchTag('ClaimConflictError', (caught) => Effect.succeed(caught._tag)));
       expect(tagged).toBe('ClaimConflictError');
     }),
   );

@@ -1,5 +1,7 @@
+import { Effect } from 'effect';
 import { z } from 'zod';
 
+import { TurnRuntimeError } from '../../lib/errors.ts';
 import {
   type Sandbox,
   type SandboxExec,
@@ -261,9 +263,11 @@ export function piRuntime(input: {
     // lacks the agent CLI fails in the turn with a clear transcript. The adapter itself
     // is always usable, and `claude` has no adapter — selection fails fast in the kernel.
     available: (agent) => agent != 'claude',
-    run: async (turnInput) =>
-      toTurnResult(
-        await input.exec({
+    // The sandbox's unavailability (docker down, missing worktree) is the turn's own
+    // runtime failure; the diagnostic rides as the cause.
+    run: (turnInput) =>
+      Effect.gen(function* () {
+        const executed = yield* input.exec({
           repo: turnInput.repo,
           worktreePath: turnInput.cwd,
           command: turnCommand({
@@ -272,7 +276,9 @@ export function piRuntime(input: {
             model: turnInput.model,
             maxTimeMs: input.maxTimeMs,
           }),
-        }),
-      ),
+        });
+
+        return toTurnResult(executed);
+      }).pipe(Effect.mapError(() => new TurnRuntimeError())),
   };
 }

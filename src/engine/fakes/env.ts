@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { Effect } from 'effect';
 
 import { fakeForge, type FakeForge } from './forge.ts';
 import { fakeGit, type FakeGit } from './git.ts';
@@ -7,6 +8,7 @@ import { fakeRuntime, type FakeRuntime } from './runtime.ts';
 import { fakeSandbox, type FakeSandbox } from './sandbox.ts';
 import { fakeTracker, type FakeTracker } from './tracker.ts';
 
+import { TurnRuntimeError } from '../../lib/errors.ts';
 import {
   type AgentRuntime,
   type Forge,
@@ -55,12 +57,14 @@ function wrapRuntime(runtime: FakeRuntime | AgentRuntime, runtimeDelayMs: number
 
   return {
     ...recording,
+    // The delay stays promise-based (the wrap predates the Effect contracts); the deferred
+    // promise is lifted back into the contract's error channel, which `recording.run` never fails.
     run: (input) => {
       const { promise, resolve } = Promise.withResolvers<TurnResult>();
 
-      setTimeout(() => resolve(recording.run(input)), runtimeDelayMs);
+      setTimeout(() => resolve(Effect.runPromise(recording.run(input))), runtimeDelayMs);
 
-      return promise;
+      return Effect.tryPromise({ try: () => promise, catch: () => new TurnRuntimeError() });
     },
   };
 }

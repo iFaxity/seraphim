@@ -1,3 +1,4 @@
+import { Effect } from 'effect';
 import { z } from 'zod';
 
 import {
@@ -202,10 +203,11 @@ export async function registerProject(
 
   const repo = repoCheck.data;
 
-  const probe = await tryCatch(git.probeRemote(url));
+  const probe = await tryCatch(Effect.runPromise(git.probeRemote(url)));
 
   if (!probe.success) {
-    const error = new Error(`remote not reachable '${url}': ${String(probe.error)}`);
+    const detail = probe.error instanceof Error ? probe.error.message : String(probe.error);
+    const error = new Error(`remote not reachable '${url}': ${detail}`, { cause: probe.error });
 
     return failure(error);
   }

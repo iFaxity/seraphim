@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Effect, Schema } from 'effect';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { withRepoLock } from './lock.ts';
@@ -8,6 +9,7 @@ import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession } from './session.ts';
 
+import { UnavailableError } from '../../lib/errors.ts';
 import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import { type Sandbox, type Tracker } from '../core/contracts.ts';
@@ -147,7 +149,7 @@ describe('runSession', () => {
 
     const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
 
-    expect(() => SessionManifestSchema.parse(raw)).not.toThrow();
+    expect(() => Schema.decodeUnknownSync(SessionManifestSchema)(raw)).not.toThrow();
     expect(manifest.model).toBe('test-model');
   });
 
@@ -286,7 +288,7 @@ export default flow;
     const receiptDirs = await readdir(join(sessionsRoot, 'turncap'));
     const receiptDir = join(sessionsRoot, 'turncap', receiptDirs[0] ?? '');
     const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
-    const manifest = SessionManifestSchema.parse(raw);
+    const manifest = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
 
     expect(manifest.caps).toEqual({ maxTurns: 2, wallClockMs: 60000 });
     expect(manifest.capHit).toMatch(/turn cap/);
@@ -588,7 +590,7 @@ export default flow;
     expect(files).toContain('turn-1.json');
 
     const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
-    const manifest = SessionManifestSchema.parse(raw);
+    const manifest = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
 
     expect(manifest.state).toBe('failed');
 
@@ -780,12 +782,13 @@ export default flow;
       sessionsRoot,
       sandbox: {
         ...base,
-        exec: async (input) => ({
-          ...(await base.exec(input)),
-          exitCode: 1,
-          stdout: '',
-          stderr: 'oops: the lint failed',
-        }),
+        exec: (input) =>
+          Effect.map(base.exec(input), (executed) => ({
+            ...executed,
+            exitCode: 1,
+            stdout: '',
+            stderr: 'oops: the lint failed',
+          })),
       },
     }).env;
 
@@ -991,20 +994,24 @@ describe('per-repo lock', () => {
     let maxInFlight = 0;
     const sandbox: Sandbox = {
       ...base,
-      ensureImage: async () => {
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        // The overlap window needs real time: the lock queue is internal, so no deterministic
-        // hook exists at this seam to signal "second session reached the mutex".
-        const { promise, resolve } = Promise.withResolvers<void>();
+      ensureImage: () =>
+        Effect.tryPromise({
+          try: async () => {
+            inFlight += 1;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            // The overlap window needs real time: the lock queue is internal, so no deterministic
+            // hook exists at this seam to signal "second session reached the mutex".
+            const { promise, resolve } = Promise.withResolvers<void>();
 
-        setTimeout(resolve, 25);
-        await promise;
-        const result = await base.ensureImage();
-        inFlight -= 1;
+            setTimeout(resolve, 25);
+            await promise;
+            const result = await Effect.runPromise(base.ensureImage());
+            inFlight -= 1;
 
-        return result;
-      },
+            return result;
+          },
+          catch: (cause) => new UnavailableError({ cause }),
+        }),
     };
 
     const [first, second] = await Promise.all([
@@ -1125,7 +1132,7 @@ describe('per-repo lock', () => {
     const tracker = fakeTracker();
     const broken: Tracker = {
       ...tracker,
-      getIssue: () => Promise.reject(new Error('tracker down')),
+      getIssue: () => Effect.fail(new UnavailableError({})),
     };
     const { env, git } = fakeKernelEnvironment({
       workspaceRoot: root,
@@ -1298,7 +1305,8 @@ export default flow;
       sessionsRoot,
       runtime: fakeRuntime('failed'),
       notifier: {
-        notify: () => Promise.reject(new Error('webhook unreachable')),
+        notify: () =>
+          Effect.fail(new UnavailableError({ cause: new Error('webhook unreachable') })),
       },
     });
 

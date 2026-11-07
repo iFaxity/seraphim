@@ -1,11 +1,13 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Effect } from 'effect';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
 import { planPrune, runPrune, type PruneEnv } from './prune.ts';
 import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
+import { GitError } from '../../lib/errors.ts';
 import { fakeGit, type FakeGit } from '../fakes/git.ts';
 import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -225,14 +227,17 @@ describe('runPrune', () => {
     const stuck = await seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' });
     const clean = await seedSession({ repo: 'demo', issueNumber: 2, state: 'completed' });
 
-    git.removeWorktree = (input) =>
-      input.path === stuck.worktreePath
-        ? Promise.reject(new Error('device busy'))
-        : Promise.resolve();
+    const stuckGit: FakeGit = {
+      ...git,
+      removeWorktree: (input: { readonly path: string }) =>
+        input.path === stuck.worktreePath
+          ? Effect.fail(new GitError({ message: 'worktree removal failed: device busy' }))
+          : Effect.succeed(undefined),
+    };
 
-    const planned = await planPrune(envWith(git));
+    const planned = await planPrune(envWith(stuckGit));
     const done = await runPrune(
-      envWith(git),
+      envWith(stuckGit),
       planned.success
         ? planned.data
         : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
