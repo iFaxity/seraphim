@@ -20,7 +20,7 @@ export function fakeNotifier(): FakeNotifier {
     notify: (notification) => {
       events.push(notification);
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
   } satisfies FakeNotifier;
 }

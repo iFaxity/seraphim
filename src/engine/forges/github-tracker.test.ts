@@ -11,8 +11,8 @@ import {
 } from './github-api.ts';
 import { CLAIMED_LABEL, ghTracker } from './github-tracker.ts';
 
+import { expectFailure } from '../../../test/failure.ts';
 import { AuthError } from '../../lib/errors.ts';
-import { expectFailure } from '../../lib/failure.ts';
 import { failure, success, tryCatch } from '../../lib/result.ts';
 
 /** A scripted client outcome: a forge reply, or a thrown transport error. */

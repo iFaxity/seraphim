@@ -7,8 +7,8 @@ import { beforeEach, describe, expect } from 'vite-plus/test';
 
 import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
 
+import { expectFailure } from '../../../test/failure.ts';
 import { UnavailableError } from '../../lib/errors.ts';
-import { expectFailure } from '../../lib/failure.ts';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 
 /**

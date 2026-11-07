@@ -1,9 +1,8 @@
 import { Schema } from 'effect';
-import { z } from 'zod';
 
 import { type PullRequest } from './contracts.ts';
 
-import { CapsSchema, type Caps } from '../kernel/receipts.ts';
+import { CapsSchema } from '../kernel/receipts.ts';
 
 /**
  * The flow-facing API: the only module a flow file needs. Flows `export default
@@ -13,25 +12,25 @@ import { CapsSchema, type Caps } from '../kernel/receipts.ts';
  */
 
 /** The flow config declared in `defineFlow({ config })` — see {@link defineFlow}. */
-export const FlowConfigSchema = z.object({
+export const FlowConfigSchema = Schema.Struct({
   // The flow config enum declares both runtimes from day one (spec: pi/omp first, claude
   // once CLI access exists) so a flow typechecks against the future surface; selecting
   // claude before the adapter ships is a runtime fail-fast, not a type error.
-  agent: z.enum(['pi', 'claude']),
-  model: z.string().min(1),
+  agent: Schema.Literals(['pi', 'claude']),
+  model: Schema.NonEmptyString,
   // Explicit list, never implied (spec: an explicitly empty list is a valid declaration).
-  skills: z.array(z.string()),
+  skills: Schema.Array(Schema.String),
   // Sandbox strategy (spec: docker for now; only member today).
-  sandbox: z.enum(['docker']),
+  sandbox: Schema.Literals(['docker']),
   // Kernel-enforced budget: flows declare it, the kernel owns enforcement (spec: caps live
   // in the kernel, invisible to flow code). Required — every flow states its own budget,
-  // no silent default hides the cost of running it. The caps record's schema lives in the
-  // receipts module (the machine contract for the persisted manifest); the zod surface
-  // delegates to it so the flow file is held to exactly the persisted shape.
-  caps: z.custom<Caps>((value) => Schema.is(CapsSchema)(value)),
+  // no silent default hides the cost of running it. The persisted machine contract is the
+  // receipts module's Caps schema, shared verbatim, so the flow file is held to exactly
+  // the persisted shape.
+  caps: CapsSchema,
 });
 
-export type FlowConfig = z.infer<typeof FlowConfigSchema>;
+export type FlowConfig = Schema.Schema.Type<typeof FlowConfigSchema>;
 
 /**
  * What the kernel hands a flow's `run`. Everything here is kernel-dispatched and
@@ -116,14 +115,4 @@ export type SessionContext = {
    * ```
    */
   readonly log: (message: string) => void;
-};
-
-/**
- * The per-project, centrally-homed flow file: one `config` plus one `run` over the
- * session context. `export default { ... }` it directly — the kernel zod-checks the
- * config at load time, so shape errors surface before any turn runs.
- */
-export type Flow = {
-  readonly config: FlowConfig;
-  readonly run: (ctx: SessionContext) => Promise<void>;
 };

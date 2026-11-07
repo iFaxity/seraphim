@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import { type Effect } from 'effect/Effect';
 
 import {
   type AuthError,
@@ -59,9 +59,9 @@ export type Tracker = {
    * Open issues ready for pickup — minus claimed (the double-session guard) and minus
    * blocked (`Blocked by #N` lines; ADR-0003: a dumb non-agent fetch).
    */
-  readonly listReady: (repo: string) => Effect.Effect<readonly Issue[], TrackerError>;
-  readonly getIssue: (repo: string, issueNumber: number) => Effect.Effect<Issue, TrackerError>;
-  readonly claim: (issue: Issue) => Effect.Effect<void, TrackerError | ClaimConflictError>;
+  readonly listReady: (repo: string) => Effect<readonly Issue[], TrackerError>;
+  readonly getIssue: (repo: string, issueNumber: number) => Effect<Issue, TrackerError>;
+  readonly claim: (issue: Issue) => Effect<void, TrackerError | ClaimConflictError>;
   /**
    * Opens one draft PR from the session branch onto the forge default branch. Flow-invoked
    * (through `ctx.tracker`, which fills in repo, issue, and branch), forge-effected here;
@@ -74,7 +74,7 @@ export type Tracker = {
     readonly branch: string;
     readonly title: string;
     readonly body: string;
-  }) => Effect.Effect<PullRequest, TrackerError>;
+  }) => Effect<PullRequest, TrackerError>;
 };
 
 /** One command executed inside the sandbox, with its observable outcome. */
@@ -92,12 +92,12 @@ export type SandboxExec = {
  */
 export type Sandbox = {
   /** Builds/caches the image the session's execs run against; success is the observable. */
-  readonly ensureImage: (repo: string) => Effect.Effect<void, UnavailableError>;
+  readonly ensureImage: (repo: string) => Effect<void, UnavailableError>;
   readonly exec: (input: {
     readonly repo: string;
     readonly worktreePath: string;
     readonly command: readonly string[];
-  }) => Effect.Effect<SandboxExec, UnavailableError>;
+  }) => Effect<SandboxExec, UnavailableError>;
 };
 
 /** Result of one agent turn, captured by the runtime. */
@@ -119,7 +119,7 @@ export type AgentRuntime = {
     readonly cwd: string;
     readonly prompt: string;
     readonly model: string;
-  }) => Effect.Effect<TurnResult, TurnRuntimeError>;
+  }) => Effect<TurnResult, TurnRuntimeError>;
 };
 
 /**
@@ -129,30 +129,30 @@ export type AgentRuntime = {
  * (`cause` carries the spawn error/`stderr` for diagnostics).
  */
 export type Git = {
-  readonly defaultBranch: (repoPath: string) => Effect.Effect<string, GitError>;
-  readonly cloneIfMissing: (repoPath: string, url: string) => Effect.Effect<void, GitError>;
-  readonly pull: (repoPath: string) => Effect.Effect<void, GitError>;
+  readonly defaultBranch: (repoPath: string) => Effect<string, GitError>;
+  readonly cloneIfMissing: (repoPath: string, url: string) => Effect<void, GitError>;
+  readonly pull: (repoPath: string) => Effect<void, GitError>;
   readonly createWorktree: (input: {
     readonly repoPath: string;
     readonly branch: string;
     readonly path: string;
     readonly baseBranch: string;
-  }) => Effect.Effect<void, GitError>;
+  }) => Effect<void, GitError>;
   /** Removes one worktree directory (confirmed prune only — nothing else may delete one). */
   readonly removeWorktree: (input: {
     readonly repoPath: string;
     readonly path: string;
-  }) => Effect.Effect<void, GitError>;
+  }) => Effect<void, GitError>;
   /** Deletes one branch (confirmed prune only, after its worktree is gone). */
   readonly deleteBranch: (input: {
     readonly repoPath: string;
     readonly branch: string;
-  }) => Effect.Effect<void, GitError>;
+  }) => Effect<void, GitError>;
   /**
    * Reachability check over the remote — registration's fail-fast on an unreachable URL.
    * Read-only (a ref-list ping), never a clone.
    */
-  readonly probeRemote: (url: string) => Effect.Effect<void, GitError>;
+  readonly probeRemote: (url: string) => Effect<void, GitError>;
   /**
    * Publishes one branch from the session's clone directory to its `origin`. Still
    * flow-authored (the kernel never pre-checks an unpushed branch — a PR opened against
@@ -163,7 +163,7 @@ export type Git = {
   readonly push: (input: {
     readonly repoPath: string;
     readonly branch: string;
-  }) => Effect.Effect<void, GitError>;
+  }) => Effect<void, GitError>;
 };
 
 /** The terminal outcomes the kernel pages the operator about. Resumed sessions never notify. */
@@ -190,5 +190,5 @@ export type Notification = {
  * flow's perspective — a failed delivery is logged, never fails the session.
  */
 export type Notifier = {
-  readonly notify: (notification: Notification) => Effect.Effect<void, UnavailableError>;
+  readonly notify: (notification: Notification) => Effect<void, UnavailableError>;
 };

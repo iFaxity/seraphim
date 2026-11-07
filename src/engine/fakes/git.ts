@@ -36,29 +36,29 @@ export function fakeGit(defaultBranch = 'main'): FakeGit {
     cloneIfMissing: (path, url) => {
       clones.push({ path, url });
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
-    pull: () => Effect.succeed(undefined),
+    pull: () => Effect.void,
     createWorktree: (input) => {
       worktrees.push({ branch: input.branch, baseBranch: input.baseBranch, path: input.path });
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
     removeWorktree: (input) => {
       removedWorktrees.push(input.path);
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
     deleteBranch: (input) => {
       removedBranches.push(input.branch);
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
-    probeRemote: () => Effect.succeed(undefined),
+    probeRemote: () => Effect.void,
     push: (input) => {
       pushed.push(input);
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
   } satisfies FakeGit;
 }

@@ -31,6 +31,13 @@ rules immediately.
 - Run only at edges: `runPromise`/`runSync` in CLI main and the flow-run boundary, never between
   two Effect compositions. Retry/timeout/schedule at the composition root too — `Effect.retry`
   belongs where the caller assembles the program, not in the retried operation.
+- Import by module, not the barrel: runtime namespaces come from `'effect'` (`Effect`, `Data`,
+  `Schema` — their v4 shape is namespace re-exports, so values read `Effect.gen`); a _type-only_
+  reference to the Effect value goes to its defining module, `import type { Effect } from
+  'effect/Effect'`, so type positions read `Effect<Out, TaggedError>` without the namespace
+  prefix. The lowercase spell `effect/effect` does not resolve (the exports map is
+  case-sensitive and dist filenames are camelCase). In modules that use the `Effect` namespace
+  at runtime, spell type positions `Effect.Effect<…>` rather than aliasing the imported type.
 - Concurrency is `Effect.all` over a pre-built array variable: build the list, then compose.
 - Services are `Context.Tag`s composed via `Layer`s; test substitution is Layer wiring.
   Environment objects are the legacy shape, not the target. The repository lock stays an
