@@ -6,8 +6,8 @@ import { describe, expect } from 'vite-plus/test';
 
 import { expectOk, gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
+import { expectFailure } from '../../../test/failure.ts';
 import { GitError } from '../../lib/errors.ts';
-import { expectFailure } from '../../lib/failure.ts';
 import { mkdtemp } from 'node:fs/promises';
 
 /** Scripts git's behavior per invocation pattern — the same contract the docker adapter fakes. */

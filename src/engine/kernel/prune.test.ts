@@ -232,7 +232,7 @@ describe('runPrune', () => {
       removeWorktree: (input: { readonly path: string }) =>
         input.path === stuck.worktreePath
           ? Effect.fail(new GitError({ message: 'worktree removal failed: device busy' }))
-          : Effect.succeed(undefined),
+          : Effect.void,
     };
 
     const planned = await planPrune(envWith(stuckGit));

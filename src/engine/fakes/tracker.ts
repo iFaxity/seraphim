@@ -45,7 +45,7 @@ export function fakeTracker() {
     claim: (issue) => {
       claimed.push(`${issue.repo}#${issue.number}`);
 
-      return Effect.succeed(undefined);
+      return Effect.void;
     },
     openDraftPr: (input) =>
       Effect.succeed({

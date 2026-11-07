@@ -4,8 +4,8 @@ import { describe, expect } from 'vite-plus/test';
 
 import { nullNotifier, webhookNotifier } from './webhook.ts';
 
+import { expectFailure } from '../../../test/failure.ts';
 import { UnavailableError } from '../../lib/errors.ts';
-import { expectFailure } from '../../lib/failure.ts';
 
 /** A fetch double that records the call and returns a scripted response status. */
 function recordingPost(status: number) {
