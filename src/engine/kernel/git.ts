@@ -184,5 +184,13 @@ export function gitAdapter(runner: GitRunner) {
         const run = await runner.run(['ls-remote', '--heads', url]);
         expectOk('remote not reachable', run);
       }),
+    // Branch publication (the flow-facing forge push binds here): a host-side spawn from the
+    // session clone, so the container never sees the push credentials. Same runner, same
+    // failure shape as every other member — spawn/stderr diagnostics ride the GitError.
+    push: (input) =>
+      effectOfGit(async () => {
+        const run = await runner.run(['push', 'origin', input.branch], input.repoPath);
+        expectOk('push failed', run);
+      }),
   } satisfies Git;
 }

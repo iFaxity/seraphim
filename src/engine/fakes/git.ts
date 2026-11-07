@@ -16,6 +16,7 @@ export type FakeGit = Git & {
   }[];
   readonly removedWorktrees: readonly string[];
   readonly removedBranches: readonly string[];
+  readonly pushed: { readonly repoPath: string; readonly branch: string }[];
 };
 
 export function fakeGit(defaultBranch = 'main'): FakeGit {
@@ -23,12 +24,14 @@ export function fakeGit(defaultBranch = 'main'): FakeGit {
   const worktrees: FakeGit['worktrees'] = [];
   const removedWorktrees: string[] = [];
   const removedBranches: string[] = [];
+  const pushed: FakeGit['pushed'] = [];
 
   return {
     clones,
     worktrees,
     removedWorktrees,
     removedBranches,
+    pushed,
     defaultBranch: () => Effect.succeed(defaultBranch),
     cloneIfMissing: (path, url) => {
       clones.push({ path, url });
@@ -52,5 +55,10 @@ export function fakeGit(defaultBranch = 'main'): FakeGit {
       return Effect.succeed(undefined);
     },
     probeRemote: () => Effect.succeed(undefined),
+    push: (input) => {
+      pushed.push(input);
+
+      return Effect.succeed(undefined);
+    },
   } satisfies FakeGit;
 }

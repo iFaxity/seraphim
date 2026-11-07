@@ -15,7 +15,7 @@ export function fakeSandbox() {
   const executed: string[] = [];
   return {
     executed,
-    ensureImage: () => Effect.succeed({ id: 'fake-image' }),
+    ensureImage: () => Effect.succeed(undefined),
     exec: (input) => {
       executed.push(input.command.join(' '));
 

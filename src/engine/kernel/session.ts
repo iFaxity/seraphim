@@ -458,10 +458,11 @@ function createFlowContext(
     },
     forge: {
       // Flow-authored, optional: the kernel binds the session clone and branch — flows
-      // never touch git — and the adapter owns the host-side push credentials. A push
-      // failure propagates into the flow like any other adapter rejection; the kernel
-      // never pre-checks an unpushed branch (an unknown head fails at the forge).
-      push: () => Effect.runPromise(env.forge.push({ repoPath, branch })),
+      // never touch git — and the push runs host-side on the git adapter, so the
+      // container never sees the push credentials. A push failure propagates into the
+      // flow like any other adapter rejection; the kernel never pre-checks an unpushed
+      // branch (an unknown head fails at the forge).
+      push: () => Effect.runPromise(env.git.push({ repoPath, branch })),
     },
     run: (prompt: string) => dispatchTurn(run, prompt),
   };

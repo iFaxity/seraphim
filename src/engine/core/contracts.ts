@@ -77,27 +77,6 @@ export type Tracker = {
   }) => Effect.Effect<PullRequest, TrackerError>;
 };
 
-/**
- * Forge contract: branch publication. Adapters run their own `git push` spawn
- * with host credentials — the container never sees them (the sandbox reaches exactly the
- * worktree bind + `.env`; push credentials stay host-side here). Push is optional and
- * flow-authored: the kernel never enforces an unpushed branch, a PR opened against an
- * unknown head fails naturally at the forge. Distinct from `Tracker` (ADR-0003 survives:
- * ingest-only) — PR-open is flow-invoked but forge-effected, and this split keeps that
- * guarantee testable. See ADR-0006.
- */
-export type Forge = {
-  /**
-   * Publishes one branch from the session's clone directory to its `origin`. The kernel
-   * binds both (flows never touch git): `repoPath` is where the push runs, `branch` the
-   * ref pushed.
-   */
-  readonly push: (input: {
-    readonly repoPath: string;
-    readonly branch: string;
-  }) => Effect.Effect<void, UnavailableError>;
-};
-
 /** One command executed inside the sandbox, with its observable outcome. */
 export type SandboxExec = {
   readonly command: readonly string[];
@@ -107,21 +86,13 @@ export type SandboxExec = {
 };
 
 /**
- * Identity of the built/cached per-project container image: built from the project
- * Dockerfile and reused across sessions. The fake has nothing to identify — the real
- * adapter names the registry tag or content hash here.
- */
-export type Image = {
-  readonly id: string;
-};
-
-/**
  * Sandbox contract: per-project image build/cache and exec with the session worktree mounted.
- * v1 ships no real adapter; tests inject fakes.
+ * The kernel asserts success and never inspects the built identity; v1 ships a real docker
+ * adapter plus the fake tests inject.
  */
 export type Sandbox = {
-  /** Identity of the built/cached container image the session's execs run against. */
-  readonly ensureImage: (repo: string) => Effect.Effect<Image, UnavailableError>;
+  /** Builds/caches the image the session's execs run against; success is the observable. */
+  readonly ensureImage: (repo: string) => Effect.Effect<void, UnavailableError>;
   readonly exec: (input: {
     readonly repo: string;
     readonly worktreePath: string;
@@ -182,6 +153,17 @@ export type Git = {
    * Read-only (a ref-list ping), never a clone.
    */
   readonly probeRemote: (url: string) => Effect.Effect<void, GitError>;
+  /**
+   * Publishes one branch from the session's clone directory to its `origin`. Still
+   * flow-authored (the kernel never pre-checks an unpushed branch — a PR opened against
+   * an unknown head fails naturally) — `ctx.forge.push()` binds this member — and the
+   * push runs host-side from the session clone, so the container never sees them — push
+   * credentials stay host-side in the git credential store. See ADR-0006.
+   */
+  readonly push: (input: {
+    readonly repoPath: string;
+    readonly branch: string;
+  }) => Effect.Effect<void, GitError>;
 };
 
 /** The terminal outcomes the kernel pages the operator about. Resumed sessions never notify. */
