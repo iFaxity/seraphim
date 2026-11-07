@@ -1,5 +1,4 @@
-import { Effect } from 'effect';
-import { z } from 'zod';
+import { Effect, Layer, Schema } from 'effect';
 
 import { TurnRuntimeError } from '../../lib/errors.ts';
 import {
@@ -8,6 +7,7 @@ import {
   type AgentRuntime,
   type TurnResult,
 } from '../core/contracts.ts';
+import { AgentRuntimeService, SandboxService } from '../core/services.ts';
 
 /**
  * The real pi adapter behind the `AgentRuntime` contract: turns run inside the project's
@@ -38,45 +38,36 @@ type OmpContent = {
 
 /**
  * The one omp event the transcript consumes: `message_end` carries a complete message;
- * the streaming `message_update` events are progress noise. zod guards the untrusted
- * child-process edge — format drift degrades to verbatim lines, never a crash. Absent
- * keys normalize to null here, at the edge, so nothing downstream sees undefined.
+ * the streaming `message_update` events are progress noise. Effect Schema guards the
+ * untrusted child-process edge — format drift degrades to verbatim lines, never a crash.
+ * Absent keys normalize to null at the mapping edge, so nothing downstream sees
+ * undefined.
  */
-const OmpMessageEndSchema = z.object({
-  type: z.literal('message_end'),
-  message: z
-    .object({
-      role: z.string(),
-      content: z.array(
-        z
-          .object({
-            type: z.string(),
-            text: z.string().nullish(),
-            thinking: z.string().nullish(),
-          })
-          .transform(({ type, text, thinking }) => ({
-            type,
-            text: text ?? null,
-            thinking: thinking ?? null,
-          })),
-      ),
-    })
-    .transform(({ role, content }) => ({ role, content })),
+const OmpContentSchema = Schema.Struct({
+  type: Schema.String,
+  text: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  thinking: Schema.optionalKey(Schema.NullOr(Schema.String)),
+});
+
+const OmpMessageEndSchema = Schema.Struct({
+  type: Schema.Literal('message_end'),
+  message: Schema.Struct({
+    role: Schema.String,
+    content: Schema.Array(OmpContentSchema),
+  }),
 });
 
 /** The turn-end event, where headless omp reports why the turn stopped. */
-const OmpTurnEndSchema = z.object({
-  type: z.literal('turn_end'),
-  message: z
-    .object({
-      stopReason: z.string(),
-      errorMessage: z.string().nullish(),
-    })
-    .transform(({ stopReason, errorMessage }) => ({
-      stopReason,
-      errorMessage: errorMessage ?? null,
-    })),
+const OmpTurnEndSchema = Schema.Struct({
+  type: Schema.Literal('turn_end'),
+  message: Schema.Struct({
+    stopReason: Schema.String,
+    errorMessage: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  }),
 });
+
+const decodeMessageEnd = Schema.decodeUnknownResult(OmpMessageEndSchema);
+const decodeTurnEnd = Schema.decodeUnknownResult(OmpTurnEndSchema);
 
 /**
  * The turn-end shape the classifier consumes: stop reason plus the CLI's error text,
@@ -171,13 +162,22 @@ export function parseTranscript(stdout: string) {
         return line;
       }
 
-      const message = OmpMessageEndSchema.safeParse(parsed);
+      const decoded = decodeMessageEnd(parsed);
 
-      if (!message.success) {
+      if (decoded._tag !== 'Success') {
         return line;
       }
 
-      return renderMessage(message.data.message.role, message.data.message.content);
+      const message = decoded.success.message;
+
+      return renderMessage(
+        message.role,
+        message.content.map((part) => ({
+          type: part.type,
+          text: part.text ?? null,
+          thinking: part.thinking ?? null,
+        })),
+      );
     })
     .filter((chunk) => chunk !== '')
     .join('\n\n');
@@ -191,9 +191,12 @@ function collectTurnEnds(rawStdout: string) {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
-    .map((line) => OmpTurnEndSchema.safeParse(safeJson(line)))
-    .filter((parsed) => parsed.success)
-    .map((parsed) => parsed.data.message);
+    .map((line) => decodeTurnEnd(safeJson(line)))
+    .filter((decoded) => decoded._tag === 'Success')
+    .map((decoded) => ({
+      stopReason: decoded.success.message.stopReason,
+      errorMessage: decoded.success.message.errorMessage ?? null,
+    }));
 }
 
 /**
@@ -281,4 +284,19 @@ export function piRuntime(input: {
         return toTurnResult(executed);
       }).pipe(Effect.mapError(() => new TurnRuntimeError())),
   };
+}
+
+/**
+ * The sandbox-provided form of the pi runtime: reads the `SandboxService` from context and
+ * wires its exec into the adapter, so the kernel can `Layer.provide` the sandbox
+ * implementation once instead of threading exec through every caller. The wall-clock
+ * budget stays an explicit argument — a silent default would be a hidden budget.
+ */
+export function runtimeLayer(
+  maxTimeMs: number,
+): Layer.Layer<AgentRuntimeService, never, SandboxService> {
+  return Layer.effect(
+    AgentRuntimeService,
+    Effect.map(SandboxService, (sandbox) => piRuntime({ maxTimeMs, exec: sandbox.exec })),
+  );
 }

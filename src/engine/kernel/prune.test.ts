@@ -9,7 +9,7 @@ import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
 import { GitError } from '../../lib/errors.ts';
 import { fakeGit, type FakeGit } from '../fakes/git.ts';
-import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
+import { type DockerRunner, imageTagFor } from '../sandboxes/docker-sandbox.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 let root: string;
@@ -78,13 +78,13 @@ async function seedWorktree(repo: string, name: string) {
 
 function dockerListing(tags: readonly string[]): DockerRunner {
   return {
-    run: async (args) => {
+    run: (args) => {
       if (args[0] == 'images') {
-        return { exitCode: 0, stdout: tags.join('\n'), stderr: '' };
+        return Effect.succeed({ exitCode: 0, stdout: tags.join('\n'), stderr: '' });
       }
 
       // `image rm` — record-through: prune calls it once per planned image.
-      return { exitCode: 0, stdout: args.join(' '), stderr: '' };
+      return Effect.succeed({ exitCode: 0, stdout: args.join(' '), stderr: '' });
     },
   };
 }
@@ -160,8 +160,7 @@ describe('planPrune', () => {
     await writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n');
     await registerProject(root, fakeGit(), 'https://example.invalid/acme/demo.git', 'demo');
 
-    const { imageTagFor } = await import('../sandboxes/docker-sandbox.ts');
-    const tag = await imageTagFor(projectDir);
+    const tag = await Effect.runPromise(imageTagFor(projectDir));
     const planned = await planPrune(envWith(fakeGit(), dockerListing([tag])));
 
     expect(planned.success).toBe(true);
@@ -256,10 +255,12 @@ describe('runPrune', () => {
 describe('runPrune image failures', () => {
   it('collects a failed untag as a per-item failure instead of aborting', async () => {
     const docker: DockerRunner = {
-      run: async (args) =>
-        args[0] == 'images'
-          ? { exitCode: 0, stdout: 'seraphim/gone:00112233', stderr: '' }
-          : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
+      run: (args) =>
+        Effect.succeed(
+          args[0] == 'images'
+            ? { exitCode: 0, stdout: 'seraphim/gone:00112233', stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
+        ),
     };
     const planned = await planPrune(envWith(fakeGit(), docker));
     const done = await runPrune(
@@ -278,7 +279,12 @@ describe('runPrune image failures', () => {
 
   it('prunes nothing when docker listing itself fails', async () => {
     const docker: DockerRunner = {
-      run: async () => ({ exitCode: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' }),
+      run: () =>
+        Effect.succeed({
+          exitCode: 1,
+          stdout: '',
+          stderr: 'Cannot connect to the Docker daemon',
+        }),
     };
     const planned = await planPrune(envWith(fakeGit(), docker));
 

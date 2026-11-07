@@ -7,7 +7,7 @@ import { Data } from 'effect';
  * in the error channel, so the compiler — not a string — is what callers branch on.
  *
  * Seeded only with the names the epic already names; layers 2–6 extend this module as each
- * contract migrates. No consumer wiring yet (that is #72).
+ * contract migrates. No consumer wiring yet — the adapter sweep adds the Layers.
  */
 
 // — Adapter-level errors (forges, runtimes, sandboxes) —
@@ -44,3 +44,15 @@ export class TurnRuntimeError extends Data.TaggedError('TurnRuntimeError') {}
  * git's diagnostics ride in `message` so logging and test assertions keep the detail.
  */
 export class GitError extends Data.TaggedError('GitError')<{ message: string }> {}
+
+/**
+ * A forge-REST-client failure carrying its structural discriminant: the HTTP `status` it
+ * came from, or `null` when no HTTP exchange produced it (transport error, unreadable
+ * body, non-JSON content, schema rejection). Consumers branch on this field, never on
+ * message text — the message is a diagnostic, not a discriminator.
+ */
+export class ApiError extends Data.TaggedError('ApiError')<{
+  readonly status: number | null;
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}

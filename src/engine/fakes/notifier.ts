@@ -1,6 +1,7 @@
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 
 import { type Notification, type Notifier } from '../core/contracts.ts';
+import { NotifierService } from '../core/services.ts';
 
 /**
  * Hand-written fake for the notifier contract (ADR-0002 keeps fakes engine-side): records the
@@ -24,3 +25,9 @@ export function fakeNotifier(): FakeNotifier {
     },
   } satisfies FakeNotifier;
 }
+
+/** Test wiring: a fresh recording fake per layer build, so cases never share the events array. */
+export const FakeNotifier = {
+  layer: (): Layer.Layer<NotifierService> =>
+    Layer.effect(NotifierService, Effect.sync(fakeNotifier)),
+};

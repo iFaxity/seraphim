@@ -1,6 +1,7 @@
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 
 import { type Sandbox } from '../core/contracts.ts';
+import { SandboxService } from '../core/services.ts';
 
 /**
  * Hand-written fake for the sandbox contract (ADR-0002 keeps fakes engine-side): records the
@@ -23,3 +24,8 @@ export function fakeSandbox() {
     },
   } satisfies FakeSandbox;
 }
+
+/** Test wiring: a fresh recording fake per layer build, so cases never share the recordings. */
+export const FakeSandbox = {
+  layer: (): Layer.Layer<SandboxService> => Layer.effect(SandboxService, Effect.sync(fakeSandbox)),
+};

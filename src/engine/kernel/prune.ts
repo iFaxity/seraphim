@@ -10,6 +10,10 @@ import { failure, success, type Result } from '../../lib/result.ts';
 import { type Git } from '../core/contracts.ts';
 import { imageTagFor, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 
+// The adapter contracts this module drives are now Effect values; prune stays promise-shaped
+// until the kernel sweep converts this module, so it re-flattens with runPromise at these
+// six sites — the one place the Effect/Result divide crosses inside the kernel.
+
 /**
  * Manual garbage collection (story 26): list worktrees, session receipts, and stale sandbox
  * images eligible for cleanup, then delete only what the operator confirmed. Nothing here
@@ -148,7 +152,7 @@ async function pruneOrphan(env: PruneEnv, path: string, failed: string[]) {
 /** Untags every stale image; docker's exit code is the failure record. */
 async function pruneImages(docker: DockerRunner, images: readonly PruneImage[], failed: string[]) {
   for (const image of images) {
-    const untag = await docker.run(['image', 'rm', image.tag]);
+    const untag = await Effect.runPromise(docker.run(['image', 'rm', image.tag]));
 
     if (untag.exitCode != 0) {
       failed.push(`${image.tag}: ${untag.stderr || untag.stdout}`);
@@ -243,7 +247,9 @@ async function listOrphanWorktrees(worktreesRoot: string, isOrphan: (path: strin
  * absent yields an empty image list — image pruning is optional; worktree/session prune is not.
  */
 async function staleImages(workspaceRoot: string, docker: DockerRunner) {
-  const listed = await docker.run(['images', '--format', '{{.Repository}}:{{.Tag}}', 'seraphim/*']);
+  const listed = await Effect.runPromise(
+    docker.run(['images', '--format', '{{.Repository}}:{{.Tag}}', 'seraphim/*']),
+  );
 
   if (listed.exitCode != 0) {
     return [];
@@ -259,7 +265,7 @@ async function staleImages(workspaceRoot: string, docker: DockerRunner) {
   const hashlessRepos = new Set<string>();
 
   for (const project of projects.data.projects) {
-    const tag = await imageTagFor(join(workspaceRoot, 'projects', project.repo));
+    const tag = await Effect.runPromise(imageTagFor(join(workspaceRoot, 'projects', project.repo)));
 
     // A project without a Dockerfile has no current tag, so all of its old tags are stale.
     if (tag) {

@@ -4,7 +4,7 @@ import { it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { describe, expect } from 'vite-plus/test';
 
-import { expectOk, gitAdapter, type GitRun, type GitRunner } from './git.ts';
+import { gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
 import { expectFailure } from '../../../test/failure.ts';
 import { GitError } from '../../lib/errors.ts';
@@ -18,11 +18,12 @@ function fakeRunner(script: (args: readonly string[]) => GitRun): GitRunner & {
 
   return {
     invocations,
-    run: async (args) => {
-      invocations.push([...args]);
+    run: (args) =>
+      Effect.sync(() => {
+        invocations.push([...args]);
 
-      return script(args);
-    },
+        return script(args);
+      }),
   };
 }
 
@@ -39,11 +40,12 @@ describe('gitAdapter.push', () => {
 
     return {
       invocations,
-      run: async (args, cwd) => {
-        invocations.push({ args: [...args], cwd });
+      run: (args, cwd) =>
+        Effect.sync(() => {
+          invocations.push({ args: [...args], cwd });
 
-        return script();
-      },
+          return script();
+        }),
     };
   }
 
@@ -233,14 +235,6 @@ describe('gitAdapter.defaultBranch', () => {
       expect(error.message).toMatch(/default branch lookup failed.*not a symbolic ref/s);
     }),
   );
-});
-
-describe('expectOk', () => {
-  it('passes successful runs through and throws labeled failures', () => {
-    expect(expectOk('clone failed', run(0, 'ok'))).toEqual(run(0, 'ok'));
-    expect(() => expectOk('clone failed', run(1, '', 'boom'))).toThrow('clone failed: boom');
-    expect(() => expectOk('clone failed', run(3))).toThrow('clone failed: git exited 3');
-  });
 });
 
 describe('gitAdapter.removeWorktree', () => {

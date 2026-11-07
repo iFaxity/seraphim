@@ -1,20 +1,32 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Effect, Layer, ManagedRuntime } from 'effect';
 
 import { engine } from './engine/core/engine.ts';
 import { type KernelEnvironment } from './engine/core/env.ts';
+import {
+  AgentRuntimeService,
+  GitService,
+  NotifierService,
+  SandboxService,
+  TrackerService,
+} from './engine/core/services.ts';
 import { fakeKernelEnvironment } from './engine/fakes/env.ts';
-import { githubApi } from './engine/forges/github-api.ts';
-import { ghTracker } from './engine/forges/github-tracker.ts';
+import { apiLayer, GithubToken } from './engine/forges/github-api.ts';
+import { trackerLayer } from './engine/forges/github-tracker.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
 import { loadKernelConfig } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
-import { gitAdapter, processGit } from './engine/kernel/git.ts';
+import { gitCliLayer, gitLayer } from './engine/kernel/git.ts';
 import { poolRoot } from './engine/kernel/skills.ts';
-import { nullNotifier, webhookNotifier } from './engine/notifiers/webhook.ts';
-import { piRuntime } from './engine/runtimes/pi.ts';
-import { cliDocker, dockerSandbox } from './engine/sandboxes/docker-sandbox.ts';
+import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.ts';
+import { runtimeLayer } from './engine/runtimes/pi.ts';
+import {
+  DockerRunnerService,
+  dockerCliLayer,
+  dockerSandboxLayer,
+} from './engine/sandboxes/docker-sandbox.ts';
 import { readEnvFile } from './lib/env-file.ts';
 import { fileExistsSync } from './lib/fs.ts';
 import { failure, success, type Result } from './lib/result.ts';
@@ -48,43 +60,77 @@ export async function main(argv: readonly string[], env?: KernelEnvironment) {
 }
 
 /**
- * Composition root: builds the real `KernelEnvironment` from the engine's contracts — the Docker sandbox,
- * the git CLI (including the host-side forge push), the GitHub tracker, and the pi
- * agent runtime are all real adapters. The
- * runtime launches turns through the sandbox's own exec: the model CLI, its tool calls,
- * and its credentials all run inside the project image, with the per-turn wall-clock
- * stop derived here (per-session flow caps stay kernel-gated in `runSession`). Tracker
- * auth: `GH_TOKEN` from the seraphim-home `.env`.
+ * Composition root: resolves the adapter Layer stack into the kernel's env object — the
+ * docker sandbox, the git CLI (including the host-side forge push), the GitHub tracker,
+ * and the pi agent runtime — every adapter reachable as a Layer per the adapter sweep; the
+ * env funnel itself survives until the kernel sweep. The runtime launches turns through the
+ * sandbox's own exec: the model CLI, its tool calls, and its credentials run inside the
+ * project image, with the per-turn wall-clock stop derived here (per-session flow caps
+ * stay kernel-gated in `runSession`). Tracker auth: `GH_TOKEN` from the seraphim-home `.env`.
  */
+const TURN_WALL_CLOCK_MS = 30 * 60_000;
+
+/** One adapter Layer stack per CLI invocation: built, resolved to services, disposed. */
 async function composeKernelEnvironment() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
   const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
-  const tracker = ghTracker(githubApi(token));
-  const sandbox = dockerSandbox({ projectsRoot, docker: cliDocker });
   const config = await loadKernelConfig(home);
 
   if (!config.success) {
     return config;
   }
 
-  // One channel, configured once in the global kernel config. No channel configured is a
-  // silent notifier — the kernel still fires pages, they go nowhere.
-  const notifier = config.data.notify ? webhookNotifier(config.data.notify) : nullNotifier();
-
-  return success(
-    fakeKernelEnvironment({
-      tracker,
-      sandbox,
-      notifier,
-      git: gitAdapter(processGit),
-      runtime: piRuntime({ maxTimeMs: 30 * 60_000, exec: sandbox.exec }),
-      workspaceRoot: home,
-      sessionsRoot: join(home, 'sessions'),
-      poolRoot: resolvePoolRoot(home),
-      docker: cliDocker,
-    }).env,
+  // Base deps: the forge token rides the `.env` read; one channel, configured once in the
+  // global kernel config — no channel configured is a silent notifier (pages go nowhere).
+  const baseLayer = Layer.mergeAll(
+    apiLayer,
+    Layer.succeed(GithubToken, token),
+    dockerCliLayer,
+    gitCliLayer,
+    Layer.succeed(NotifyChannelService, config.data.notify ?? null),
   );
+
+  const withRuntime = Layer.provideMerge(
+    runtimeLayer(TURN_WALL_CLOCK_MS),
+    dockerSandboxLayer(projectsRoot),
+  );
+  // provideMerge keeps the dependency services (DockerRunner among them — prune's env
+  // field needs the runner itself, not only what sandbox built on top of it).
+  const full = Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
+    Layer.provideMerge(baseLayer),
+  );
+
+  const managed = ManagedRuntime.make(full);
+
+  try {
+    return await managed.runPromise(
+      Effect.gen(function* () {
+        const tracker = yield* TrackerService;
+        const sandbox = yield* SandboxService;
+        const runtime = yield* AgentRuntimeService;
+        const git = yield* GitService;
+        const notifier = yield* NotifierService;
+        const docker = yield* DockerRunnerService;
+
+        return success(
+          fakeKernelEnvironment({
+            tracker,
+            sandbox,
+            git,
+            notifier,
+            runtime,
+            workspaceRoot: home,
+            sessionsRoot: join(home, 'sessions'),
+            poolRoot: resolvePoolRoot(home),
+            docker,
+          }).env,
+        );
+      }),
+    );
+  } finally {
+    await managed.dispose();
+  }
 }
 
 /**

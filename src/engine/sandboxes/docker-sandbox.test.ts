@@ -20,10 +20,10 @@ export function fakeDockerRunner(
 ) {
   const invocations: string[][] = [];
 
-  async function run(args: readonly string[]) {
+  function run(args: readonly string[]) {
     invocations.push([...args]);
 
-    return script(args);
+    return Effect.succeed(script(args));
   }
 
   return { run, invocations } satisfies DockerRunner & { invocations: string[][] };
@@ -33,7 +33,7 @@ export function fakeDockerRunner(
 function countingDocker() {
   const builds: string[][] = [];
 
-  async function run(args: readonly string[]) {
+  function run(args: readonly string[]) {
     if (args[0] === 'buildx' && args[1] === 'build') {
       builds.push([...args]);
     }
@@ -247,7 +247,7 @@ describe('dockerSandbox.exec', () => {
 
 // Integration tier — runs only when a docker daemon answers: exec a trivial command, prove
 // the second ensureImage is a cache hit, a lockfile change rebuilds, and the host stays clean.
-const dockerReady = (await cliDocker.run(['info'])).exitCode === 0;
+const dockerReady = (await Effect.runPromise(cliDocker.run(['info']))).exitCode === 0;
 
 describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout: 30_000 }, () => {
   let root: string;
@@ -313,7 +313,7 @@ describe('imageTagFor', () => {
     Effect.gen(function* () {
       const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
 
-      expect(yield* Effect.promise(() => imageTagFor(dir))).toBe('');
+      expect(yield* imageTagFor(dir)).toBe('');
     }),
   );
 });

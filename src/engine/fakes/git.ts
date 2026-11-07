@@ -1,6 +1,7 @@
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 
 import { type Git } from '../core/contracts.ts';
+import { GitService } from '../core/services.ts';
 
 /**
  * Hand-written fake for the git contract (ADR-0002 keeps fakes engine-side): records clones,
@@ -62,3 +63,12 @@ export function fakeGit(defaultBranch = 'main'): FakeGit {
     },
   } satisfies FakeGit;
 }
+
+/** Test wiring: a fresh recording fake per layer build, so cases never share the recordings. */
+export const FakeGit = {
+  layer: (defaultBranch = 'main'): Layer.Layer<GitService> =>
+    Layer.effect(
+      GitService,
+      Effect.sync(() => fakeGit(defaultBranch)),
+    ),
+};

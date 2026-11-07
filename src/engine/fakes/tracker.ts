@@ -1,6 +1,7 @@
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 
 import { type Issue, type Tracker } from '../core/contracts.ts';
+import { TrackerService } from '../core/services.ts';
 
 /**
  * Hand-written fake for the tracker contract (ADR-0002 keeps fakes engine-side): records the
@@ -17,11 +18,11 @@ export type FakeTracker = Tracker & {
   readonly seed: (ready: readonly Issue[]) => void;
 };
 
-export function fakeTracker() {
+export function fakeTracker(options?: { readonly seed?: readonly Issue[] }) {
   const claimed: string[] = [];
   const prsOpened: string[] = [];
   const listed: string[] = [];
-  let ready: readonly Issue[] = [];
+  let ready: readonly Issue[] = options?.seed ?? [];
 
   return {
     calls: { claimed, prsOpened, listed },
@@ -55,3 +56,12 @@ export function fakeTracker() {
       }),
   } satisfies FakeTracker;
 }
+
+/** Test wiring: a fresh recording fake per layer build, so cases never share the recordings. */
+export const FakeTracker = {
+  layer: (seed: readonly Issue[] = []): Layer.Layer<TrackerService> =>
+    Layer.effect(
+      TrackerService,
+      Effect.sync(() => fakeTracker({ seed })),
+    ),
+};

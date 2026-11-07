@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { Effect } from 'effect';
+import { Context, Effect, Layer } from 'effect';
 
 import { GitError } from '../../lib/errors.ts';
-import { dirExists } from '../../lib/fs.ts';
+import { dirExistsE } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
+import { GitService } from '../core/services.ts';
 
 /** Per-stream output cap: clone/ls-remote output is diagnostics only, never retained wholesale. */
 const MAX_STREAM_BYTES = 10 * 1024 * 1024;
@@ -23,31 +24,39 @@ export type GitRun = {
 
 /** The `git` CLI surface the adapter drives. Injected so tests script git's behavior. */
 export type GitRunner = {
-  readonly run: (args: readonly string[], cwd?: string) => Promise<GitRun>;
+  readonly run: (args: readonly string[], cwd?: string) => Effect.Effect<GitRun>;
 };
 
-/** The production runner: one `git` CLI invocation per `run` call, full argv passthrough. */
-export const processGit: GitRunner = {
-  run: (args, cwd) => {
-    const child = spawn('git', [...args], { stdio: ['ignore', 'pipe', 'pipe'], cwd });
-    const stdout = boundedCapture();
-    const stderr = boundedCapture();
+/** The real `git` CLI runner — the production half of `gitCliLayer`. */
+const processGit: GitRunner = {
+  run: (args, cwd) =>
+    Effect.gen(function* () {
+      const child = spawn('git', [...args], { stdio: ['ignore', 'pipe', 'pipe'], cwd });
+      const stdout = boundedCapture();
+      const stderr = boundedCapture();
 
-    stdout.stream(child.stdout);
-    stderr.stream(child.stderr);
+      stdout.stream(child.stdout);
+      stderr.stream(child.stderr);
 
-    const { promise, resolve } = Promise.withResolvers<GitRun>();
+      const { promise, resolve } = Promise.withResolvers<GitRun>();
 
-    child.on('close', (code) => {
-      resolve({
-        exitCode: code ?? -1,
-        stdout: stdout.chunks.join(''),
-        stderr: stderr.chunks.join(''),
+      // 'error' fires only when the binary never spawned (ENOENT) — close never will, so
+      // the two are exclusive and each resolves the same promise. Resolving an exitCode
+      // of -1 with the spawn message routes an unspawnable git into the normal GitError
+      // path instead of leaking an unhandled rejection.
+      child.on('error', (error) => resolve({ exitCode: -1, stdout: '', stderr: error.message }));
+      child.on('close', (code) => {
+        resolve({
+          exitCode: code ?? -1,
+          stdout: stdout.chunks.join(''),
+          stderr: stderr.chunks.join(''),
+        });
       });
-    });
 
-    return promise;
-  },
+      const run = yield* Effect.promise(() => promise);
+
+      return run;
+    }),
 };
 
 /** Collects one stdout/stderr stream into strings, dropping bytes past the retention cap. */
@@ -68,104 +77,95 @@ function boundedCapture() {
   };
 }
 
-function gitFailure(label: string, run: GitRun) {
-  const detail = run.stderr.trim() || run.stdout.trim() || `git exited ${run.exitCode}`;
-
-  return new Error(`${label}: ${detail}`);
-}
-
-export function expectOk(label: string, run: GitRun) {
-  if (run.exitCode != 0) {
-    throw gitFailure(label, run);
+/** Passes a successful run through; a nonzero one fails with the labeled diagnostics. */
+function checkedOr(label: string, run: GitRun): Effect.Effect<GitRun, GitError> {
+  if (run.exitCode == 0) {
+    return Effect.succeed(run);
   }
 
-  return run;
+  const detail = run.stderr.trim() || run.stdout.trim() || `git exited ${run.exitCode}`;
+
+  return Effect.fail(new GitError({ message: `${label}: ${detail}` }));
 }
 
 /** Removes one worktree dir and its branch ref; a missing dir is nothing to remove. */
-async function removeWorktree(
+function removeWorktree(
   runner: GitRunner,
   input: { readonly repoPath: string; readonly path: string },
-) {
-  // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-  const worktreeExists = await dirExists(input.path);
+): Effect.Effect<void, GitError> {
+  return Effect.gen(function* () {
+    // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
+    if (!(yield* dirExistsE(input.path))) {
+      return;
+    }
 
-  if (!worktreeExists) {
-    return;
-  }
-
-  const run = await runner.run(['worktree', 'remove', '--force', input.path], input.repoPath);
-  expectOk('worktree removal failed', run);
+    const run = yield* runner.run(['worktree', 'remove', '--force', input.path], input.repoPath);
+    yield* checkedOr('worktree removal failed', run);
+  });
 }
 
 /** Force-deletes one branch; an already-deleted branch is nothing to delete (idempotent prune). */
-async function deleteBranch(
+function deleteBranch(
   runner: GitRunner,
   input: { readonly repoPath: string; readonly branch: string },
-) {
-  const listing = await runner.run(['branch', '--list', input.branch], input.repoPath);
-  expectOk('branch listing failed', listing);
+): Effect.Effect<void, GitError> {
+  return Effect.gen(function* () {
+    const listing = yield* runner.run(['branch', '--list', input.branch], input.repoPath);
+    yield* checkedOr('branch listing failed', listing);
 
-  // An already-deleted branch is nothing to delete — prune stays idempotent on a rerun.
-  if (listing.stdout.trim() === '') {
-    return;
-  }
+    // An already-deleted branch is nothing to delete — prune stays idempotent on a rerun.
+    if (listing.stdout.trim() === '') {
+      return;
+    }
 
-  const run = await runner.run(['branch', '-D', input.branch], input.repoPath);
-  expectOk('branch deletion failed', run);
+    const run = yield* runner.run(['branch', '-D', input.branch], input.repoPath);
+    yield* checkedOr('branch deletion failed', run);
+  });
 }
 
 /**
  * Real `Git` adapter. Every operation maps one git invocation to `void` (the receipt-visible
  * state is the filesystem, not git's stdout) except `defaultBranch`, which reads `origin/HEAD`.
  */
-function effectOfGit<T>(body: () => Promise<T>) {
-  // Interim seam: the adapter logic stays promise-based; the contract's Effect surface wraps
-  // it at the return edge, mapping any throw onto the contract's error channel.
-  return Effect.tryPromise({
-    try: body,
-    catch: (cause) =>
-      new GitError({
-        message: cause instanceof Error ? cause.message : String(cause),
-      }),
-  });
-}
-
 export function gitAdapter(runner: GitRunner) {
   return {
-    defaultBranch: (repoPath) =>
-      effectOfGit(async () => {
-        // `--short` yields `origin/<branch>`; the adapter contract is the branch name (the fake
-        // returns 'main' and createWorktree re-prefixes origin/), so strip the remote here.
-        const run = await runner.run(
+    defaultBranch: (repoPath: string) =>
+      Effect.gen(function* () {
+        const run = yield* runner.run(
           ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
           repoPath,
         );
-        expectOk('default branch lookup failed', run);
+        yield* checkedOr('default branch lookup failed', run);
 
+        // `--short` yields `origin/<branch>`; the adapter contract is the branch name (the fake
+        // returns 'main' and createWorktree re-prefixes origin/), so strip the remote here.
         return run.stdout.trim().replace(/^origin\//, '');
       }),
-    cloneIfMissing: (repoPath, url) =>
-      effectOfGit(async () => {
+    cloneIfMissing: (repoPath: string, url: string) =>
+      Effect.gen(function* () {
         // `rev-parse -C <path>` (no cwd): passing the target as cwd makes a missing directory
-        // a spawn ENOENT with `path: 'git'` — the binary's name, not the culprit — which also
-        // crashes on an unhandled child 'error' event instead of a clean failure.
-        const present = await runner.run(['rev-parse', '-C', repoPath, '--is-inside-work-tree']);
+        // a spawn ENOENT with `path: 'git'` — the binary's name, not the culprit.
+        const present = yield* runner.run(['rev-parse', '-C', repoPath, '--is-inside-work-tree']);
 
         if (present.exitCode == 0) {
           return;
         }
 
-        const clone = await runner.run(['clone', url, repoPath]);
-        expectOk('clone failed', clone);
+        const clone = yield* runner.run(['clone', url, repoPath]);
+        yield* checkedOr('clone failed', clone);
       }),
-    pull: (repoPath) =>
-      effectOfGit(async () => {
-        const run = await runner.run(['pull', '--ff-only'], repoPath);
-        expectOk('pull failed', run);
+    pull: (repoPath: string) =>
+      Effect.gen(function* () {
+        const run = yield* runner.run(['pull', '--ff-only'], repoPath);
+        yield* checkedOr('pull failed', run);
       }),
-    createWorktree: (input) =>
-      effectOfGit(async () => {
+    createWorktree: (input: {
+      readonly repoPath: string;
+      readonly branch: string;
+      readonly path: string;
+      readonly baseBranch: string;
+    }) =>
+      Effect.gen(function* () {
         const args = [
           'worktree',
           'add',
@@ -174,23 +174,42 @@ export function gitAdapter(runner: GitRunner) {
           input.path,
           `origin/${input.baseBranch}`,
         ];
-        const run = await runner.run(args, input.repoPath);
-        expectOk('worktree creation failed', run);
+        const run = yield* runner.run(args, input.repoPath);
+        yield* checkedOr('worktree creation failed', run);
       }),
-    removeWorktree: (input) => effectOfGit(() => removeWorktree(runner, input)),
-    deleteBranch: (input) => effectOfGit(() => deleteBranch(runner, input)),
-    probeRemote: (url) =>
-      effectOfGit(async () => {
-        const run = await runner.run(['ls-remote', '--heads', url]);
-        expectOk('remote not reachable', run);
+    removeWorktree: (input: { readonly repoPath: string; readonly path: string }) =>
+      removeWorktree(runner, input),
+    deleteBranch: (input: { readonly repoPath: string; readonly branch: string }) =>
+      deleteBranch(runner, input),
+    probeRemote: (url: string) =>
+      Effect.gen(function* () {
+        const run = yield* runner.run(['ls-remote', '--heads', url]);
+        yield* checkedOr('remote not reachable', run);
       }),
     // Branch publication (the flow-facing forge push binds here): a host-side spawn from the
     // session clone, so the container never sees the push credentials. Same runner, same
     // failure shape as every other member — spawn/stderr diagnostics ride the GitError.
-    push: (input) =>
-      effectOfGit(async () => {
-        const run = await runner.run(['push', 'origin', input.branch], input.repoPath);
-        expectOk('push failed', run);
+    push: (input: { readonly repoPath: string; readonly branch: string }) =>
+      Effect.gen(function* () {
+        const run = yield* runner.run(['push', 'origin', input.branch], input.repoPath);
+        yield* checkedOr('push failed', run);
       }),
   } satisfies Git;
 }
+
+/** The internal runner key — the adapter owns it; the composition root provides the CLI impl. */
+class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
+  'seraphim/kernel/GitRunner',
+) {}
+
+/** Production wiring: the real `git` CLI subprocess runner. */
+export const gitCliLayer: Layer.Layer<GitRunnerService> = Layer.succeed(
+  GitRunnerService,
+  processGit,
+);
+
+/** The `Git` adapter wired over whatever runner the context provides. */
+export const gitLayer: Layer.Layer<GitService, never, GitRunnerService> = Layer.effect(
+  GitService,
+  GitRunnerService.use((runner) => Effect.succeed(gitAdapter(runner))),
+);

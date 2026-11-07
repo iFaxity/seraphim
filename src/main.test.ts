@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Effect } from 'effect';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
 
 import { engine } from './engine/core/engine.ts';
@@ -274,14 +275,16 @@ describe('prune rendering', () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
     const env = envFor();
     env.docker = {
-      run: async (args) =>
-        args[0] == 'images'
-          ? {
-              exitCode: 0,
-              stdout: ['seraphim/live:aaa', 'seraphim/live:bbb', 'seraphim/cache:ccc'].join('\n'),
-              stderr: '',
-            }
-          : { exitCode: 0, stdout: args.join(' '), stderr: '' },
+      run: (args) =>
+        Effect.succeed(
+          args[0] == 'images'
+            ? {
+                exitCode: 0,
+                stdout: ['seraphim/live:aaa', 'seraphim/live:bbb', 'seraphim/cache:ccc'].join('\n'),
+                stderr: '',
+              }
+            : { exitCode: 0, stdout: args.join(' '), stderr: '' },
+        ),
     };
 
     const result = await main(['prune'], env);
