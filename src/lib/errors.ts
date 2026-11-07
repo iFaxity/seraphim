@@ -11,16 +11,36 @@ import { Data } from 'effect';
  */
 
 // — Adapter-level errors (forges, runtimes, sandboxes) —
+// `cause` rides the original failure (spawn diagnostics, HTTP detail, claim conflict) so
+// the tagged name is the typed discriminator while the raw message stays observable.
 
-export class AuthError extends Data.TaggedError('AuthError') {}
-export class RateLimitError extends Data.TaggedError('RateLimitError') {}
-export class UnavailableError extends Data.TaggedError('UnavailableError') {}
+export class AuthError extends Data.TaggedError('AuthError')<{ readonly cause?: unknown }> {}
+export class RateLimitError extends Data.TaggedError('RateLimitError')<{
+  readonly cause?: unknown;
+}> {}
+export class UnavailableError extends Data.TaggedError('UnavailableError')<{
+  readonly cause?: unknown;
+}> {}
 
 // — Kernel errors —
 
-export class ClaimConflictError extends Data.TaggedError('ClaimConflictError') {}
+/**
+ * A claim refused because the issue already carries another session's claim. `message`
+ * names the refused issue — the kernel logs the refusal, and the detail is the message,
+ * not a cause.
+ */
+export class ClaimConflictError extends Data.TaggedError('ClaimConflictError')<{
+  message: string;
+}> {}
 export class BudgetBreachedError extends Data.TaggedError('BudgetBreachedError') {}
 export class LockHeldError extends Data.TaggedError('LockHeldError') {}
 export class LockCorruptError extends Data.TaggedError('LockCorruptError') {}
 export class ReceiptWriteError extends Data.TaggedError('ReceiptWriteError') {}
 export class TurnRuntimeError extends Data.TaggedError('TurnRuntimeError') {}
+
+/**
+ * One spawned git mechanic failing (clone, pull, worktree, branch, reachable-remote ping).
+ * Kernel-mechanics failure, not adapter availability — the guarded operation label and
+ * git's diagnostics ride in `message` so logging and test assertions keep the detail.
+ */
+export class GitError extends Data.TaggedError('GitError')<{ message: string }> {}

@@ -1,3 +1,6 @@
+import { Effect } from 'effect';
+
+import { UnavailableError } from '../../lib/errors.ts';
 import { type Notifier } from '../core/contracts.ts';
 import { type NotifyChannel } from '../kernel/config.ts';
 
@@ -15,27 +18,31 @@ export function webhookNotifier(
   const post = channel.post ?? fetch;
 
   return {
-    notify: async (notification) => {
-      const response = await post(notification.target ?? channel.url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${channel.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          event: notification.event,
-          repo: notification.repo,
-          issue: notification.issueNumber,
-          summary: notification.summary,
-        }),
-      });
+    notify: (notification) =>
+      Effect.tryPromise({
+        try: async () => {
+          const response = await post(notification.target ?? channel.url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${channel.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              event: notification.event,
+              repo: notification.repo,
+              issue: notification.issueNumber,
+              summary: notification.summary,
+            }),
+          });
 
-      // A non-2xx delivery is a logged failure, not a session failure — the caller (kernel)
-      // catches and logs it, keeping the receipt as the source of truth.
-      if (!response.ok) {
-        throw new Error(`notify webhook responded ${response.status}`);
-      }
-    },
+          // A non-2xx delivery is a logged failure, not a session failure — the caller (kernel)
+          // catches and logs it, keeping the receipt as the source of truth.
+          if (!response.ok) {
+            throw new Error(`notify webhook responded ${response.status}`);
+          }
+        },
+        catch: (error) => new UnavailableError({ cause: error }),
+      }),
   };
 }
 
@@ -44,5 +51,5 @@ export function webhookNotifier(
  * just go nowhere. One named adapter so the contract stays non-nullable on the environment.
  */
 export function nullNotifier(): Notifier {
-  return { notify: () => Promise.resolve() };
+  return { notify: () => Effect.void };
 }

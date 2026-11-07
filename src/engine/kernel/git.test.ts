@@ -1,9 +1,13 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Effect } from 'effect';
+import { describe, expect } from 'vite-plus/test';
 
 import { expectOk, gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
+import { GitError } from '../../lib/errors.ts';
+import { expectFailure } from '../../lib/failure.ts';
 import { mkdtemp } from 'node:fs/promises';
 
 /** Scripts git's behavior per invocation pattern — the same contract the docker adapter fakes. */
@@ -27,127 +31,164 @@ function run(exitCode: number, stdout = '', stderr = ''): GitRun {
 }
 
 describe('gitAdapter.probeRemote', () => {
-  it('passes a ls-remote ping and succeeds on exit 0', async () => {
-    const runner = fakeRunner(() => run(0, '', ''));
-    const git = gitAdapter(runner);
+  it.effect('passes a ls-remote ping and succeeds on exit 0', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner(() => run(0, '', ''));
+      const git = gitAdapter(runner);
 
-    await git.probeRemote('https://example.invalid/acme/widgets.git');
+      yield* git.probeRemote('https://example.invalid/acme/widgets.git');
 
-    expect(runner.invocations).toEqual([
-      ['ls-remote', '--heads', 'https://example.invalid/acme/widgets.git'],
-    ]);
-  });
+      expect(runner.invocations).toEqual([
+        ['ls-remote', '--heads', 'https://example.invalid/acme/widgets.git'],
+      ]);
+    }),
+  );
 
-  it('fails fast with git diagnostics on a unreachable remote', async () => {
-    const git = gitAdapter(
-      fakeRunner(() => run(128, '', 'fatal: unable to access: could not resolve host')),
-    );
+  it.effect('fails fast with git diagnostics on a unreachable remote', () =>
+    Effect.gen(function* () {
+      const git = gitAdapter(
+        fakeRunner(() => run(128, '', 'fatal: unable to access: could not resolve host')),
+      );
 
-    await expect(git.probeRemote('https://down.invalid/repo.git')).rejects.toThrow(
-      /remote not reachable.*could not resolve host/s,
-    );
-  });
+      const error = yield* Effect.promise(() =>
+        expectFailure(git.probeRemote('https://down.invalid/repo.git')),
+      );
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/remote not reachable.*could not resolve host/s);
+    }),
+  );
 });
 
 describe('gitAdapter.cloneIfMissing', () => {
-  it('clones when the target directory has no work tree', async () => {
-    const runner = fakeRunner((args) => (args[0] == 'rev-parse' ? run(128) : run(0)));
-    const git = gitAdapter(runner);
+  it.effect('clones when the target directory has no work tree', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner((args) => (args[0] == 'rev-parse' ? run(128) : run(0)));
+      const git = gitAdapter(runner);
 
-    await git.cloneIfMissing('/home/x/repos/widgets', 'https://example.invalid/widgets.git');
+      yield* git.cloneIfMissing('/home/x/repos/widgets', 'https://example.invalid/widgets.git');
 
-    expect(runner.invocations).toEqual([
-      ['rev-parse', '-C', '/home/x/repos/widgets', '--is-inside-work-tree'],
-      ['clone', 'https://example.invalid/widgets.git', '/home/x/repos/widgets'],
-    ]);
-  });
+      expect(runner.invocations).toEqual([
+        ['rev-parse', '-C', '/home/x/repos/widgets', '--is-inside-work-tree'],
+        ['clone', 'https://example.invalid/widgets.git', '/home/x/repos/widgets'],
+      ]);
+    }),
+  );
 
-  it('skips the clone when the target already has a work tree', async () => {
-    const runner = fakeRunner((args) => (args[0] == 'rev-parse' ? run(0, 'true\n') : run(1)));
-    const git = gitAdapter(runner);
+  it.effect('skips the clone when the target already has a work tree', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner((args) => (args[0] == 'rev-parse' ? run(0, 'true\n') : run(1)));
+      const git = gitAdapter(runner);
 
-    await git.cloneIfMissing('/home/x/repos/widgets', 'https://example.invalid/widgets.git');
+      yield* git.cloneIfMissing('/home/x/repos/widgets', 'https://example.invalid/widgets.git');
 
-    expect(runner.invocations).toEqual([
-      ['rev-parse', '-C', '/home/x/repos/widgets', '--is-inside-work-tree'],
-    ]);
-  });
+      expect(runner.invocations).toEqual([
+        ['rev-parse', '-C', '/home/x/repos/widgets', '--is-inside-work-tree'],
+      ]);
+    }),
+  );
 
-  it('surfaces clone stderr on failure', async () => {
-    const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: repository not found')));
+  it.effect('surfaces clone stderr on failure', () =>
+    Effect.gen(function* () {
+      const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: repository not found')));
 
-    await expect(git.cloneIfMissing('/x', 'https://bad.invalid/r.git')).rejects.toThrow(
-      /clone failed.*repository not found/s,
-    );
-  });
+      const error = yield* Effect.promise(() =>
+        expectFailure(git.cloneIfMissing('/x', 'https://bad.invalid/r.git')),
+      );
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/clone failed.*repository not found/s);
+    }),
+  );
 });
 
 describe('gitAdapter.pull', () => {
-  it('pulls fast-forward only and passes failures through', async () => {
-    const runner = fakeRunner(() => run(0));
-    const git = gitAdapter(runner);
+  it.effect('pulls fast-forward only and passes failures through', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner(() => run(0));
+      const git = gitAdapter(runner);
 
-    await git.pull('/home/x/repos/widgets');
+      yield* git.pull('/home/x/repos/widgets');
 
-    expect(runner.invocations).toEqual([['pull', '--ff-only']]);
+      expect(runner.invocations).toEqual([['pull', '--ff-only']]);
 
-    const broken = gitAdapter(fakeRunner(() => run(1, '', 'error: cannot fast-forward')));
+      const broken = gitAdapter(fakeRunner(() => run(1, '', 'error: cannot fast-forward')));
 
-    await expect(broken.pull('/x')).rejects.toThrow(/pull failed.*cannot fast-forward/s);
-  });
+      const error = yield* Effect.promise(() => expectFailure(broken.pull('/x')));
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/pull failed.*cannot fast-forward/s);
+    }),
+  );
 });
 
 describe('gitAdapter.createWorktree', () => {
-  it('creates a branch and worktree off origin/<base>', async () => {
-    const runner = fakeRunner(() => run(0));
-    const git = gitAdapter(runner);
+  it.effect('creates a branch and worktree off origin/<base>', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner(() => run(0));
+      const git = gitAdapter(runner);
 
-    await git.createWorktree({
-      repoPath: '/home/x/repos/widgets',
-      branch: 'seraphim/widgets/7-20260101',
-      path: '/home/x/worktrees/widgets/7',
-      baseBranch: 'main',
-    });
+      yield* git.createWorktree({
+        repoPath: '/home/x/repos/widgets',
+        branch: 'seraphim/widgets/7-20260101',
+        path: '/home/x/worktrees/widgets/7',
+        baseBranch: 'main',
+      });
 
-    expect(runner.invocations).toEqual([
-      [
-        'worktree',
-        'add',
-        '-b',
-        'seraphim/widgets/7-20260101',
-        '/home/x/worktrees/widgets/7',
-        'origin/main',
-      ],
-    ]);
-  });
+      expect(runner.invocations).toEqual([
+        [
+          'worktree',
+          'add',
+          '-b',
+          'seraphim/widgets/7-20260101',
+          '/home/x/worktrees/widgets/7',
+          'origin/main',
+        ],
+      ]);
+    }),
+  );
 
-  it('surfaces worktree failures with diagnostics', async () => {
-    const git = gitAdapter(
-      fakeRunner(() => run(128, '', "fatal: a branch named 'x' already exists")),
-    );
+  it.effect('surfaces worktree failures with diagnostics', () =>
+    Effect.gen(function* () {
+      const git = gitAdapter(
+        fakeRunner(() => run(128, '', "fatal: a branch named 'x' already exists")),
+      );
 
-    await expect(
-      git.createWorktree({ repoPath: '/x', branch: 'x', path: '/p', baseBranch: 'main' }),
-    ).rejects.toThrow(/worktree creation failed.*already exists/s);
-  });
+      const error = yield* Effect.promise(() =>
+        expectFailure(
+          git.createWorktree({ repoPath: '/x', branch: 'x', path: '/p', baseBranch: 'main' }),
+        ),
+      );
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/worktree creation failed.*already exists/s);
+    }),
+  );
 });
 
 describe('gitAdapter.defaultBranch', () => {
-  it('reads origin/HEAD and strips the remote prefix per the git contract', async () => {
-    const git = gitAdapter(fakeRunner(() => run(0, 'origin/trunk\n')));
+  it.effect('reads origin/HEAD and strips the remote prefix per the git contract', () =>
+    Effect.gen(function* () {
+      const git = gitAdapter(fakeRunner(() => run(0, 'origin/trunk\n')));
 
-    await expect(git.defaultBranch('/home/x/repos/widgets')).resolves.toBe('trunk');
-  });
+      const branch = yield* git.defaultBranch('/home/x/repos/widgets');
 
-  it('fails with diagnostics when origin/HEAD is unset', async () => {
-    const git = gitAdapter(
-      fakeRunner(() => run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref')),
-    );
+      expect(branch).toBe('trunk');
+    }),
+  );
 
-    await expect(git.defaultBranch('/x')).rejects.toThrow(
-      /default branch lookup failed.*not a symbolic ref/s,
-    );
-  });
+  it.effect('fails with diagnostics when origin/HEAD is unset', () =>
+    Effect.gen(function* () {
+      const git = gitAdapter(
+        fakeRunner(() => run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref')),
+      );
+
+      const error = yield* Effect.promise(() => expectFailure(git.defaultBranch('/x')));
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/default branch lookup failed.*not a symbolic ref/s);
+    }),
+  );
 });
 
 describe('expectOk', () => {
@@ -159,70 +200,90 @@ describe('expectOk', () => {
 });
 
 describe('gitAdapter.removeWorktree', () => {
-  it('runs worktree remove --force in the repo when the directory exists', async () => {
-    const worktree = await mkdtemp(join(tmpdir(), 'seraphim-git-wt-'));
-    const runner = fakeRunner(() => run(0));
-    const git = gitAdapter(runner);
+  it.effect('runs worktree remove --force in the repo when the directory exists', () =>
+    Effect.gen(function* () {
+      const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
+      const runner = fakeRunner(() => run(0));
+      const git = gitAdapter(runner);
 
-    await git.removeWorktree({ repoPath: '/repos/widgets', path: worktree });
+      yield* git.removeWorktree({ repoPath: '/repos/widgets', path: worktree });
 
-    expect(runner.invocations).toEqual([['worktree', 'remove', '--force', worktree]]);
-  });
+      expect(runner.invocations).toEqual([['worktree', 'remove', '--force', worktree]]);
+    }),
+  );
 
-  it('skips the git call entirely when the worktree directory is already gone', async () => {
-    const runner = fakeRunner(() => run(0));
-    const git = gitAdapter(runner);
+  it.effect('skips the git call entirely when the worktree directory is already gone', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner(() => run(0));
+      const git = gitAdapter(runner);
 
-    // A plain missing path — removeWorktree consults the filesystem before git.
-    await git.removeWorktree({ repoPath: '/repos/widgets', path: '/no/such/dir' });
+      // A plain missing path — removeWorktree consults the filesystem before git.
+      yield* git.removeWorktree({ repoPath: '/repos/widgets', path: '/no/such/dir' });
 
-    expect(runner.invocations).toEqual([]);
-  });
+      expect(runner.invocations).toEqual([]);
+    }),
+  );
 
-  it('surfaces git failures with diagnostics', async () => {
-    const worktree = await mkdtemp(join(tmpdir(), 'seraphim-git-wt-'));
-    const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
+  it.effect('surfaces git failures with diagnostics', () =>
+    Effect.gen(function* () {
+      const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
+      const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
 
-    await expect(
-      git.removeWorktree({ repoPath: '/repos/widgets', path: worktree }),
-    ).rejects.toThrow(/worktree removal failed.*main working tree/s);
-  });
+      const error = yield* Effect.promise(() =>
+        expectFailure(git.removeWorktree({ repoPath: '/repos/widgets', path: worktree })),
+      );
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/worktree removal failed.*main working tree/s);
+    }),
+  );
 });
 
 describe('gitAdapter.deleteBranch', () => {
-  it('deletes with -D after confirming the branch exists', async () => {
-    const runner = fakeRunner((args) =>
-      args[0] == 'branch' && args[1] == '--list' ? run(0, '  seraphim/widgets/7-1\n') : run(0),
-    );
-    const git = gitAdapter(runner);
+  it.effect('deletes with -D after confirming the branch exists', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner((args) =>
+        args[0] == 'branch' && args[1] == '--list' ? run(0, '  seraphim/widgets/7-1\n') : run(0),
+      );
+      const git = gitAdapter(runner);
 
-    await git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
+      yield* git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
 
-    expect(runner.invocations).toEqual([
-      ['branch', '--list', 'seraphim/widgets/7-1'],
-      ['branch', '-D', 'seraphim/widgets/7-1'],
-    ]);
-  });
+      expect(runner.invocations).toEqual([
+        ['branch', '--list', 'seraphim/widgets/7-1'],
+        ['branch', '-D', 'seraphim/widgets/7-1'],
+      ]);
+    }),
+  );
 
-  it('skips the deletion when the branch no longer exists', async () => {
-    const runner = fakeRunner(() => run(0, ''));
-    const git = gitAdapter(runner);
+  it.effect('skips the deletion when the branch no longer exists', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner(() => run(0, ''));
+      const git = gitAdapter(runner);
 
-    await git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
+      yield* git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
 
-    expect(runner.invocations).toEqual([['branch', '--list', 'seraphim/widgets/7-1']]);
-  });
+      expect(runner.invocations).toEqual([['branch', '--list', 'seraphim/widgets/7-1']]);
+    }),
+  );
 
-  it('surfaces git failures with diagnostics', async () => {
-    const runner = fakeRunner((args) =>
-      args[1] == '--list'
-        ? run(0, '  seraphim/widgets/7-1\n')
-        : run(1, '', 'error: not fully merged'),
-    );
-    const git = gitAdapter(runner);
+  it.effect('surfaces git failures with diagnostics', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner((args) =>
+        args[1] == '--list'
+          ? run(0, '  seraphim/widgets/7-1\n')
+          : run(1, '', 'error: not fully merged'),
+      );
+      const git = gitAdapter(runner);
 
-    await expect(
-      git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),
-    ).rejects.toThrow(/branch deletion failed.*not fully merged/s);
-  });
+      const error = yield* Effect.promise(() =>
+        expectFailure(
+          git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),
+        ),
+      );
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/branch deletion failed.*not fully merged/s);
+    }),
+  );
 });

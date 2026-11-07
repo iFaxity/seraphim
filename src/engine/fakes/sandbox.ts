@@ -1,4 +1,5 @@
-import { success } from '../../lib/result.ts';
+import { Effect } from 'effect';
+
 import { type Sandbox } from '../core/contracts.ts';
 
 /**
@@ -14,11 +15,11 @@ export function fakeSandbox() {
   const executed: string[] = [];
   return {
     executed,
-    ensureImage: () => Promise.resolve(success({ id: 'fake-image' })),
+    ensureImage: () => Effect.succeed({ id: 'fake-image' }),
     exec: (input) => {
       executed.push(input.command.join(' '));
 
-      return Promise.resolve({ command: input.command, exitCode: 0, stdout: '', stderr: '' });
+      return Effect.succeed({ command: input.command, exitCode: 0, stdout: '', stderr: '' });
     },
   } satisfies FakeSandbox;
 }

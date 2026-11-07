@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { type Forge } from '../core/contracts.ts';
 
 /**
@@ -19,7 +21,7 @@ export function fakeForge() {
     push: (input) => {
       pushed.push(input);
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
   } satisfies FakeForge;
 }

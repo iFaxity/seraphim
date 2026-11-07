@@ -1,5 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Effect } from 'effect';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { loadFlow } from './flow.ts';
@@ -11,6 +12,7 @@ import {
   registerProject,
 } from './projects.ts';
 
+import { GitError } from '../../lib/errors.ts';
 import { engine } from '../core/engine.ts';
 import { fakeKernelEnvironment } from '../fakes/env.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -123,7 +125,10 @@ describe('registerProject', () => {
 
   it('fails fast when the remote is unreachable and seeds nothing', async () => {
     const { git } = fakeKernelEnvironment({ workspaceRoot: root });
-    const broken = { ...git, probeRemote: () => Promise.reject(new Error('ls-remote exited 128')) };
+    const broken = {
+      ...git,
+      probeRemote: () => Effect.fail(new GitError({ message: 'ls-remote exited 128' })),
+    };
 
     const result = await registerProject(root, broken, REMOTE);
 

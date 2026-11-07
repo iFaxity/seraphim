@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { type Issue, type Tracker } from '../core/contracts.ts';
 
 /**
@@ -27,7 +29,7 @@ export function fakeTracker() {
       ready = issues;
     },
     getIssue: (repo, issueNumber) =>
-      Promise.resolve({
+      Effect.succeed({
         repo,
         number: issueNumber,
         title: `Issue #${issueNumber}`,
@@ -38,21 +40,18 @@ export function fakeTracker() {
     listReady: (repo) => {
       listed.push(repo);
 
-      return Promise.resolve(ready);
+      return Effect.succeed(ready);
     },
     claim: (issue) => {
       claimed.push(`${issue.repo}#${issue.number}`);
 
-      return Promise.resolve();
+      return Effect.succeed(undefined);
     },
-    openDraftPr: (input) => {
-      prsOpened.push(`${input.repo}#${input.issue.number}`);
-
-      return Promise.resolve({
+    openDraftPr: (input) =>
+      Effect.succeed({
         url: `https://example.invalid/${input.repo}/pull/99`,
         number: 99,
         state: 'draft' as const,
-      });
-    },
+      }),
   } satisfies FakeTracker;
 }

@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
+import { Effect } from 'effect';
 
+import { UnavailableError } from '../../lib/errors.ts';
 import { dirExists, fileExists, tryReadFile } from '../../lib/fs.ts';
 import { type Result, failure, success, tryCatch } from '../../lib/result.ts';
-import { type Image, type Sandbox } from '../core/contracts.ts';
+import { type Image, type Sandbox, type SandboxExec } from '../core/contracts.ts';
 
 /**
  * The `docker` CLI surface the adapter needs. Injected so tests script docker's behavior
@@ -132,6 +134,67 @@ async function execArgs(projectsRoot: string, input: ExecInput): Promise<string[
 }
 
 /**
+ * `ensureImage`'s body: the cache probe keeps its Result shape — the docker-side failure
+ * detail flows through the adapter edge, which tags every failure `UnavailableError`.
+ */
+async function ensureImageFor(
+  projectsRoot: string,
+  docker: DockerRunner,
+  repo: string,
+): Promise<Image> {
+  validateRepoName(repo);
+
+  const dir = join(projectsRoot, repo);
+  const dockerfilePath = join(dir, 'Dockerfile');
+  const hasDockerfile = await fileExists(dockerfilePath);
+
+  if (!hasDockerfile) {
+    throw new Error(`no Dockerfile for '${repo}': expected ${dockerfilePath}`);
+  }
+
+  const tag = await imageTagFor(dir);
+  const cached = await cachedImage(docker, repo, tag);
+
+  if (cached != null) {
+    if (!cached.success) {
+      throw cached.error;
+    }
+
+    return cached.data;
+  }
+
+  const built = await buildImage(docker, repo, dir, tag);
+
+  if (!built.success) {
+    throw built.error;
+  }
+
+  return built.data;
+}
+
+/**
+ * `exec`'s body: runs one docker `run` composed by `execArgs`, returning the observed
+ * outcome — a nonzero exit code is the exec result, not a failure.
+ */
+async function execFor(
+  projectsRoot: string,
+  docker: DockerRunner,
+  input: ExecInput,
+): Promise<SandboxExec> {
+  validateRepoName(input.repo);
+
+  const args = await execArgs(projectsRoot, input);
+  const run = await docker.run(args);
+
+  return {
+    command: input.command,
+    exitCode: run.exitCode,
+    stdout: run.stdout,
+    stderr: run.stderr,
+  };
+}
+
+/**
  * Real `Sandbox` adapter over the docker CLI: per-project image build/cache and exec with the
  * session worktree bind-mounted. Project assets come from the central directory's project
  * directory — Dockerfile plus optional `.env` file for credentials; the adapter passes the
@@ -146,47 +209,22 @@ export function dockerSandbox(options: DockerSandboxOptions) {
   const { projectsRoot, docker } = options;
 
   return {
-    ensureImage: async (repo) => {
-      const name = tryCatch(() => validateRepoName(repo));
-
-      if (!name.success) {
-        return failure(name.error);
-      }
-
-      const dir = join(projectsRoot, repo);
-      const dockerfilePath = join(dir, 'Dockerfile');
-      const hasDockerfile = await fileExists(dockerfilePath);
-
-      if (!hasDockerfile) {
-        return failure(new Error(`no Dockerfile for '${repo}': expected ${dockerfilePath}`));
-      }
-
-      const tag = await imageTagFor(dir);
-      const cached = await cachedImage(docker, repo, tag);
-
-      if (cached !== null) {
-        return cached;
-      }
-
-      return buildImage(docker, repo, dir, tag);
-    },
-    exec: async (input) => {
-      const name = tryCatch(() => validateRepoName(input.repo));
-
-      if (!name.success) {
-        throw name.error;
-      }
-
-      const args = await execArgs(projectsRoot, input);
-      const run = await docker.run(args);
-
-      return {
-        command: input.command,
-        exitCode: run.exitCode,
-        stdout: run.stdout,
-        stderr: run.stderr,
-      };
-    },
+    // Backend failures (no Dockerfile, docker daemon down, malformed inspect) surface the
+    // diagnostic as the cause of the contract's `UnavailableError`.
+    ensureImage: (repo: string) =>
+      Effect.tryPromise({
+        try: () => ensureImageFor(projectsRoot, docker, repo),
+        catch: (error) => new UnavailableError({ cause: error }),
+      }),
+    exec: (input: {
+      readonly repo: string;
+      readonly worktreePath: string;
+      readonly command: readonly string[];
+    }) =>
+      Effect.tryPromise({
+        try: () => execFor(projectsRoot, docker, input),
+        catch: (error) => new UnavailableError({ cause: error }),
+      }),
   } satisfies Sandbox;
 }
 

@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Effect } from 'effect';
+import { describe, expect } from 'vite-plus/test';
 
 import { forgeAdapter } from './forge.ts';
 
+import { UnavailableError } from '../../lib/errors.ts';
+import { expectFailure } from '../../lib/failure.ts';
 import { type GitRun, type GitRunner } from '../kernel/git.ts';
 
 /** Scripts git's behavior and records cwd + argv, so the push's working directory is asserted. */
@@ -25,22 +29,30 @@ function run(exitCode: number, stdout = '', stderr = ''): GitRun {
 }
 
 describe('forgeAdapter.push', () => {
-  it('pushes the branch to origin from the session clone directory', async () => {
-    const runner = fakeRunner(() => run(0));
-    const forge = forgeAdapter(runner);
+  it.effect('pushes the branch to origin from the session clone directory', () =>
+    Effect.gen(function* () {
+      const runner = fakeRunner(() => run(0));
+      const forge = forgeAdapter(runner);
 
-    await forge.push({ repoPath: '/home/x/repos/widgets', branch: 'seraphim/widgets/7-1' });
+      yield* forge.push({ repoPath: '/home/x/repos/widgets', branch: 'seraphim/widgets/7-1' });
 
-    expect(runner.invocations).toEqual([
-      { args: ['push', 'origin', 'seraphim/widgets/7-1'], cwd: '/home/x/repos/widgets' },
-    ]);
-  });
+      expect(runner.invocations).toEqual([
+        { args: ['push', 'origin', 'seraphim/widgets/7-1'], cwd: '/home/x/repos/widgets' },
+      ]);
+    }),
+  );
 
-  it('surfaces push failures with git diagnostics under the push label', async () => {
-    const forge = forgeAdapter(fakeRunner(() => run(128, '', 'fatal: no upstream configured')));
+  it.effect('surfaces push failures with git diagnostics under the push label', () =>
+    Effect.gen(function* () {
+      const forge = forgeAdapter(fakeRunner(() => run(128, '', 'fatal: no upstream configured')));
 
-    await expect(forge.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' })).rejects.toThrow(
-      /push failed.*no upstream configured/s,
-    );
-  });
+      const error = yield* Effect.promise(() =>
+        expectFailure(forge.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' })),
+      );
+
+      expect(error).toBeInstanceOf(UnavailableError);
+      expect(error.cause).toBeInstanceOf(Error);
+      expect((error.cause as Error).message).toMatch(/push failed.*no upstream configured/s);
+    }),
+  );
 });

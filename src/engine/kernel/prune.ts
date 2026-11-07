@@ -1,5 +1,6 @@
 import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
+import { Effect } from 'effect';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
@@ -112,12 +113,12 @@ export async function planPrune(env: PruneEnv) {
 async function pruneSession(env: PruneEnv, session: PruneSession, failed: string[]) {
   const repoPath = join(env.workspaceRoot, 'repos', session.repo);
 
-  await env.git
-    .removeWorktree({ repoPath, path: session.worktreePath })
-    .catch((error: unknown) => failed.push(`${session.worktreePath}: ${String(error)}`));
-  await env.git
-    .deleteBranch({ repoPath, branch: session.branch })
-    .catch((error: unknown) => failed.push(`${session.branch}: ${String(error)}`));
+  await Effect.runPromise(env.git.removeWorktree({ repoPath, path: session.worktreePath })).catch(
+    (error: unknown) => failed.push(`${session.worktreePath}: ${String(error)}`),
+  );
+  await Effect.runPromise(env.git.deleteBranch({ repoPath, branch: session.branch })).catch(
+    (error: unknown) => failed.push(`${session.branch}: ${String(error)}`),
+  );
 
   const removedReceipts = await tryRm(session.dir);
 
@@ -133,9 +134,9 @@ async function pruneOrphan(env: PruneEnv, path: string, failed: string[]) {
   const repo = path.slice(join(env.workspaceRoot, 'worktrees').length + 1).split('/')[0] ?? '';
   const repoPath = join(env.workspaceRoot, 'repos', repo);
 
-  await env.git
-    .removeWorktree({ repoPath, path })
-    .catch((error: unknown) => failed.push(`${path}: ${String(error)}`));
+  await Effect.runPromise(env.git.removeWorktree({ repoPath, path })).catch((error: unknown) =>
+    failed.push(`${path}: ${String(error)}`),
+  );
 
   const removed = await tryRm(path);
 

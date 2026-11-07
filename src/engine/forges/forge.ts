@@ -1,3 +1,6 @@
+import { Effect } from 'effect';
+
+import { UnavailableError } from '../../lib/errors.ts';
 import { type Forge } from '../core/contracts.ts';
 import { expectOk, type GitRunner } from '../kernel/git.ts';
 
@@ -12,9 +15,15 @@ import { expectOk, type GitRunner } from '../kernel/git.ts';
  */
 export function forgeAdapter(runner: GitRunner): Forge {
   return {
-    push: async (input: { readonly repoPath: string; readonly branch: string }) => {
-      const run = await runner.run(['push', 'origin', input.branch], input.repoPath);
-      expectOk('push failed', run);
-    },
+    push: (input: { readonly repoPath: string; readonly branch: string }) =>
+      Effect.tryPromise({
+        try: async () => {
+          const run = await runner.run(['push', 'origin', input.branch], input.repoPath);
+          expectOk('push failed', run);
+        },
+        // The push spawn failing is backend unavailability (credentials, remote, network);
+        // the spawned diagnostics ride as the cause.
+        catch: (error) => new UnavailableError({ cause: error }),
+      }),
   } satisfies Forge;
 }

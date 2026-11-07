@@ -1,10 +1,19 @@
-import { describe, expect, it } from 'vite-plus/test';
-import { z } from 'zod';
+import { it } from '@effect/vitest';
+import { Effect, Schema } from 'effect';
+import { describe, expect } from 'vite-plus/test';
 
-import { githubApi, type GitHubCall, type GitHubClient } from './github-api.ts';
+import {
+  githubApi,
+  statusFailure,
+  type ApiError,
+  type GitHubCall,
+  type GitHubClient,
+} from './github-api.ts';
 import { CLAIMED_LABEL, ghTracker } from './github-tracker.ts';
 
-import { failure, success } from '../../lib/result.ts';
+import { AuthError } from '../../lib/errors.ts';
+import { expectFailure } from '../../lib/failure.ts';
+import { failure, success, tryCatch } from '../../lib/result.ts';
 
 /** A scripted client outcome: a forge reply, or a thrown transport error. */
 type ScriptedOutcome =
@@ -36,10 +45,18 @@ function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
         return failure(outcome);
       }
 
-      // The real client gates statuses before schema validation; mirror that here so the
-      // adapter sees the same failures the forge path produces.
       if (outcome.status >= 300) {
-        return failure(new Error(`HTTP ${outcome.status}: ${outcome.body.trim()}`));
+        // A >=300 status always maps to a failure here; the null case is 2xx-only.
+        const statusError = await statusFailure(
+          { status: outcome.status, text: async () => outcome.body },
+          outcome.status,
+        );
+
+        if (statusError == null) {
+          throw new Error(`status ${outcome.status} unexpectedly mapped to no failure`);
+        }
+
+        return failure(statusError);
       }
 
       let parsed: unknown;
@@ -50,7 +67,7 @@ function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
         return failure(new Error(`response was not JSON: ${String(ex)}`));
       }
 
-      const validated = call.schema.safeParse(parsed);
+      const validated = tryCatch(() => Schema.decodeUnknownSync(call.schema)(parsed));
 
       if (!validated.success) {
         return failure(new Error(`unexpected response shape: ${validated.error.message}`));
@@ -99,7 +116,7 @@ describe('ghTracker listReady', () => {
     ]);
     const tracker = ghTracker(requester);
 
-    const ready = await tracker.listReady('owner/repo');
+    const ready = await Effect.runPromise(tracker.listReady('owner/repo'));
 
     expect(ready.map((issue) => issue.number)).toEqual([7]);
     expect(ready[0]?.title).toBe('Issue #7');
@@ -122,7 +139,7 @@ describe('ghTracker listReady', () => {
     ]);
     const tracker = ghTracker(requester);
 
-    const ready = await tracker.listReady('owner/repo');
+    const ready = await Effect.runPromise(tracker.listReady('owner/repo'));
 
     expect(ready.map((issue) => issue.number)).toEqual([1, 2]);
     expect(requester.calls[1]?.url).toBe(lastPageUrl);
@@ -137,14 +154,14 @@ describe('ghTracker listReady', () => {
       },
     ]);
 
-    const ready = await ghTracker(listRequester).listReady('owner/repo');
+    const ready = await Effect.runPromise(ghTracker(listRequester).listReady('owner/repo'));
 
     expect(ready).toEqual([]);
 
     const viewRequester = scriptedClient([
       { status: 200, body: JSON.stringify(restIssue(3, { body: 'some text\nBlocked by #1, #2' })) },
     ]);
-    const issue = await ghTracker(viewRequester).getIssue('owner/repo', 3);
+    const issue = await Effect.runPromise(ghTracker(viewRequester).getIssue('owner/repo', 3));
 
     expect(issue.blockedBy).toEqual([1, 2]);
   });
@@ -162,7 +179,7 @@ describe('ghTracker listReady', () => {
       },
     ]);
 
-    const ready = await ghTracker(requester).listReady('owner/repo');
+    const ready = await Effect.runPromise(ghTracker(requester).listReady('owner/repo'));
 
     expect(ready.map((issue) => issue.number)).toEqual([20]);
     expect(ready[0]?.blockedBy).toEqual([]);
@@ -171,7 +188,10 @@ describe('ghTracker listReady', () => {
   it('fails with a validation error when the body is not JSON', async () => {
     const tracker = ghTracker(failingClient(new Error('response was not JSON: unexpected token')));
 
-    await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
+    const error = await expectFailure(tracker.getIssue('owner/repo', 3));
+
+    expect(error._tag).toBe('UnavailableError');
+    expect((error.cause as Error).message).toContain(
       'issue read failed (#3): response was not JSON',
     );
   });
@@ -181,17 +201,22 @@ describe('ghTracker listReady', () => {
       failingClient(new Error('unexpected response shape: missing "number"')),
     );
 
-    await expect(tracker.getIssue('owner/repo', 3)).rejects.toThrow(
+    const error = await expectFailure(tracker.getIssue('owner/repo', 3));
+
+    expect((error.cause as Error).message).toMatch(
       /issue read failed \(#3\): unexpected response shape/,
     );
   });
 
   it('fails naming the auth failure when the API rejects the token', async () => {
     const tracker = ghTracker(
-      failingClient(new Error('auth failed (HTTP 401): {"message":"Bad credentials"}')),
+      scriptedClient([{ status: 401, body: '{"message":"Bad credentials"}' }]),
     );
 
-    await expect(tracker.listReady('owner/repo')).rejects.toThrow(
+    const error = await expectFailure(tracker.listReady('owner/repo'));
+
+    expect(error).toBeInstanceOf(AuthError);
+    expect((error.cause as Error).message).toBe(
       'issue list failed: auth failed (HTTP 401): {"message":"Bad credentials"}',
     );
   });
@@ -205,14 +230,16 @@ describe('ghTracker claim', () => {
     ]);
     const tracker = ghTracker(requester);
 
-    await tracker.claim({
-      repo: 'owner/repo',
-      number: 12,
-      title: 't',
-      body: '',
-      labels: [],
-      blockedBy: [],
-    });
+    await Effect.runPromise(
+      tracker.claim({
+        repo: 'owner/repo',
+        number: 12,
+        title: 't',
+        body: '',
+        labels: [],
+        blockedBy: [],
+      }),
+    );
 
     expect(requester.calls[0]?.url).toBe(
       'https://api.github.com/repos/owner/repo/issues/12/labels',
@@ -228,7 +255,7 @@ describe('ghTracker claim', () => {
     const requester = scriptedClient([]);
     const tracker = ghTracker(requester);
 
-    await expect(
+    const error = await expectFailure(
       tracker.claim({
         repo: 'owner/repo',
         number: 9,
@@ -237,7 +264,9 @@ describe('ghTracker claim', () => {
         labels: [CLAIMED_LABEL],
         blockedBy: [],
       }),
-    ).rejects.toThrow('issue #9 already claimed (in-progress)');
+    );
+
+    expect(error.message).toBe('issue #9 already claimed (in-progress)');
     expect(requester.calls).toEqual([]);
   });
 
@@ -245,7 +274,7 @@ describe('ghTracker claim', () => {
     const requester = scriptedClient([{ status: 422, body: '{"message":"Validation Failed"}' }]);
     const tracker = ghTracker(requester);
 
-    await expect(
+    const error = await expectFailure(
       tracker.claim({
         repo: 'owner/repo',
         number: 5,
@@ -254,7 +283,11 @@ describe('ghTracker claim', () => {
         labels: [],
         blockedBy: [],
       }),
-    ).rejects.toThrow('issue claim failed (#5): HTTP 422: {"message":"Validation Failed"}');
+    );
+
+    expect((error.cause as Error).message).toBe(
+      'issue claim failed (#5): HTTP 422: {"message":"Validation Failed"}',
+    );
     expect(requester.calls).toHaveLength(1);
   });
 });
@@ -274,20 +307,22 @@ describe('ghTracker openDraftPr', () => {
     ]);
     const tracker = ghTracker(requester);
 
-    const pr = await tracker.openDraftPr({
-      repo: 'owner/repo',
-      issue: {
+    const pr = await Effect.runPromise(
+      tracker.openDraftPr({
         repo: 'owner/repo',
-        number: 12,
-        title: 't',
-        body: '',
-        labels: [],
-        blockedBy: [],
-      },
-      branch: 'seraphim/owner/repo/12-173',
-      title: 'feat: t',
-      body: 'Closes #12',
-    });
+        issue: {
+          repo: 'owner/repo',
+          number: 12,
+          title: 't',
+          body: '',
+          labels: [],
+          blockedBy: [],
+        },
+        branch: 'seraphim/owner/repo/12-173',
+        title: 'feat: t',
+        body: 'Closes #12',
+      }),
+    );
 
     expect(pr).toEqual({
       url: 'https://github.com/owner/repo/pull/41',
@@ -305,7 +340,7 @@ describe('ghTracker openDraftPr', () => {
       failingClient(new Error('HTTP 422: {"message":"head branch not found"}')),
     );
 
-    await expect(
+    const error = await expectFailure(
       tracker.openDraftPr({
         repo: 'owner/repo',
         issue: { repo: 'owner/repo', number: 1, title: '', body: '', labels: [], blockedBy: [] },
@@ -313,8 +348,70 @@ describe('ghTracker openDraftPr', () => {
         title: 't',
         body: '',
       }),
-    ).rejects.toThrow('draft PR creation failed: HTTP 422: {"message":"head branch not found"}');
+    );
+
+    expect((error.cause as Error).message).toBe(
+      'draft PR creation failed: HTTP 422: {"message":"head branch not found"}',
+    );
   });
+});
+
+describe('ghTracker error taxonomy', () => {
+  // `github-api.ts` couples every failure to its HTTP status, so the tag identity here is
+  // what proves the adapter's mapping — the message is diagnostic detail, not a branch.
+  it.effect('an auth rejection rides AuthError', () =>
+    Effect.gen(function* () {
+      const tracker = ghTracker(scriptedClient([{ status: 403, body: '{"message":"Forbidden"}' }]));
+
+      const error = yield* Effect.promise(() => expectFailure(tracker.listReady('owner/repo')));
+
+      expect(error._tag).toBe('AuthError');
+    }),
+  );
+
+  it.effect('a rate-limited forge rides RateLimitError', () =>
+    Effect.gen(function* () {
+      const tracker = ghTracker(
+        scriptedClient([{ status: 429, body: '{"message":"Too many requests"}' }]),
+      );
+
+      const error = yield* Effect.promise(() => expectFailure(tracker.getIssue('owner/repo', 3)));
+
+      expect(error._tag).toBe('RateLimitError');
+    }),
+  );
+
+  it.effect('a transport failure — no HTTP status — rides UnavailableError', () =>
+    Effect.gen(function* () {
+      const tracker = ghTracker(failingClient(new Error('request failed: EAI_AGAIN')));
+
+      const error = yield* Effect.promise(() => expectFailure(tracker.listReady('owner/repo')));
+
+      expect(error._tag).toBe('UnavailableError');
+    }),
+  );
+
+  it.effect('refusing an already-claimed issue rides ClaimConflictError', () =>
+    Effect.gen(function* () {
+      const tracker = ghTracker(scriptedClient([]));
+
+      const error = yield* Effect.promise(() =>
+        expectFailure(
+          tracker.claim({
+            repo: 'owner/repo',
+            number: 9,
+            title: 't',
+            body: '',
+            labels: [CLAIMED_LABEL],
+            blockedBy: [],
+          }),
+        ),
+      );
+
+      expect(error._tag).toBe('ClaimConflictError');
+      expect(error.message).toBe('issue #9 already claimed (in-progress)');
+    }),
+  );
 });
 
 describe('githubApi', () => {
@@ -327,12 +424,13 @@ describe('githubApi', () => {
       method: 'GET',
       url: 'https://api.github.invalid/repos/o/r/issues',
       body: null,
-      schema: z.unknown(),
+      schema: Schema.Unknown,
     });
 
     expect(outcome.success).toBe(false);
 
     if (!outcome.success) {
+      expect((outcome.error as ApiError).status).toBe(null);
       expect(outcome.error.message).toMatch(/^request failed: /);
     }
   });
@@ -359,13 +457,13 @@ describe('githubApi', () => {
         method: 'GET',
         url: 'https://api.test/repos/o/r/issues',
         body: null,
-        schema: z.object({}),
+        schema: Schema.Struct({}),
       });
       await client.json({
         method: 'POST',
         url: 'https://api.test/repos/o/r/labels',
         body: '{"labels":["x"]}',
-        schema: z.object({}),
+        schema: Schema.Struct({}),
       });
     } finally {
       globalThis.fetch = realFetch;

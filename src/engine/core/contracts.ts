@@ -1,14 +1,31 @@
-import { type Result } from '../../lib/result.ts';
+import { Effect } from 'effect';
+
+import {
+  type AuthError,
+  type ClaimConflictError,
+  type GitError,
+  type RateLimitError,
+  type TurnRuntimeError,
+  type UnavailableError,
+} from '../../lib/errors.ts';
 
 /**
- * The four adapter contracts the session engine drives, plus the internal `Git` contract. All are
- * compile-time TS types (CODING_STANDARDS: internal kernel types stay TS; `zod` only at
- * untrusted edges) — flows depend on the interface, tests inject fakes, and no kernel code
- * branches on a specific backend (ADR-0003).
+ * The four adapter contracts the session engine drives, plus the internal `Git` and `Notifier`
+ * contracts. Members are Effect values with error channels named in the signature — the compiler,
+ * not a string, is what callers branch on. Boundary data (`Issue`, `PullRequest`, receipts…)
+ * stays plain serializable structs (ADR-0008); adapters run their own failure mapping at the
+ * untrusted edge.
  */
 
 /**
- * Forge-agnostic view of one issue, normalized by tracker adapters (ADR-0003). What flows
+ * Failure modes an adapter surfaces toward the forge/sandbox/runtime backend. Auth and rate
+ * limit apply where a credential exists (tracker reads/claims); network and service states
+ * collapse into `UnavailableError`; the adapter owns the exact mapping and keeps the
+ * underlying diagnostic as the error's `cause`.
+ */
+export type TrackerError = AuthError | RateLimitError | UnavailableError;
+
+/** Forge-agnostic view of one issue, normalized by tracker adapters (ADR-0003). What flows
  * see when they read tracker data — no forge-native shapes leak through.
  */
 export type Issue = {
@@ -42,22 +59,14 @@ export type Tracker = {
    * Open issues ready for pickup — minus claimed (the double-session guard) and minus
    * blocked (`Blocked by #N` lines; ADR-0003: a dumb non-agent fetch).
    */
-  readonly listReady: (repo: string) => Promise<readonly Issue[]>;
-  readonly getIssue: (repo: string, issueNumber: number) => Promise<Issue>;
-  readonly claim: (issue: Issue) => Promise<void>;
+  readonly listReady: (repo: string) => Effect.Effect<readonly Issue[], TrackerError>;
+  readonly getIssue: (repo: string, issueNumber: number) => Effect.Effect<Issue, TrackerError>;
+  readonly claim: (issue: Issue) => Effect.Effect<void, TrackerError | ClaimConflictError>;
   /**
    * Opens one draft PR from the session branch onto the forge default branch. Flow-invoked
    * (through `ctx.tracker`, which fills in repo, issue, and branch), forge-effected here;
    * put `Closes #N` in the body to link the issue. Fails naturally when the branch head is
    * unknown — e.g. the flow never pushed.
-   *
-   * @example
-   * ```ts
-   * const pr = await ctx.tracker.openDraftPr({
-   *   title: 'feat: widget loader',
-   *   body: 'Closes #42.',
-   * });
-   * ```
    */
   readonly openDraftPr: (input: {
     readonly repo: string;
@@ -65,7 +74,7 @@ export type Tracker = {
     readonly branch: string;
     readonly title: string;
     readonly body: string;
-  }) => Promise<PullRequest>;
+  }) => Effect.Effect<PullRequest, TrackerError>;
 };
 
 /**
@@ -83,7 +92,10 @@ export type Forge = {
    * binds both (flows never touch git): `repoPath` is where the push runs, `branch` the
    * ref pushed.
    */
-  readonly push: (input: { readonly repoPath: string; readonly branch: string }) => Promise<void>;
+  readonly push: (input: {
+    readonly repoPath: string;
+    readonly branch: string;
+  }) => Effect.Effect<void, UnavailableError>;
 };
 
 /** One command executed inside the sandbox, with its observable outcome. */
@@ -109,12 +121,12 @@ export type Image = {
  */
 export type Sandbox = {
   /** Identity of the built/cached container image the session's execs run against. */
-  readonly ensureImage: (repo: string) => Promise<Result<Image, Error>>;
+  readonly ensureImage: (repo: string) => Effect.Effect<Image, UnavailableError>;
   readonly exec: (input: {
     readonly repo: string;
     readonly worktreePath: string;
     readonly command: readonly string[];
-  }) => Promise<SandboxExec>;
+  }) => Effect.Effect<SandboxExec, UnavailableError>;
 };
 
 /** Result of one agent turn, captured by the runtime. */
@@ -136,38 +148,40 @@ export type AgentRuntime = {
     readonly cwd: string;
     readonly prompt: string;
     readonly model: string;
-  }) => Promise<TurnResult>;
+  }) => Effect.Effect<TurnResult, TurnRuntimeError>;
 };
 
 /**
  * Internal git mechanics contract — the engine's only path to version control, so tests fake it
- * instead of shelling out. Not a flow-facing adapter: flows never touch git.
+ * instead of shelling out. Not a flow-facing adapter: flows never touch git. Spawned git inside
+ * the engine maps every failure (missing repo, ref conflicts, unreachable remote) to `GitError`
+ * (`cause` carries the spawn error/`stderr` for diagnostics).
  */
 export type Git = {
-  readonly defaultBranch: (repoPath: string) => Promise<string>;
-  readonly cloneIfMissing: (repoPath: string, url: string) => Promise<void>;
-  readonly pull: (repoPath: string) => Promise<void>;
+  readonly defaultBranch: (repoPath: string) => Effect.Effect<string, GitError>;
+  readonly cloneIfMissing: (repoPath: string, url: string) => Effect.Effect<void, GitError>;
+  readonly pull: (repoPath: string) => Effect.Effect<void, GitError>;
   readonly createWorktree: (input: {
     readonly repoPath: string;
     readonly branch: string;
     readonly path: string;
     readonly baseBranch: string;
-  }) => Promise<void>;
+  }) => Effect.Effect<void, GitError>;
   /** Removes one worktree directory (confirmed prune only — nothing else may delete one). */
   readonly removeWorktree: (input: {
     readonly repoPath: string;
     readonly path: string;
-  }) => Promise<void>;
+  }) => Effect.Effect<void, GitError>;
   /** Deletes one branch (confirmed prune only, after its worktree is gone). */
   readonly deleteBranch: (input: {
     readonly repoPath: string;
     readonly branch: string;
-  }) => Promise<void>;
+  }) => Effect.Effect<void, GitError>;
   /**
    * Reachability check over the remote — registration's fail-fast on an unreachable URL.
    * Read-only (a ref-list ping), never a clone.
    */
-  readonly probeRemote: (url: string) => Promise<void>;
+  readonly probeRemote: (url: string) => Effect.Effect<void, GitError>;
 };
 
 /** The terminal outcomes the kernel pages the operator about. Resumed sessions never notify. */
@@ -194,5 +208,5 @@ export type Notification = {
  * flow's perspective — a failed delivery is logged, never fails the session.
  */
 export type Notifier = {
-  readonly notify: (notification: Notification) => Promise<void>;
+  readonly notify: (notification: Notification) => Effect.Effect<void, UnavailableError>;
 };
