@@ -37,10 +37,20 @@ guide doesn't cover, search through the source code in `node_modules/effect/src`
 Authoring guidance stays in `CODING_STANDARDS.md` (Effect, Errors, Validation, Testing) for
 repo-specific norms; house rules there govern over the shared package guide where they conflict.
 
+## Toolchain
+
+All build/test/gate commands run through `vp` (the vite-plus toolchain, one hook-visible entry
+point) — never bare binaries, `npx`, or `pnpm`:
+
+- `vp check` — lint + format + type diagnostics (machine-checked; `--fix` to autofix)
+- `vp run typecheck` — typecheck only
+- `vp test run` — tests (`--coverage` for coverage; `vp run check` chains check+lint+type+tests)
+- `vp run fallow:audit` / `vp run fallow:health` — architecture/dead-code gate (below)
+
 ## Code health gate
 
 Fallow enforces architecture boundaries, complexity ceilings, and dead-code regression gates. Config: `.fallowrc.jsonc` (cyclomatic 15, cognitive 10, CRAP 30; boundaries: lib isolated, downward-only imports). The codebase is debt-free with no baseline: `fallow audit` fails on any finding your changes introduce — inherited debt is attributed against the merge-base, but there is nothing to attribute.
 
-- Before opening a PR: `pnpm audit` (exit 0 = clean). Before committing: it runs in the `pre-commit` hook.
-- Real CRAP scores need fresh coverage: `pnpm test:coverage` regenerates `coverage/`.
-- Debug a finding: `npx fallow explain <issue-type>`; trace with `npx fallow trace --path <from> <to>`.
+- Before opening a PR: `vp run fallow:audit` (exit 0 = clean). Before committing: it runs in the `pre-commit` hook.
+- Real CRAP scores need fresh coverage: `vp test run --coverage` regenerates `coverage/`.
+- Debug a finding: `vp exec fallow explain <issue-type>`; trace with `vp exec fallow trace --path <from> <to>`.
