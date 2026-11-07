@@ -1,7 +1,8 @@
 # Coding Standards
 
 `vp check` (lint + format + type errors, configured in `vite.config.ts`) is machine-checked —
-this file covers what it can't. Modules not yet migrated to the Effect runtime keep their legacy
+this file covers what it can't; run all toolchain commands via `vp`/`vp run`/`vp exec`, never
+bare binaries or `npx` (AGENTS.md: Toolchain). Modules not yet migrated to the Effect runtime keep their legacy
 idioms until their sweep layer converts them; new code in a migrated module follows the Effect
 rules immediately.
 
