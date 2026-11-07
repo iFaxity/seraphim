@@ -6,7 +6,12 @@ import { Effect } from 'effect';
 import { UnavailableError } from '../../lib/errors.ts';
 import { dirExists, fileExists, tryReadFile } from '../../lib/fs.ts';
 import { type Result, failure, success, tryCatch } from '../../lib/result.ts';
-import { type Image, type Sandbox, type SandboxExec } from '../core/contracts.ts';
+import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
+
+/** The built/cached image identity, internal to this adapter — the contract is void. */
+type Image = {
+  readonly id: string;
+};
 
 /**
  * The `docker` CLI surface the adapter needs. Injected so tests script docker's behavior
@@ -210,10 +215,13 @@ export function dockerSandbox(options: DockerSandboxOptions) {
 
   return {
     // Backend failures (no Dockerfile, docker daemon down, malformed inspect) surface the
-    // diagnostic as the cause of the contract's `UnavailableError`.
+    // diagnostic as the cause of the contract's `UnavailableError`. The built identity stays
+    // adapter-internal (exec re-derives the tag); the contract's success is void.
     ensureImage: (repo: string) =>
       Effect.tryPromise({
-        try: () => ensureImageFor(projectsRoot, docker, repo),
+        try: async () => {
+          await ensureImageFor(projectsRoot, docker, repo);
+        },
         catch: (error) => new UnavailableError({ cause: error }),
       }),
     exec: (input: {

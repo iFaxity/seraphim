@@ -1,6 +1,5 @@
 import {
   type AgentRuntime,
-  type Forge,
   type Git,
   type Notifier,
   type Sandbox,
@@ -17,7 +16,6 @@ import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
  */
 export type KernelEnvironment = {
   readonly tracker: Tracker;
-  readonly forge: Forge;
   readonly sandbox: Sandbox;
   readonly runtime: AgentRuntime;
   readonly git: Git;

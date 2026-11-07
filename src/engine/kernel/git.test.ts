@@ -30,6 +30,50 @@ function run(exitCode: number, stdout = '', stderr = ''): GitRun {
   return { exitCode, stdout, stderr };
 }
 
+describe('gitAdapter.push', () => {
+  /** Like `fakeRunner`, but records cwd too — the push must run inside the session clone. */
+  function pushRunner(script: () => GitRun): GitRunner & {
+    invocations: { args: string[]; cwd?: string }[];
+  } {
+    const invocations: { args: string[]; cwd?: string }[] = [];
+
+    return {
+      invocations,
+      run: async (args, cwd) => {
+        invocations.push({ args: [...args], cwd });
+
+        return script();
+      },
+    };
+  }
+
+  it.effect('pushes the branch to origin from the session clone directory', () =>
+    Effect.gen(function* () {
+      const runner = pushRunner(() => run(0));
+      const git = gitAdapter(runner);
+
+      yield* git.push({ repoPath: '/home/x/repos/widgets', branch: 'seraphim/widgets/7-1' });
+
+      expect(runner.invocations).toEqual([
+        { args: ['push', 'origin', 'seraphim/widgets/7-1'], cwd: '/home/x/repos/widgets' },
+      ]);
+    }),
+  );
+
+  it.effect('surfaces push failures with git diagnostics under the push label', () =>
+    Effect.gen(function* () {
+      const git = gitAdapter(pushRunner(() => run(128, '', 'fatal: no upstream configured')));
+
+      const error = yield* Effect.promise(() =>
+        expectFailure(git.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' })),
+      );
+
+      expect(error).toBeInstanceOf(GitError);
+      expect(error.message).toMatch(/push failed.*no upstream configured/s);
+    }),
+  );
+});
+
 describe('gitAdapter.probeRemote', () => {
   it.effect('passes a ls-remote ping and succeeds on exit 0', () =>
     Effect.gen(function* () {

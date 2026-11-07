@@ -1,7 +1,6 @@
 import { join } from 'node:path';
 import { Effect } from 'effect';
 
-import { fakeForge, type FakeForge } from './forge.ts';
 import { fakeGit, type FakeGit } from './git.ts';
 import { fakeNotifier, type FakeNotifier } from './notifier.ts';
 import { fakeRuntime, type FakeRuntime } from './runtime.ts';
@@ -10,7 +9,6 @@ import { fakeTracker, type FakeTracker } from './tracker.ts';
 
 import {
   type AgentRuntime,
-  type Forge,
   type Git,
   type Notifier,
   type Sandbox,
@@ -21,7 +19,6 @@ import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 export type FakeEnvironmentOverrides = Partial<{
   readonly runtime: FakeRuntime | AgentRuntime;
   readonly tracker: FakeTracker | Tracker;
-  readonly forge: FakeForge | Forge;
   readonly sandbox: FakeSandbox | Sandbox;
   readonly git: FakeGit | Git;
   readonly notifier: FakeNotifier | Notifier;
@@ -66,7 +63,6 @@ function wrapRuntime(runtime: FakeRuntime | AgentRuntime, runtimeDelayMs: number
 function resolveEnvironment(overrides: FakeEnvironmentOverrides | undefined): {
   readonly wrappedRuntime: FakeRuntime;
   readonly tracker: FakeTracker | Tracker;
-  readonly forge: FakeForge | Forge;
   readonly sandbox: FakeSandbox | Sandbox;
   readonly git: FakeGit | Git;
   readonly notifier: FakeNotifier;
@@ -78,7 +74,6 @@ function resolveEnvironment(overrides: FakeEnvironmentOverrides | undefined): {
   const {
     runtime = fakeRuntime(),
     tracker = fakeTracker(),
-    forge = fakeForge(),
     sandbox = fakeSandbox(),
     git = fakeGit(),
     notifier = fakeNotifier(),
@@ -97,7 +92,6 @@ function resolveEnvironment(overrides: FakeEnvironmentOverrides | undefined): {
     // the same pass-through the runtime wrap above applies.
     notifier: 'events' in notifier ? (notifier as FakeNotifier) : { ...notifier, events: [] },
     tracker,
-    forge,
     sandbox,
     git,
     workspaceRoot,
@@ -121,7 +115,6 @@ export function fakeKernelEnvironment(overrides?: FakeEnvironmentOverrides) {
     },
     runtime: wrappedRuntime,
     tracker: leaves.tracker,
-    forge: leaves.forge as FakeForge,
     sandbox: leaves.sandbox,
     git: leaves.git as FakeGit,
     notifier: leaves.notifier,

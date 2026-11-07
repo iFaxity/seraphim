@@ -33,8 +33,8 @@ The forge-agnostic abstraction over issue hosts (GitHub, Azure DevOps, GitLab, F
 _Avoid_: forge, provider, backend (when naming the abstraction)
 
 **Forge**:
-The forge-facing contract for branch publication (`push`). Adapters run their own `git push` spawn with host credentials — the container never sees them. Push is optional and flow-authored (`ctx.forge.push()`); the kernel never enforces an unpushed branch, so a PR opened against an unknown head fails naturally at the forge. Distinct from **Tracker** (ingest-only): PR-open is flow-invoked but forge-effected.
-_Avoid_: pusher, publisher (when naming the contract)
+The domain act of branch publication (`push`), still bound as `ctx.forge.push()` — flows call it, the kernel maps it onto the git mechanics adapter, and the push spawns host-side with host credentials so the container never sees them. Push is optional and flow-authored; the kernel never enforces an unpushed branch, so a PR opened against an unknown head fails naturally at the forge. Distinct from **Tracker** (ingest-only): PR-open is flow-invoked but forge-effected. The publication step is no longer its own contract — it lives on the **Git** adapter (the one-adapter seam died; ADR-0006's tracker separation and credential boundary are unchanged).
+_Avoid_: pusher, publisher (when naming the act)
 
 **Flow**:
 The per-project, centrally-homed TypeScript file (`defineFlow`) declaring agent, model, skills, sandbox, and steps for a session.
@@ -65,7 +65,7 @@ A `seraphim/*` sandbox image tag no registered project's current Dockerfile+lock
 _Avoid_: dead image, unused image
 
 **Contract**:
-A kernel-declared interface describing one outside system (`Tracker`, `Forge`, `Sandbox`, `AgentRuntime`, `Git`, `Notifier`), declared in `src/engine/core/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
+A kernel-declared interface describing one outside system (`Tracker`, `Sandbox`, `AgentRuntime`, `Git`, `Notifier`), declared in `src/engine/core/contracts.ts`. Flows and kernel code depend on the interface; adapters implement it; tests inject fakes.
 _Avoid_: seam, port, service interface
 
 **Notifier**:

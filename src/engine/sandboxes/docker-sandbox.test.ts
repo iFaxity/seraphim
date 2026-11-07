@@ -95,9 +95,9 @@ describe('dockerSandbox.ensureImage', () => {
       });
       const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      const image = yield* sandbox.ensureImage('cached');
+      // Void contract: success is the point; the inspect reuse is asserted via the call count.
+      yield* sandbox.ensureImage('cached');
 
-      expect(image.id).toBe('sha256:abc123');
       // Only the inspect ran — no build, no tag churn.
       expect(docker.invocations).toHaveLength(1);
     }),
@@ -119,9 +119,8 @@ describe('dockerSandbox.ensureImage', () => {
       });
       const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      const image = yield* sandbox.ensureImage('fresh');
+      yield* sandbox.ensureImage('fresh');
 
-      expect(image.id).toBe('sha256:fedcba9876543210');
       expect(docker.invocations).toHaveLength(2);
 
       const build = docker.invocations[1] ?? [];
@@ -289,10 +288,8 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
     const counting = countingDocker();
     const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
-    const firstImage = await Effect.runPromise(countingSandbox.ensureImage('cache'));
-    const secondImage = await Effect.runPromise(countingSandbox.ensureImage('cache'));
-
-    expect(secondImage.id).toBe(firstImage.id);
+    await Effect.runPromise(countingSandbox.ensureImage('cache'));
+    await Effect.runPromise(countingSandbox.ensureImage('cache'));
 
     // Cache hit observable: exactly one build happened across two ensureImage calls.
     expect(counting.builds).toHaveLength(1);
