@@ -22,7 +22,22 @@ Default five-label triage vocabulary, label strings equal to their names. See `d
 
 Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
 
-### Fallow (code health gate)
+## Effect framework
+
+Effect code in this repo is guided two ways. Setup and install steps, plus the AGENTS.md
+onboarding block, belong to the `effect-ts` skill — invoke it for a fresh checkout or when
+touching pins/templates. This repository uses the Effect Typescript library.
+
+Before writing any Effect code, first read `node_modules/effect/AGENTS.md`
+**completely**, and follow the links in the file when required.
+
+If you need to learn more about particular Effect apis and concepts that the
+guide doesn't cover, search through the source code in `node_modules/effect/src`.
+
+Authoring guidance stays in `CODING_STANDARDS.md` (Effect, Errors, Validation, Testing) for
+repo-specific norms; house rules there govern over the shared package guide where they conflict.
+
+## Code health gate
 
 Fallow enforces architecture boundaries, complexity ceilings, and dead-code regression gates. Config: `.fallowrc.jsonc` (cyclomatic 15, cognitive 10, CRAP 30; boundaries: lib isolated, downward-only imports). The codebase is debt-free with no baseline: `fallow audit` fails on any finding your changes introduce — inherited debt is attributed against the merge-base, but there is nothing to attribute.
 

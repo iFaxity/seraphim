@@ -41,7 +41,7 @@ The per-project, centrally-homed TypeScript file (`defineFlow`) declaring agent,
 _Avoid_: pipeline, recipe, workflow
 
 **Receipt**:
-The machine-readable record (zod-schema'd JSON) a session writes: session manifest, per-turn records, diff stat, PR URL. The filesystem is the database.
+The machine-readable record a session writes: session manifest, per-turn records, diff stat, PR URL. The filesystem is the database.
 _Avoid_: log (the transcript is the log), record
 
 **Transcript**:
