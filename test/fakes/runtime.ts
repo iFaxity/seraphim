@@ -1,7 +1,7 @@
 import { Effect, Layer } from 'effect';
 
-import { type AgentRuntime } from '../core/contracts.ts';
-import { AgentRuntimeService } from '../core/services.ts';
+import { type AgentRuntime } from '../../src/engine/core/contracts.ts';
+import { AgentRuntimeService } from '../../src/engine/core/services.ts';
 
 /**
  * Hand-written fake for the runtime contract (ADR-0002 keeps fakes engine-side): records prompts

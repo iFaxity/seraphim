@@ -1,7 +1,18 @@
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
+import { Clock, Effect } from 'effect';
 
+import { describeError } from '../../lib/errors.ts';
 import { failure, success, tryCatch, type Result } from '../../lib/result.ts';
-import { type KernelEnvironment } from '../core/env.ts';
+import { type KernelFailure } from '../core/contracts.ts';
+import { type HomeService } from '../core/env.ts';
+import {
+  type AgentRuntimeService,
+  type GitService,
+  type NotifierService,
+  type SandboxService,
+  type TrackerService,
+} from '../core/services.ts';
+import { type DockerRunnerService } from '../sandboxes/docker-sandbox.ts';
 
 /**
  * What a session command reports back to its caller. Commands never format CLI prose —
@@ -11,18 +22,33 @@ import { type KernelEnvironment } from '../core/env.ts';
  */
 export type ErrorOutcome = { readonly kind: 'error'; readonly message: string };
 
+/** The tagged kernel failures a command's execute can hit, translated once to an error outcome. */
+export type KernelError = KernelFailure;
+
+/** The service stack every command's execute runs against (the composition root builds it). */
+export type CommandServices =
+  | TrackerService
+  | SandboxService
+  | AgentRuntimeService
+  | GitService
+  | NotifierService
+  | HomeService
+  | DockerRunnerService
+  | Clock.Clock;
+
 /**
  * One command module's outward shape — the dispatcher's row type. `O` is the command's own
- * outcome variant; the helper's error outcome rides alongside.
+ * outcome variant; the helper's error outcome rides alongside. The handler is an Effect
+ * over the engine's service stack: the tags survive out of the kernel to this boundary,
+ * where the scaffold's one `mapError` policy turns a failure into the error outcome.
  */
 export type Command<Name extends string, O> = {
   readonly name: Name;
   readonly summary: string;
   readonly usage: string;
   readonly handler: (
-    env: KernelEnvironment | undefined,
     args: readonly string[],
-  ) => Promise<O | ErrorOutcome>;
+  ) => Effect.Effect<O | ErrorOutcome, never, CommandServices>;
 };
 
 /** Any command, when the concrete variant doesn't matter (help's table, the dispatcher). */
@@ -30,20 +56,8 @@ export type AnyCommand = {
   readonly name: string;
   readonly summary: string;
   readonly usage: string;
-  readonly handler: (
-    env: KernelEnvironment | undefined,
-    args: readonly string[],
-  ) => Promise<unknown>;
+  readonly handler: (args: readonly string[]) => Effect.Effect<unknown, never, CommandServices>;
 };
-
-/** The one missing-KernelEnvironment error, shared by every command that needs an engine home. */
-function noEnvError() {
-  return {
-    kind: 'error',
-    message:
-      'no engine home configured: supply KernelEnvironment to engine() (see src/main.ts composeKernelEnvironment)',
-  } as const;
-}
 
 /** The values map a strict `parseArgs` pass yields: one last-wins scalar or array per option. */
 export type FlagValues = {
@@ -80,30 +94,25 @@ export function strictFlags(
 }
 
 /**
- * The shared command scaffold: parse arguments once, guarantee non-undefined env, and map
- * the handler's `Result` to the error outcome once — an execute body is the pure mapping
- * from engine results to its own outcome variant. The execute function's type is captured
- * whole (rather than inferring an outcome parameter from it) so a multi-shape execute —
- * several success variants — keeps its full union in the derived dispatcher.
+ * The shared command scaffold: parse arguments once, then run the execute body as an Effect
+ * over the engine's services — the kernel's tagged failures are translated to the error
+ * outcome exactly once, here (the policy the composition root inherits), never per-site.
+ * The execute function's type is captured whole (rather than inferring an outcome parameter
+ * from it) so a multi-shape execute — several success variants — keeps its full union in
+ * the derived dispatcher.
  */
-/** The kernel executes a command: env in, one CLI outcome out.
- * Exported because `Command`'s public signature embeds it.
- */
-export type Execute<P> = (
-  env: KernelEnvironment,
-  parsed: P,
-) => Promise<Result<{ readonly kind: string }>>;
-
-/** Reduced from the executor's Result type to the dispatcher's outcome union.
- * Exported because `command`'s public signature embeds it.
- */
-export type OutcomeOf<E extends Execute<never>> = E extends (
-  ...args: never
-) => Promise<Result<infer O, infer _TError>>
+/** Reduced from the executor's error type to the dispatcher's outcome union. */
+export type OutcomeOf<E> = E extends (
+  parsed: never,
+) => Effect.Effect<infer O, KernelError, CommandServices>
   ? O
   : never;
 
-export function command<Name extends string, P, E extends Execute<P>>(def: {
+export function command<
+  Name extends string,
+  P,
+  E extends (parsed: P) => Effect.Effect<unknown, KernelError, CommandServices>,
+>(def: {
   readonly name: Name;
   readonly summary: string;
   readonly usage: string;
@@ -116,24 +125,16 @@ export function command<Name extends string, P, E extends Execute<P>>(def: {
     name,
     summary,
     usage,
-    handler: async (env, args): Promise<OutcomeOf<E> | ErrorOutcome> => {
+    handler: (args): Effect.Effect<OutcomeOf<E> | ErrorOutcome, never, CommandServices> => {
       const parsed = parse(args);
 
       if (!parsed.success) {
-        return { kind: 'error', message: parsed.error.message };
+        return Effect.succeed({ kind: 'error', message: parsed.error.message });
       }
 
-      if (!env) {
-        return noEnvError();
-      }
-
-      const result = await execute(env, parsed.data);
-
-      // The cast narrows the captured execute's declared shape back to its concrete outcome
-      // union — the constraint `Execute` infers against is looser than the module's own.
-      return result.success
-        ? (result.data as OutcomeOf<E>)
-        : { kind: 'error', message: result.error.message };
+      return execute(parsed.data).pipe(
+        Effect.mapError((error) => ({ kind: 'error' as const, message: describeError(error) })),
+      ) as Effect.Effect<OutcomeOf<E> | ErrorOutcome, never, CommandServices>;
     },
   };
 }

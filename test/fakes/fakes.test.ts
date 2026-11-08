@@ -15,7 +15,7 @@ import {
   NotifierService,
   SandboxService,
   TrackerService,
-} from '../core/services.ts';
+} from '../../src/engine/core/services.ts';
 
 /**
  * The fake-Layer wiring surface: each fake resolves through its contract Tag via Layer

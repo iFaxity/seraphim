@@ -1,15 +1,22 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Option } from 'effect';
+import { Effect, Layer, Option } from 'effect';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
-import { planPrune, runPrune, type PruneEnv } from './prune.ts';
+import { planPrune, runPrune } from './prune.ts';
 import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
+import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
+import { run } from '../../../test/run.ts';
 import { GitError } from '../../lib/errors.ts';
-import { fakeGit, type FakeGit } from '../fakes/git.ts';
-import { type DockerRunner, imageTagFor } from '../sandboxes/docker-sandbox.ts';
+import { homeLayout, HomeService } from '../core/env.ts';
+import { GitService } from '../core/services.ts';
+import {
+  DockerRunnerService,
+  type DockerRunner,
+  imageTagFor,
+} from '../sandboxes/docker-sandbox.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 let root: string;
@@ -25,8 +32,14 @@ afterAll(async () => {
   await rm(sessionsRoot, { recursive: true, force: true });
 });
 
-function envWith(fake: FakeGit, docker?: DockerRunner): PruneEnv {
-  return { workspaceRoot: root, sessionsRoot, git: fake, docker };
+/** The prune layer stack over one home layout; omitting `docker` is the docker-absent case. */
+function pruneLayer(git: FakeGit, docker?: DockerRunner) {
+  const base = Layer.mergeAll(
+    Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
+    Layer.succeed(GitService, git),
+  );
+
+  return docker ? Layer.merge(base, Layer.succeed(DockerRunnerService, docker)) : base;
 }
 
 /** Writes one receipt manifest directly — prune's input is the receipts tree, not a run. */
@@ -95,7 +108,7 @@ describe('planPrune', () => {
     await seedSession({ repo: 'demo', issueNumber: 2, state: 'failed' });
     await seedSession({ repo: 'demo', issueNumber: 3, state: 'cap-hit' });
 
-    const planned = await planPrune(envWith(fakeGit()));
+    const planned = await run(planPrune, pruneLayer(fakeGit()));
 
     expect(planned.success).toBe(true);
 
@@ -123,7 +136,7 @@ describe('planPrune', () => {
     });
     const orphan = await seedWorktree('demo', '999-orphan');
 
-    const planned = await planPrune(envWith(fakeGit()));
+    const planned = await run(planPrune, pruneLayer(fakeGit()));
 
     expect(planned.success).toBe(true);
 
@@ -135,10 +148,14 @@ describe('planPrune', () => {
   it('marks seraphim images stale when no project content-hash names them, keeping current ones', async () => {
     await mkdir(join(root, 'projects', 'demo'), { recursive: true });
     await writeFile(join(root, 'projects', 'demo', 'Dockerfile'), 'FROM node:26\n');
-    await registerProject(root, fakeGit(), 'https://example.invalid/acme/demo.git', 'demo');
+    await run(
+      registerProject('https://example.invalid/acme/demo.git', 'demo'),
+      pruneLayer(fakeGit()),
+    );
 
-    const planned = await planPrune(
-      envWith(fakeGit(), dockerListing(['seraphim/demo:deadbeef', 'seraphim/gone:00112233'])),
+    const planned = await run(
+      planPrune,
+      pruneLayer(fakeGit(), dockerListing(['seraphim/demo:deadbeef', 'seraphim/gone:00112233'])),
     );
 
     expect(planned.success).toBe(true);
@@ -158,7 +175,10 @@ describe('planPrune', () => {
     const projectDir = join(root, 'projects', 'demo');
     await mkdir(projectDir, { recursive: true });
     await writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n');
-    await registerProject(root, fakeGit(), 'https://example.invalid/acme/demo.git', 'demo');
+    await run(
+      registerProject('https://example.invalid/acme/demo.git', 'demo'),
+      pruneLayer(fakeGit()),
+    );
 
     const someTag = await Effect.runPromise(imageTagFor(projectDir));
 
@@ -167,7 +187,7 @@ describe('planPrune', () => {
     }
 
     const tag = someTag.value;
-    const planned = await planPrune(envWith(fakeGit(), dockerListing([tag])));
+    const planned = await run(planPrune, pruneLayer(fakeGit(), dockerListing([tag])));
 
     expect(planned.success).toBe(true);
 
@@ -177,7 +197,7 @@ describe('planPrune', () => {
   });
 
   it('skips image pruning when no docker runner is configured', async () => {
-    const planned = await planPrune(envWith(fakeGit()));
+    const planned = await run(planPrune, pruneLayer(fakeGit()));
 
     expect(planned.success).toBe(true);
 
@@ -193,12 +213,14 @@ describe('runPrune', () => {
     const session = await seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' });
     await mkdir(session.worktreePath, { recursive: true });
 
-    const planned = await planPrune(envWith(git));
-    const done = await runPrune(
-      envWith(git),
-      planned.success
-        ? planned.data
-        : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+    const planned = await run(planPrune, pruneLayer(git));
+    const done = await run(
+      runPrune(
+        planned.success
+          ? planned.data
+          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+      ),
+      pruneLayer(git),
     );
 
     expect(done.success).toBe(true);
@@ -214,12 +236,14 @@ describe('runPrune', () => {
   it('removes orphan worktrees and untags stale images', async () => {
     const orphan = await seedWorktree('demo', '999-orphan');
     const docker = dockerListing(['seraphim/gone:00112233']);
-    const planned = await planPrune(envWith(fakeGit(), docker));
-    const done = await runPrune(
-      envWith(fakeGit(), docker),
-      planned.success
-        ? planned.data
-        : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+    const planned = await run(planPrune, pruneLayer(fakeGit(), docker));
+    const done = await run(
+      runPrune(
+        planned.success
+          ? planned.data
+          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+      ),
+      pruneLayer(fakeGit(), docker),
     );
 
     expect(done.success).toBe(true);
@@ -240,12 +264,14 @@ describe('runPrune', () => {
           : Effect.void,
     };
 
-    const planned = await planPrune(envWith(stuckGit));
-    const done = await runPrune(
-      envWith(stuckGit),
-      planned.success
-        ? planned.data
-        : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+    const planned = await run(planPrune, pruneLayer(stuckGit));
+    const done = await run(
+      runPrune(
+        planned.success
+          ? planned.data
+          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+      ),
+      pruneLayer(stuckGit),
     );
 
     expect(done.success).toBe(true);
@@ -268,12 +294,14 @@ describe('runPrune image failures', () => {
             : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
         ),
     };
-    const planned = await planPrune(envWith(fakeGit(), docker));
-    const done = await runPrune(
-      envWith(fakeGit(), docker),
-      planned.success
-        ? planned.data
-        : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+    const planned = await run(planPrune, pruneLayer(fakeGit(), docker));
+    const done = await run(
+      runPrune(
+        planned.success
+          ? planned.data
+          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
+      ),
+      pruneLayer(fakeGit(), docker),
     );
 
     expect(done.success).toBe(true);
@@ -292,7 +320,7 @@ describe('runPrune image failures', () => {
           stderr: 'Cannot connect to the Docker daemon',
         }),
     };
-    const planned = await planPrune(envWith(fakeGit(), docker));
+    const planned = await run(planPrune, pruneLayer(fakeGit(), docker));
 
     expect(planned.success).toBe(true);
 

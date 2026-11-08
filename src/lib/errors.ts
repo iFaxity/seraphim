@@ -35,10 +35,40 @@ export class ClaimConflictError extends Data.TaggedError('ClaimConflictError')<{
   message: string;
 }> {}
 export class BudgetBreachedError extends Data.TaggedError('BudgetBreachedError') {}
-export class LockHeldError extends Data.TaggedError('LockHeldError') {}
+export class LockHeldError extends Data.TaggedError('LockHeldError')<{
+  /** The held-lock diagnostic: repo, holder pid, holding age, and the wait cap spent. */
+  message: string;
+}> {}
 export class LockCorruptError extends Data.TaggedError('LockCorruptError') {}
-export class ReceiptWriteError extends Data.TaggedError('ReceiptWriteError') {}
+export class ReceiptWriteError extends Data.TaggedError('ReceiptWriteError')<{
+  /** The write-side diagnostic: which receipt artifact failed and why. */
+  message: string;
+}> {}
 export class TurnRuntimeError extends Data.TaggedError('TurnRuntimeError') {}
+
+/**
+ * A project-record failure in the filesystem-as-database directory: unregistered repos,
+ * inactive state, duplicate registration, unsafe names, unreadable/invalid records, and
+ * seeding failures. `message` names the operator fix.
+ */
+export class ProjectError extends Data.TaggedError('ProjectError')<{
+  message: string;
+}> {}
+
+/** A project's flow file failing to load or validate (missing file, import crash, bad shape). */
+export class FlowError extends Data.TaggedError('FlowError')<{
+  message: string;
+}> {}
+
+/** The curated skill pool is unreadable, or a flow declares a skill the pool does not have. */
+export class SkillPoolError extends Data.TaggedError('SkillPoolError')<{
+  message: string;
+}> {}
+
+/** A session-receipt listing walk failing on the sessions tree itself (not per-record skips). */
+export class ReceiptReadError extends Data.TaggedError('ReceiptReadError')<{
+  message: string;
+}> {}
 
 /**
  * One spawned git mechanic failing (clone, pull, worktree, branch, reachable-remote ping).
@@ -84,3 +114,21 @@ export class ApiError extends Data.TaggedError('ApiError')<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+/**
+ * The one failure-to-prose policy, chosen once at the kernel's CLI boundary: a tagged
+ * error's own `message` when it carries one, else the diagnostic riding its `cause`
+ * (adapter classes wrap backend detail there), else the string itself. Callers render
+ * this — they never re-derive failure prose per site.
+ */
+export function describeError(error: unknown): string {
+  if (error instanceof Error && error.message !== '') {
+    return error.message;
+  }
+
+  if (error instanceof Error && 'cause' in error && error.cause != null) {
+    return describeError(error.cause);
+  }
+
+  return String(error);
+}

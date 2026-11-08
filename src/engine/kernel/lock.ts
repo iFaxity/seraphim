@@ -1,6 +1,8 @@
 import { join } from 'node:path';
+import { Clock, Effect, Result } from 'effect';
 
-import { isFsErrorCode, tryMkdir, tryReadFile, tryUnlink, tryWriteFile } from '../../lib/fs.ts';
+import { LockHeldError } from '../../lib/errors.ts';
+import { isFsErrorCode, mkdirE, readFileE, unlinkE, writeFileE } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 
 /**
@@ -14,10 +16,11 @@ import { now, toEpochMs } from '../../lib/time.ts';
  * never lands in a commit. Content is pid + timestamp; the holder's age is read from the
  * timestamp, nothing else is stored.
  *
- * Two layers. An in-process mutex queues concurrent sessions inside one process (the file's
+ * Two layers. An in-process FIFO queues concurrent sessions inside one process (the file's
  * own pid would otherwise read "live" against itself). Across processes the taker waits,
- * polling the file: a dead holder is broken and taken; a released one hands the lock over;
- * a live holder past the wait cap fails the acquisition naming the pid and holding age, so
+ * polling the file on the Effect `Clock` (`Effect.sleep` cadence — a test `TestClock`
+ * advances it): a dead holder is broken and taken; a released one hands the lock over; a
+ * live holder past the wait cap fails the acquisition naming the pid and holding age, so
  * the operator can see and kill the culprit. Waiting is safe because a waiter never redoes
  * the holder's work — `ensureImage` re-runs the content-hash check and reads the just-built
  * image as a cache hit, `cloneIfMissing` sees the existing work tree and skips to the pull.
@@ -35,25 +38,14 @@ type LockFile = {
   readonly at: number;
 };
 
-/** Test over the wait timing without real clocks: the poll cadence, the give-up cap, and the clock. */
+/** Wait tuning for tests: the poll cadence and the give-up cap, driven by the Effect Clock. */
 export type LockTiming = {
   readonly pollMs?: number;
   readonly maxWaitMs?: number;
-  readonly delay?: (ms: number) => Promise<void>;
-  /** Elapsed-time source for the wait cap; epoch ms. Defaults to the kernel clock. */
-  readonly clock?: () => number;
 };
 
-/** One mutex tail per lock path: resolves when the current in-process holder releases. */
+/** One mutex tail per lock path: releases when the current in-process holder releases. */
 const mutexTails = new Map<string, Promise<void>>();
-
-function defaultDelay(ms: number) {
-  const { promise, resolve } = Promise.withResolvers<void>();
-
-  setTimeout(resolve, ms);
-
-  return promise;
-}
 
 /** A pid answers `kill 0` (or EPERM — a foreign-owned process) exactly while its process lives. */
 function pidAlive(pid: number) {
@@ -67,132 +59,133 @@ function pidAlive(pid: number) {
 }
 
 /** Missing or corrupt lock files read unheld — a crash mid-write cannot wedge the repo. */
-async function readLock(path: string): Promise<LockFile | null> {
-  const read = await tryReadFile(path);
+const readLock = (path: string) =>
+  Effect.gen(function* () {
+    const read = yield* Effect.result(readFileE(path));
 
-  if (!read.success) {
-    return null;
-  }
-
-  try {
-    const lock = JSON.parse(read.data) as LockFile;
-
-    // A pid must be a positive integer — anything else (or signal-all values like -1) reads corrupt.
-    return Number.isInteger(lock.pid) && lock.pid > 0 ? lock : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Takes the file lock once the in-process turn is ours. A stale lock (dead pid, corrupt
- * content, or an orphaned own-pid file from a crashed earlier session in this process) is
- * broken and taken; the exclusive-create retry resolves the race where a concurrent breaker
- * wins the unlink. A live foreign holder is waited out up to the cap.
- */
-/** One exclusive-create attempt; rethrows anything but an existing lock. */
-async function createExclusive(path: string, lock: LockFile) {
-  const wrote = await tryWriteFile({ path, data: JSON.stringify(lock), flag: 'wx' });
-
-  if (wrote.success) {
-    return true;
-  }
-
-  if (!isFsErrorCode(wrote.error, 'EEXIST')) {
-    throw wrote.error;
-  }
-
-  return false;
-}
-
-async function takeFileLock(path: string, repo: string, timing: Required<LockTiming>) {
-  const startedAt = timing.clock();
-
-  while (true) {
-    if (await createExclusive(path, { pid: process.pid, at: toEpochMs(now()) })) {
-      return;
+    if (Result.isFailure(read)) {
+      return null;
     }
 
-    const held = await readLock(path);
+    try {
+      const lock = JSON.parse(read.success) as LockFile;
 
-    // A stale lock (dead pid, corrupt content, or an orphaned own-pid file from a crashed
-    // earlier session in this process) is broken and taken; the exclusive-create retry
-    // resolves the race where a concurrent breaker wins the unlink.
-    if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
-      await tryUnlink(path);
+      // A pid must be a positive integer — anything else (or signal-all like -1) reads corrupt.
+      return Number.isInteger(lock.pid) && lock.pid > 0 ? lock : null;
+    } catch {
+      return null;
+    }
+  });
 
-      continue;
+/** One exclusive-create attempt; unexpected (non-EEXIST) write failures crash the acquire. */
+const createExclusive = (path: string, lock: LockFile) =>
+  Effect.gen(function* () {
+    const wrote = yield* Effect.result(
+      writeFileE({ path, data: JSON.stringify(lock), flag: 'wx' }),
+    );
+
+    if (Result.isSuccess(wrote)) {
+      return true;
     }
 
-    if (timing.clock() - startedAt >= timing.maxWaitMs) {
-      throw lockHeldError(repo, held, timing.maxWaitMs);
+    if (isFsErrorCode(wrote.failure, 'EEXIST')) {
+      return false;
     }
 
-    await timing.delay(timing.pollMs);
-  }
-}
+    return yield* Effect.die(wrote.failure);
+  });
 
+/** The held-lock diagnostic: repo, holder pid, holding age, and the cap spent waiting. */
 function lockHeldError(repo: string, held: LockFile, maxWaitMs: number) {
-  const heldSeconds = Math.round((toEpochMs(now()) - held.at) / 1000);
-
-  return new Error(
-    `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
-      `${heldSeconds}s) — gave up waiting ${Math.round(maxWaitMs / 1000)}s; ` +
-      'the holding session may be killed to release it',
+  return Effect.map(
+    Clock.currentTimeMillis,
+    (at) =>
+      new LockHeldError({
+        message:
+          `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
+          `${Math.round((at - held.at) / 1000)}s) — gave up waiting ${Math.round(maxWaitMs / 1000)}s; ` +
+          'the holding session may be killed to release it',
+      }),
   );
 }
 
 /**
- * Runs `guarded` holding the repo's lock, releasing on every path — manual-release code can
- * be forgotten further down a flow, so acquisition owns its own try/finally and the holder
- * never leaks.
+ * Takes the file lock: an exclusive create wins outright; a stale lock (dead pid, corrupt
+ * content, or an orphaned own-pid file from a crashed earlier session in this process) is
+ * broken and taken — the exclusive-create retry resolves the race where a concurrent breaker
+ * wins the unlink. A live foreign holder is waited out up to the cap.
  */
-export async function withRepoLock<T>(
+const takeFileLock = (path: string, repo: string, pollMs: number, maxWaitMs: number) =>
+  Effect.gen(function* () {
+    const startedAt = yield* Clock.currentTimeMillis;
+
+    while (true) {
+      if (yield* createExclusive(path, { pid: process.pid, at: toEpochMs(now()) })) {
+        return;
+      }
+
+      const held = yield* readLock(path);
+
+      if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
+        yield* Effect.result(unlinkE(path));
+        continue;
+      }
+
+      if ((yield* Clock.currentTimeMillis) - startedAt >= maxWaitMs) {
+        return yield* yield* lockHeldError(repo, held, maxWaitMs);
+      }
+
+      yield* Effect.sleep(pollMs);
+    }
+  });
+
+/**
+ * Runs `guarded` holding the repo's lock, releasing on every path — manual-release code can
+ * be forgotten further down a flow, so acquisition owns its own release and the holder never
+ * leaks. The guarded Effect runs inside the acquire's context: whatever services it needs
+ * stay in `R`.
+ */
+export function withRepoLock<A, E, R>(
   home: string,
   repo: string,
-  guarded: () => Promise<T>,
+  guarded: Effect.Effect<A, E, R>,
   timing: LockTiming = {},
-): Promise<T> {
-  const lockedTiming: Required<LockTiming> = {
-    pollMs: timing.pollMs ?? LOCK_POLL_MS,
-    maxWaitMs: timing.maxWaitMs ?? LOCK_MAX_WAIT_MS,
-    delay: timing.delay ?? defaultDelay,
-    clock: timing.clock ?? (() => toEpochMs(now())),
-  };
+): Effect.Effect<A, E | LockHeldError, R> {
+  const pollMs = timing.pollMs ?? LOCK_POLL_MS;
+  const maxWaitMs = timing.maxWaitMs ?? LOCK_MAX_WAIT_MS;
+
   // Repo names cannot start with '.' (registration validates a plain directory name) — and
   // now nothing hidden rides along: the lock is a plain named file in `locks/`.
   const path = join(home, 'locks', `${repo}.lock`);
 
-  const made = await tryMkdir(join(home, 'locks'));
-
-  if (!made.success) {
-    throw made.error;
-  }
-
+  // In-process FIFO: one tail per lock path, resolved when the current holder releases.
   const previous = mutexTails.get(path) ?? Promise.resolve();
   const { promise: turn, resolve: releaseTurn } = Promise.withResolvers<void>();
   const tail = previous.then(() => turn);
-
   mutexTails.set(path, tail);
 
-  let acquired = false;
+  const unlinkRelease = Effect.result(unlinkE(path)).pipe(Effect.asVoid);
 
-  try {
-    await previous;
-    await takeFileLock(path, repo, lockedTiming);
+  return Effect.gen(function* () {
+    yield* Effect.promise(() => previous);
 
-    acquired = true;
-
-    return await guarded();
-  } finally {
-    if (acquired) {
-      await tryUnlink(path);
+    const made = yield* Effect.result(mkdirE(join(home, 'locks')));
+    if (Result.isFailure(made)) {
+      return yield* Effect.die(made.failure);
     }
 
-    releaseTurn();
+    return yield* Effect.flatMap(takeFileLock(path, repo, pollMs, maxWaitMs), () =>
+      Effect.ensuring(guarded, unlinkRelease),
+    );
+  }).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        releaseTurn();
 
-    if (mutexTails.get(path) == tail) {
-      mutexTails.delete(path);
-    }
-  }
+        if (mutexTails.get(path) == tail) {
+          mutexTails.delete(path);
+        }
+      }),
+    ),
+  );
 }

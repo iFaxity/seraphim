@@ -1,8 +1,8 @@
 import { join } from 'node:path';
-import { Schema } from 'effect';
+import { Effect, Result, Schema } from 'effect';
 
-import { tryReadFile } from '../../lib/fs.ts';
-import { failure, success, tryCatch } from '../../lib/result.ts';
+import { FlowError } from '../../lib/errors.ts';
+import { readFileE } from '../../lib/fs.ts';
 import { FlowConfigSchema, type FlowConfig, type SessionContext } from '../core/flow-api.ts';
 
 /**
@@ -31,33 +31,39 @@ function flowPath(home: string, repo: string) {
  * untrusted boundary (CODING_STANDARDS: Schema where untrusted input crosses an edge), so the
  * dynamic import's default export is schema-checked before the engine touches it.
  */
-export async function loadFlow(home: string, repo: string) {
-  const path = flowPath(home, repo);
+export const loadFlow = (home: string, repo: string) =>
+  Effect.gen(function* () {
+    const path = flowPath(home, repo);
 
-  const read = await tryReadFile(path);
+    const read = yield* Effect.result(readFileE(path));
 
-  if (!read.success) {
-    return failure(new Error(`no project flow for '${repo}': expected ${path}`));
-  }
+    if (Result.isFailure(read)) {
+      return yield* new FlowError({ message: `no project flow for '${repo}': expected ${path}` });
+    }
 
-  const imported = await tryCatch(import(path));
+    const imported = yield* Effect.result(Effect.promise(() => import(path)));
 
-  if (!imported.success) {
-    return failure(new Error(`flow for '${repo}' failed to load: ${String(imported.error)}`));
-  }
+    if (Result.isFailure(imported)) {
+      return yield* new FlowError({
+        message: `flow for '${repo}' failed to load: ${String(imported.failure)}`,
+      });
+    }
 
-  const mod =
-    imported.data && typeof imported.data == 'object' && 'default' in imported.data
-      ? imported.data.default
-      : undefined;
+    const mod =
+      imported.success && typeof imported.success == 'object' && 'default' in imported.success
+        ? imported.success.default
+        : undefined;
 
-  // Schema.decodeUnknownSync throws on an invalid shape; tryCatch turns that into the
-  // failure Result the load contract publishes, keeping the load-time fail-fast.
-  const parsed = tryCatch(() => Schema.decodeUnknownSync(FlowModuleSchema)(mod));
+    // Schema.decodeUnknownSync throws on an invalid shape; a caught throw turns into the
+    // FlowError the load contract publishes, keeping the load-time fail-fast.
+    let parsed: { config: FlowConfig; run: unknown };
+    try {
+      parsed = Schema.decodeUnknownSync(FlowModuleSchema)(mod);
+    } catch (error) {
+      return yield* new FlowError({
+        message: `flow for '${repo}' is invalid: ${(error as Error).message}`,
+      });
+    }
 
-  if (!parsed.success) {
-    return failure(new Error(`flow for '${repo}' is invalid: ${parsed.error.message}`));
-  }
-
-  return success(parsed.data as LoadedFlow);
-}
+    return parsed as LoadedFlow;
+  });
