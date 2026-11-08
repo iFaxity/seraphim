@@ -1,13 +1,10 @@
-import { spawn } from 'node:child_process';
 import { Context, Effect, Layer } from 'effect';
 
 import { GitError } from '../../lib/errors.ts';
 import { dirExistsE } from '../../lib/fs.ts';
+import { runCli } from '../../lib/proc.ts';
 import { type Git } from '../core/contracts.ts';
 import { GitService } from '../core/services.ts';
-
-/** Per-stream output cap: clone/ls-remote output is diagnostics only, never retained wholesale. */
-const MAX_STREAM_BYTES = 10 * 1024 * 1024;
 
 /**
  * The real `Git` adapter over the git CLI: one subprocess per operation, full argv
@@ -29,53 +26,8 @@ export type GitRunner = {
 
 /** The real `git` CLI runner — the production half of `gitCliLayer`. */
 const processGit: GitRunner = {
-  run: (args, cwd) =>
-    Effect.gen(function* () {
-      const child = spawn('git', [...args], { stdio: ['ignore', 'pipe', 'pipe'], cwd });
-      const stdout = boundedCapture();
-      const stderr = boundedCapture();
-
-      stdout.stream(child.stdout);
-      stderr.stream(child.stderr);
-
-      const { promise, resolve } = Promise.withResolvers<GitRun>();
-
-      // 'error' fires only when the binary never spawned (ENOENT) — close never will, so
-      // the two are exclusive and each resolves the same promise. Resolving an exitCode
-      // of -1 with the spawn message routes an unspawnable git into the normal GitError
-      // path instead of leaking an unhandled rejection.
-      child.on('error', (error) => resolve({ exitCode: -1, stdout: '', stderr: error.message }));
-      child.on('close', (code) => {
-        resolve({
-          exitCode: code ?? -1,
-          stdout: stdout.chunks.join(''),
-          stderr: stderr.chunks.join(''),
-        });
-      });
-
-      const run = yield* Effect.promise(() => promise);
-
-      return run;
-    }),
+  run: (args, cwd) => runCli('git', args, { cwd, spawnErrorExitCode: -1 }),
 };
-
-/** Collects one stdout/stderr stream into strings, dropping bytes past the retention cap. */
-function boundedCapture() {
-  const chunks: string[] = [];
-  let captured = 0;
-
-  return {
-    chunks,
-    stream(target: NodeJS.ReadableStream | null) {
-      target?.on('data', (chunk: Buffer) => {
-        if (captured < MAX_STREAM_BYTES) {
-          captured += chunk.length;
-          chunks.push(String(chunk));
-        }
-      });
-    },
-  };
-}
 
 /** Passes a successful run through; a nonzero one fails with the labeled diagnostics. */
 function checkedOr(label: string, run: GitRun): Effect.Effect<GitRun, GitError> {
