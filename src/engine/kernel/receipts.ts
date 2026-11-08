@@ -1,11 +1,10 @@
-import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { Schema } from 'effect';
+import { Effect, Result, Schema } from 'effect';
 
 import { type TranscriptFile } from './turns.ts';
 
-import { tryMkdir, tryReadDir, tryReadFile, tryWriteFile } from '../../lib/fs.ts';
-import { tryCatch, success, failure } from '../../lib/result.ts';
+import { ReceiptReadError, ReceiptWriteError } from '../../lib/errors.ts';
+import { isFsErrorCode, mkdirE, readDirE, readFileE, writeFileE } from '../../lib/fs.ts';
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
 
 /**
@@ -112,43 +111,50 @@ export function sessionDir(sessionsRoot: string, relDir: string) {
   return join(sessionsRoot, relDir);
 }
 
-/** Reads one receipt directory's manifest. Invalid JSON or shape is a failure Result. */
-async function readManifest(sessionPath: string) {
-  const raw = await tryReadFile(join(sessionPath, MANIFEST_FILE));
+/** Reads one receipt directory's manifest. Invalid JSON or shape is a labeled read error. */
+const readManifest = (sessionPath: string) =>
+  Effect.gen(function* () {
+    const raw = yield* Effect.result(readFileE(join(sessionPath, MANIFEST_FILE)));
 
-  if (!raw.success) {
-    return failure(new Error(`unreadable manifest in ${sessionPath}: ${String(raw.error)}`));
-  }
+    if (Result.isFailure(raw)) {
+      return yield* new ReceiptReadError({
+        message: `unreadable manifest in ${sessionPath}: ${String(raw.failure)}`,
+      });
+    }
 
-  const json = tryCatch(() => JSON.parse(raw.data) as unknown);
+    let json: unknown;
+    try {
+      json = JSON.parse(raw.success) as unknown;
+    } catch (error) {
+      return yield* new ReceiptReadError({
+        message: `invalid manifest JSON in ${sessionPath}: ${String(error)}`,
+      });
+    }
 
-  if (!json.success) {
-    return failure(new Error(`invalid manifest JSON in ${sessionPath}: ${String(json.error)}`));
-  }
+    // Schema.decodeUnknownSync throws on invalid shape; a caught throw turns into the
+    // labeled read error the list contract publishes.
+    let decoded: SessionManifest;
+    try {
+      decoded = Schema.decodeUnknownSync(SessionManifestSchema)(json);
+    } catch (error) {
+      return yield* new ReceiptReadError({
+        message: `invalid manifest in ${sessionPath}: ${String(error)}`,
+      });
+    }
 
-  // Schema.decodeUnknownSync throws on invalid shape; tryCatch turns that into the
-  // failure Result the read contract publishes.
-  const parsed = tryCatch(() => Schema.decodeUnknownSync(SessionManifestSchema)(json.data));
-
-  if (!parsed.success) {
-    return failure(new Error(`invalid manifest in ${sessionPath}: ${parsed.error.message}`));
-  }
-
-  // The kernel-facing shape: instants. The disk saw numbers; the conversion happens once,
-  // here, at the same edge that validated them.
-  const manifest: Session = {
-    ...parsed.data,
-    startedAt: fromEpochMs(parsed.data.startedAt),
-    endedAt: parsed.data.endedAt == null ? null : fromEpochMs(parsed.data.endedAt),
-    turns: parsed.data.turns.map((turn) => ({
-      ...turn,
-      startedAt: fromEpochMs(turn.startedAt),
-      endedAt: fromEpochMs(turn.endedAt),
-    })),
-  };
-
-  return success(manifest);
-}
+    // The kernel-facing shape: instants. The disk saw numbers; the conversion happens once,
+    // here, at the same edge that validated them.
+    return {
+      ...decoded,
+      startedAt: fromEpochMs(decoded.startedAt),
+      endedAt: decoded.endedAt == null ? null : fromEpochMs(decoded.endedAt),
+      turns: decoded.turns.map((turn) => ({
+        ...turn,
+        startedAt: fromEpochMs(turn.startedAt),
+        endedAt: fromEpochMs(turn.endedAt),
+      })),
+    } satisfies Session;
+  });
 
 /** All sessions across all repos under the receipts root, newest first. */
 export type SessionListing = {
@@ -158,92 +164,96 @@ export type SessionListing = {
   /** Last line of the session's free-text `flow.log`, if any, for status rendering. */
   readonly lastLog: string | null;
 };
+
 /** Mutable unreadable-count accumulator, shared by the listing helpers. */
 type UnreadableCount = { count: number };
 
 /** One receipt directory into a listing, or an empty array when its manifest is unreadable. */
-async function listOneSession(
+const listOneSession = (
   sessionsRoot: string,
   repoName: string,
-  dirEntry: Dirent,
+  dirName: string,
   skipped: UnreadableCount,
-) {
-  const dir = join(sessionsRoot, repoName, dirEntry.name);
-  const read = await readManifest(dir);
+) =>
+  Effect.gen(function* () {
+    const dir = join(sessionsRoot, repoName, dirName);
+    const read = yield* Effect.result(readManifest(dir));
 
-  if (!read.success) {
-    skipped.count++;
+    if (Result.isFailure(read)) {
+      skipped.count++;
 
-    return [];
-  }
+      return [];
+    }
 
-  return [{ repo: repoName, dir, manifest: read.data, lastLog: await lastLog(dir) }];
-}
+    return [{ repo: repoName, dir, manifest: read.success, lastLog: yield* lastLog(dir) }];
+  });
 
 /** One repo directory into session listings, or an empty array when it is unreadable. */
-async function listRepoSessions(sessionsRoot: string, repoEntry: Dirent, skipped: UnreadableCount) {
-  const repoRoot = join(sessionsRoot, repoEntry.name);
-  const dirs = await tryReadDir(repoRoot);
+const listRepoSessions = (sessionsRoot: string, repoName: string, skipped: UnreadableCount) =>
+  Effect.gen(function* () {
+    const dirs = yield* Effect.result(readDirE(join(sessionsRoot, repoName)));
 
-  if (!dirs.success) {
-    skipped.count++;
+    if (Result.isFailure(dirs)) {
+      skipped.count++;
 
-    return [];
-  }
+      return [];
+    }
 
-  const listings = await Promise.all(
-    dirs.data
-      .filter((dirEntry) => dirEntry.isDirectory())
-      .map(async (dirEntry) => listOneSession(sessionsRoot, repoEntry.name, dirEntry, skipped)),
-  );
+    // First failure wins: an unreadable manifest is a skip (counted, not fatal), so the
+    // fan-out's error channel is empty by construction — the reads cannot fail.
+    const listings = yield* Effect.all(
+      dirs.success
+        .filter((dirEntry) => dirEntry.isDirectory())
+        .map((dirEntry) => listOneSession(sessionsRoot, repoName, dirEntry.name, skipped)),
+      { concurrency: 'unbounded' },
+    );
 
-  return listings.flat();
-}
+    return listings.flat();
+  });
 
 /** All sessions across all repos under the receipts root, newest first. */
-export async function listSessions(sessionsRoot: string) {
-  const repos = await tryReadDir(sessionsRoot);
+export const listSessions = (sessionsRoot: string) =>
+  Effect.gen(function* () {
+    const repos = yield* Effect.result(readDirE(sessionsRoot));
 
-  if (!repos.success) {
-    return repos.error instanceof Error && 'code' in repos.error && repos.error.code == 'ENOENT'
-      ? successEmpty()
-      : failure(new Error(`unreadable sessions root ${sessionsRoot}: ${String(repos.error)}`));
-  }
+    if (Result.isFailure(repos)) {
+      if (isFsErrorCode(repos.failure, 'ENOENT')) {
+        return { sessions: [], skipped: 0 };
+      }
 
-  const skipped = { count: 0 };
+      return yield* new ReceiptReadError({
+        message: `unreadable sessions root ${sessionsRoot}: ${String(repos.failure)}`,
+      });
+    }
 
-  const listings = (
-    await Promise.all(
-      repos.data
+    const skipped = { count: 0 };
+
+    const listings = yield* Effect.all(
+      repos.success
         .filter((repoEntry) => repoEntry.isDirectory())
-        .map((repoEntry) => listRepoSessions(sessionsRoot, repoEntry, skipped)),
-    )
-  ).flat();
+        .map((repoEntry) => listRepoSessions(sessionsRoot, repoEntry.name, skipped)),
+      { concurrency: 'unbounded' },
+    );
 
-  return {
-    ...success(
-      listings.sort((a, b) => toEpochMs(b.manifest.startedAt) - toEpochMs(a.manifest.startedAt)),
-    ),
-    skipped: skipped.count,
-  };
-}
-
-function successEmpty() {
-  return { ...success([]), skipped: 0 };
-}
+    return {
+      sessions: listings
+        .flat()
+        .sort((a, b) => toEpochMs(b.manifest.startedAt) - toEpochMs(a.manifest.startedAt)),
+      skipped: skipped.count,
+    };
+  });
 
 /** Last line of a session's `flow.log`, or null when there is none. */
-async function lastLog(dir: string) {
-  const read = await tryReadFile(join(dir, 'flow.log'));
+const lastLog = (dir: string) =>
+  Effect.gen(function* () {
+    const read = yield* Effect.result(readFileE(join(dir, 'flow.log')));
 
-  if (!read.success) {
-    return null;
-  }
+    if (Result.isFailure(read)) {
+      return null;
+    }
 
-  const lines = read.data.trimEnd().split('\n');
-
-  return lines.at(-1) ?? null;
-}
+    return read.success.trimEnd().split('\n').at(-1) ?? null;
+  });
 
 /** The disk shape of one kernel turn: instants converted to epoch ms. */
 function toDiskTurn(turn: Turn) {
@@ -252,122 +262,128 @@ function toDiskTurn(turn: Turn) {
 
 /**
  * Converts the kernel manifest to its disk shape and writes it, validating at the write
- * boundary so the persisted shape is always the checked one. Failures are returned as
- * plain errors so writeReceipt can layer the Result over both helpers uniformly.
+ * boundary so the persisted shape is always the checked one. Any failure is a labeled
+ * `ReceiptWriteError` — the write contract's one error class.
  */
-async function writeSessionManifest(dir: string, manifest: Session) {
-  const diskManifest = {
-    ...manifest,
-    startedAt: toEpochMs(manifest.startedAt),
-    endedAt: manifest.endedAt == null ? null : toEpochMs(manifest.endedAt),
-    turns: manifest.turns.map(toDiskTurn),
-  };
-  // Same decode boundary as readManifest: a SchemaError here means the kernel-drafted
-  // manifest does not match the persisted contract.
-  const validated = tryCatch(() => Schema.decodeUnknownSync(SessionManifestSchema)(diskManifest));
+const writeSessionManifest = (dir: string, manifest: Session) =>
+  Effect.gen(function* () {
+    const diskManifest = {
+      ...manifest,
+      startedAt: toEpochMs(manifest.startedAt),
+      endedAt: manifest.endedAt == null ? null : toEpochMs(manifest.endedAt),
+      turns: manifest.turns.map(toDiskTurn),
+    };
+    // Same decode boundary as readManifest: a SchemaError here means the kernel-drafted
+    // manifest does not match the persisted contract.
+    let validated: SessionManifest;
+    try {
+      validated = Schema.decodeUnknownSync(SessionManifestSchema)(diskManifest);
+    } catch (error) {
+      return yield* new ReceiptWriteError({
+        message: `session manifest invalid: ${(error as Error).message}`,
+      });
+    }
 
-  if (!validated.success) {
-    return new Error(`session manifest invalid: ${validated.error.message}`);
-  }
+    const made = yield* Effect.result(mkdirE(dir));
+    if (Result.isFailure(made)) {
+      return yield* new ReceiptWriteError({
+        message: `receipt dir creation failed: ${String(made.failure)}`,
+      });
+    }
 
-  const mkdirResult = await tryMkdir(dir);
+    const wrote = yield* Effect.result(
+      writeFileE({
+        path: join(dir, MANIFEST_FILE),
+        data: `${JSON.stringify(validated, null, 2)}\n`,
+      }),
+    );
 
-  if (!mkdirResult.success) {
-    return new Error(`receipt dir creation failed: ${String(mkdirResult.error)}`);
-  }
-
-  const manifestWrite = await tryWriteFile({
-    path: join(dir, MANIFEST_FILE),
-    data: `${JSON.stringify(validated.data, null, 2)}\n`,
+    if (Result.isFailure(wrote)) {
+      return yield* new ReceiptWriteError({
+        message: `manifest write failed: ${String(wrote.failure)}`,
+      });
+    }
   });
-
-  if (!manifestWrite.success) {
-    return new Error(`manifest write failed: ${String(manifestWrite.error)}`);
-  }
-
-  return null;
-}
 
 /**
  * Writes turn records, the optional flow log, and transcripts into an existing receipt
- * directory. Failures are returned as plain errors so writeReceipt can layer the Result
- * over both helpers uniformly.
+ * directory. Any failure is a labeled `ReceiptWriteError`.
  */
-async function writeReceiptFiles(
+const writeReceiptFiles = (
   dir: string,
   turns: readonly Turn[],
   logs: readonly string[],
   transcripts: readonly TranscriptFile[],
-) {
-  const turnWrite = await writeAll(
-    dir,
-    turns.map((turn) => ({
-      name: `turn-${turn.index}.json`,
-      body: `${JSON.stringify(toDiskTurn(turn), null, 2)}\n`,
-    })),
-  );
+) =>
+  Effect.gen(function* () {
+    const turnWrite = yield* Effect.result(
+      writeAll(
+        dir,
+        turns.map((turn) => ({
+          name: `turn-${turn.index}.json`,
+          body: `${JSON.stringify(toDiskTurn(turn), null, 2)}\n`,
+        })),
+      ),
+    );
 
-  if (!turnWrite.success) {
-    return new Error(`turn record write failed: ${String(turnWrite.error)}`);
-  }
-
-  if (logs.length > 0) {
-    const logWrite = await tryWriteFile({
-      path: join(dir, 'flow.log'),
-      data: `${logs.join('\n')}\n`,
-    });
-
-    if (!logWrite.success) {
-      return new Error(`log write failed: ${String(logWrite.error)}`);
+    if (Result.isFailure(turnWrite)) {
+      return yield* new ReceiptWriteError({
+        message: `turn record write failed: ${String(turnWrite.failure)}`,
+      });
     }
-  }
 
-  // Full conversation transcript per turn, alongside the turn record.
-  const transcriptWrite = await writeAll(
-    dir,
-    transcripts.map((transcript) => ({ name: transcript.name, body: `${transcript.body}\n` })),
-  );
+    if (logs.length > 0) {
+      const logWrite = yield* Effect.result(
+        writeFileE({ path: join(dir, 'flow.log'), data: `${logs.join('\n')}\n` }),
+      );
 
-  if (!transcriptWrite.success) {
-    return new Error(`transcript write failed: ${String(transcriptWrite.error)}`);
-  }
+      if (Result.isFailure(logWrite)) {
+        return yield* new ReceiptWriteError({
+          message: `log write failed: ${String(logWrite.failure)}`,
+        });
+      }
+    }
 
-  return null;
-}
+    // Full conversation transcript per turn, alongside the turn record.
+    const transcriptWrite = yield* Effect.result(
+      writeAll(
+        dir,
+        transcripts.map((transcript) => ({ name: transcript.name, body: `${transcript.body}\n` })),
+      ),
+    );
 
-export async function writeReceipt(
+    if (Result.isFailure(transcriptWrite)) {
+      return yield* new ReceiptWriteError({
+        message: `transcript write failed: ${String(transcriptWrite.failure)}`,
+      });
+    }
+  });
+
+export const writeReceipt = (
   sessionsRoot: string,
   relDir: string,
   manifest: Session,
   turns: readonly Turn[],
   logs: readonly string[],
   transcripts: readonly TranscriptFile[],
-) {
-  const dir = sessionDir(sessionsRoot, relDir);
-  const manifestError = await writeSessionManifest(dir, manifest);
+): Effect.Effect<void, ReceiptWriteError, never> =>
+  Effect.gen(function* () {
+    const dir = sessionDir(sessionsRoot, relDir);
 
-  if (manifestError !== null) {
-    return failure(manifestError);
-  }
-
-  const filesError = await writeReceiptFiles(dir, turns, logs, transcripts);
-
-  if (filesError !== null) {
-    return failure(filesError);
-  }
-
-  return success();
-}
+    yield* writeSessionManifest(dir, manifest);
+    yield* writeReceiptFiles(dir, turns, logs, transcripts);
+  });
 
 /**
- * Writes every file, reporting the first failure as a failure Result. The one write loop the
- * receipts module owns — manifest, turn records, and transcripts all go through it.
+ * Writes every file, reporting the first failure. The one write fan-out the receipts module
+ * owns — manifest, turn records, and transcripts all go through it; first failure wins.
  */
-async function writeAll(dir: string, files: readonly { name: string; body: string }[]) {
-  const writes = await Promise.all(
-    files.map((file) => tryWriteFile({ path: join(dir, file.name), data: file.body })),
-  );
-  const failed = writes.find((write) => !write.success);
+const writeAll = (dir: string, files: readonly { name: string; body: string }[]) =>
+  Effect.gen(function* () {
+    const writes = yield* Effect.all(
+      files.map((file) => writeFileE({ path: join(dir, file.name), data: file.body })),
+      { concurrency: 'unbounded' },
+    );
 
-  return failed ?? success();
-}
+    return writes;
+  });

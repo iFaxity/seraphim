@@ -7,7 +7,7 @@ import { beforeEach, describe, expect } from 'vite-plus/test';
 
 import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
 
-import { expectFailure } from '../../../test/failure.ts';
+import { expectTaggedFailure } from '../../../test/exit.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 
@@ -72,7 +72,7 @@ describe('dockerSandbox.ensureImage', () => {
         const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
         const sandbox = dockerSandbox({ projectsRoot, docker });
 
-        const error = yield* Effect.promise(() => expectFailure(sandbox.ensureImage('ghost')));
+        const error = yield* expectTaggedFailure(sandbox.ensureImage('ghost'));
 
         expect(error).toBeInstanceOf(UnavailableError);
         expect(error.cause).toBeInstanceOf(Error);
@@ -149,7 +149,7 @@ describe('dockerSandbox.ensureImage', () => {
       });
       const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      const error = yield* Effect.promise(() => expectFailure(sandbox.ensureImage('broken')));
+      const error = yield* expectTaggedFailure(sandbox.ensureImage('broken'));
 
       expect(error).toBeInstanceOf(UnavailableError);
       expect((error.cause as Error).message).toMatch(/image build failed for 'broken'/);

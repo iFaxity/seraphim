@@ -6,7 +6,7 @@ import { describe, expect } from 'vite-plus/test';
 
 import { gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
-import { expectFailure } from '../../../test/failure.ts';
+import { expectTaggedFailure } from '../../../test/exit.ts';
 import { GitError } from '../../lib/errors.ts';
 import { mkdtemp } from 'node:fs/promises';
 
@@ -66,8 +66,8 @@ describe('gitAdapter.push', () => {
     Effect.gen(function* () {
       const git = gitAdapter(pushRunner(() => run(128, '', 'fatal: no upstream configured')));
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(git.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' })),
+      const error = yield* expectTaggedFailure(
+        git.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' }),
       );
 
       expect(error).toBeInstanceOf(GitError);
@@ -96,9 +96,7 @@ describe('gitAdapter.probeRemote', () => {
         fakeRunner(() => run(128, '', 'fatal: unable to access: could not resolve host')),
       );
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(git.probeRemote('https://down.invalid/repo.git')),
-      );
+      const error = yield* expectTaggedFailure(git.probeRemote('https://down.invalid/repo.git'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/remote not reachable.*could not resolve host/s);
@@ -138,8 +136,8 @@ describe('gitAdapter.cloneIfMissing', () => {
     Effect.gen(function* () {
       const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: repository not found')));
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(git.cloneIfMissing('/x', 'https://bad.invalid/r.git')),
+      const error = yield* expectTaggedFailure(
+        git.cloneIfMissing('/x', 'https://bad.invalid/r.git'),
       );
 
       expect(error).toBeInstanceOf(GitError);
@@ -160,7 +158,7 @@ describe('gitAdapter.pull', () => {
 
       const broken = gitAdapter(fakeRunner(() => run(1, '', 'error: cannot fast-forward')));
 
-      const error = yield* Effect.promise(() => expectFailure(broken.pull('/x')));
+      const error = yield* expectTaggedFailure(broken.pull('/x'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/pull failed.*cannot fast-forward/s);
@@ -200,10 +198,8 @@ describe('gitAdapter.createWorktree', () => {
         fakeRunner(() => run(128, '', "fatal: a branch named 'x' already exists")),
       );
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(
-          git.createWorktree({ repoPath: '/x', branch: 'x', path: '/p', baseBranch: 'main' }),
-        ),
+      const error = yield* expectTaggedFailure(
+        git.createWorktree({ repoPath: '/x', branch: 'x', path: '/p', baseBranch: 'main' }),
       );
 
       expect(error).toBeInstanceOf(GitError);
@@ -229,7 +225,7 @@ describe('gitAdapter.defaultBranch', () => {
         fakeRunner(() => run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref')),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(git.defaultBranch('/x')));
+      const error = yield* expectTaggedFailure(git.defaultBranch('/x'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/default branch lookup failed.*not a symbolic ref/s);
@@ -267,8 +263,8 @@ describe('gitAdapter.removeWorktree', () => {
       const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
       const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(git.removeWorktree({ repoPath: '/repos/widgets', path: worktree })),
+      const error = yield* expectTaggedFailure(
+        git.removeWorktree({ repoPath: '/repos/widgets', path: worktree }),
       );
 
       expect(error).toBeInstanceOf(GitError);
@@ -314,10 +310,8 @@ describe('gitAdapter.deleteBranch', () => {
       );
       const git = gitAdapter(runner);
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(
-          git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),
-        ),
+      const error = yield* expectTaggedFailure(
+        git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),
       );
 
       expect(error).toBeInstanceOf(GitError);

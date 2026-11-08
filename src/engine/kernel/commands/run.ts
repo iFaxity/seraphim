@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { failure, success } from '../../../lib/result.ts';
 import { toEpochMs } from '../../../lib/time.ts';
 import { command } from '../command.ts';
@@ -16,21 +18,20 @@ export const runCommand = command({
 
     return success({ repo: args[0] ?? '', issueNumber: Number(args[1]) });
   },
-  execute: async (env, { repo, issueNumber }) => {
-    const result = await runSession(env, { repo, issueNumber });
+  execute: ({ repo, issueNumber }) =>
+    Effect.map(runSession({ repo, issueNumber }), (result) => {
+      const { manifest } = result;
 
-    if (!result.success) {
-      return failure(result.error);
-    }
-
-    const { manifest } = result.data;
-
-    return success({
-      kind: 'session-ran' as const,
-      repo: manifest.repo,
-      issueNumber: manifest.issueNumber,
-      state: manifest.state,
-      receiptDir: sessionRelDir(manifest.repo, manifest.issueNumber, toEpochMs(manifest.startedAt)),
-    });
-  },
+      return {
+        kind: 'session-ran' as const,
+        repo: manifest.repo,
+        issueNumber: manifest.issueNumber,
+        state: manifest.state,
+        receiptDir: sessionRelDir(
+          manifest.repo,
+          manifest.issueNumber,
+          toEpochMs(manifest.startedAt),
+        ),
+      };
+    }),
 });

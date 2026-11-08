@@ -1,4 +1,5 @@
-import { failure, success } from '../../../lib/result.ts';
+import { Effect } from 'effect';
+
 import { command, strictFlags } from '../command.ts';
 import { listProjects } from '../projects.ts';
 
@@ -8,18 +9,11 @@ export const listCommand = command({
   summary: 'list registered projects',
   usage: 'list [--json]',
   parse: strictFlags('list', { json: { type: 'boolean', default: false } }),
-  execute: async (env, values) => {
-    const listed = await listProjects(env.workspaceRoot);
-
-    if (!listed.success) {
-      return failure(listed.error);
-    }
-
-    return success({
+  execute: (values) =>
+    Effect.map(listProjects(), (listed) => ({
       kind: 'projects' as const,
-      projects: listed.data.projects,
-      skipped: listed.data.skipped,
+      projects: listed.projects,
+      skipped: listed.skipped,
       json: values['json'] === true,
-    });
-  },
+    })),
 });

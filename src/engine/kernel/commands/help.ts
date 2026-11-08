@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { type AnyCommand, type Command, type ErrorOutcome } from '../command.ts';
 
 /** One usage line of the command table, as help needs it. */
@@ -47,6 +49,6 @@ export function makeHelpCommand(
     name: 'help',
     summary: 'show command help',
     usage: 'help [command]',
-    handler: (_env, args) => Promise.resolve(helpOutcome(args)),
+    handler: (args) => Effect.succeed(helpOutcome(args)),
   };
 }

@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { failure, success } from '../../../lib/result.ts';
 import { command } from '../command.ts';
 import { deactivateProject } from '../projects.ts';
@@ -14,13 +16,9 @@ export const deactivateCommand = command({
 
     return success({ repo: args[0] ?? '' });
   },
-  execute: async (env, { repo }) => {
-    const result = await deactivateProject(env.workspaceRoot, repo);
-
-    if (!result.success) {
-      return failure(result.error);
-    }
-
-    return success({ kind: 'deactivated' as const, repo: result.data.repo });
-  },
+  execute: ({ repo }) =>
+    Effect.map(deactivateProject(repo), (record) => ({
+      kind: 'deactivated' as const,
+      repo: record.repo,
+    })),
 });

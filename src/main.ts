@@ -1,20 +1,13 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Effect, Layer, ManagedRuntime } from 'effect';
+import { Layer, ManagedRuntime } from 'effect';
 
 import { engine } from './engine/core/engine.ts';
-import { type KernelEnvironment } from './engine/core/env.ts';
-import {
-  AgentRuntimeService,
-  GitService,
-  NotifierService,
-  SandboxService,
-  TrackerService,
-} from './engine/core/services.ts';
-import { fakeKernelEnvironment } from './engine/fakes/env.ts';
+import { HomeService, homeLayout } from './engine/core/env.ts';
 import { apiLayer, GithubToken } from './engine/forges/github-api.ts';
 import { trackerLayer } from './engine/forges/github-tracker.ts';
+import { type CommandServices } from './engine/kernel/command.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
 import { loadKernelConfig } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
@@ -22,56 +15,58 @@ import { gitCliLayer, gitLayer } from './engine/kernel/git.ts';
 import { poolRoot } from './engine/kernel/skills.ts';
 import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.ts';
 import { runtimeLayer } from './engine/runtimes/pi.ts';
-import {
-  DockerRunnerService,
-  dockerCliLayer,
-  dockerSandboxLayer,
-} from './engine/sandboxes/docker-sandbox.ts';
+import { dockerCliLayer, dockerSandboxLayer } from './engine/sandboxes/docker-sandbox.ts';
 import { readEnvFile } from './lib/env-file.ts';
+import { describeError } from './lib/errors.ts';
 import { fileExistsSync } from './lib/fs.ts';
-import { failure, success, type Result } from './lib/result.ts';
+import { success, type Result } from './lib/result.ts';
 
 /**
  * CLI boundary: the only place engine outcomes become stdout prose. Rendering lives here so
- * the engine stays presentation-free (ADR-0002) and tests can branch on the Result tag.
- * The KernelEnvironment is composed here (composition root) and threaded explicitly into the engine.
+ * the engine stays presentation-free (ADR-0002) and tests can substitute a Layer. The
+ * composition root builds the adapter Layer stack (docker sandbox, git CLI, GitHub tracker,
+ * pi runtime) once per invocation; the engine runs against it through a ManagedRuntime, and
+ * the prune plan's confirm pass re-dispatches through the same runtime.
  */
-export async function main(argv: readonly string[], env?: KernelEnvironment) {
-  let composed;
+export async function main(argv: readonly string[], layer?: Layer.Layer<CommandServices>) {
+  if (layer == null) {
+    const composed = await composeEngineLayer();
 
-  if (env != null) {
-    composed = success(env);
-  } else {
-    composed = await composeKernelEnvironment();
+    if (!composed.success) {
+      return `error: ${composed.error.message}`;
+    }
+
+    layer = composed.data;
   }
 
-  if (!composed.success) {
-    return `error: ${composed.error.message}`;
+  const managed = ManagedRuntime.make(layer);
+
+  try {
+    // Defect-class failures (unexpected fs errors surfaced via Effect.die) reject the
+    // promise rather than landing in the typed error channel — the CLI still renders
+    // them as `error:` prose, never a raw stack trace.
+    const outcome = await managed.runPromise(engine(argv));
+
+    return await render(outcome, (next) => managed.runPromise(engine(next)));
+  } catch (defect) {
+    return `error: ${describeError(defect)}`;
+  } finally {
+    await managed.dispose();
   }
-
-  const effectiveEnv = composed.data;
-  const result = await engine(argv, effectiveEnv).then(
-    (outcome) => success(outcome),
-    (error) => failure(error),
-  );
-  const rendered = result.success ? await render(result.data, effectiveEnv) : failure(result.error);
-
-  return rendered.success ? rendered.data : `error: ${rendered.error.message}`;
 }
 
 /**
- * Composition root: resolves the adapter Layer stack into the kernel's env object — the
- * docker sandbox, the git CLI (including the host-side forge push), the GitHub tracker,
- * and the pi agent runtime — every adapter reachable as a Layer per the adapter sweep; the
- * env funnel itself survives until the kernel sweep. The runtime launches turns through the
- * sandbox's own exec: the model CLI, its tool calls, and its credentials run inside the
- * project image, with the per-turn wall-clock stop derived here (per-session flow caps
- * stay kernel-gated in `runSession`). Tracker auth: `GH_TOKEN` from the seraphim-home `.env`.
+ * Composition root: resolves the adapter Layer stack the kernel's commands run against —
+ * the docker sandbox, the git CLI (including the host-side forge push), the GitHub tracker,
+ * and the pi agent runtime — every adapter reachable as a Layer per the adapter sweep. The
+ * runtime launches turns through the sandbox's own exec: the model CLI, its tool calls, and
+ * its credentials run inside the project image, with the per-turn wall-clock stop derived
+ * here (per-session flow caps stay kernel-gated in `runSession`). Tracker auth: `GH_TOKEN`
+ * from the seraphim-home `.env`.
  */
 const TURN_WALL_CLOCK_MS = 30 * 60_000;
 
-/** One adapter Layer stack per CLI invocation: built, resolved to services, disposed. */
-async function composeKernelEnvironment() {
+async function composeEngineLayer() {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
   const projectsRoot = join(home, 'projects');
   const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
@@ -95,42 +90,24 @@ async function composeKernelEnvironment() {
     runtimeLayer(TURN_WALL_CLOCK_MS),
     dockerSandboxLayer(projectsRoot),
   );
-  // provideMerge keeps the dependency services (DockerRunner among them — prune's env
-  // field needs the runner itself, not only what sandbox built on top of it).
-  const full = Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
+  // provideMerge keeps the dependency services (DockerRunner among them — prune's plan needs
+  // the runner itself, not only what sandbox built on top of it).
+  const adapters = Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
     Layer.provideMerge(baseLayer),
   );
 
-  const managed = ManagedRuntime.make(full);
-
-  try {
-    return await managed.runPromise(
-      Effect.gen(function* () {
-        const tracker = yield* TrackerService;
-        const sandbox = yield* SandboxService;
-        const runtime = yield* AgentRuntimeService;
-        const git = yield* GitService;
-        const notifier = yield* NotifierService;
-        const docker = yield* DockerRunnerService;
-
-        return success(
-          fakeKernelEnvironment({
-            tracker,
-            sandbox,
-            git,
-            notifier,
-            runtime,
-            workspaceRoot: home,
-            sessionsRoot: join(home, 'sessions'),
-            poolRoot: resolvePoolRoot(home),
-            docker,
-          }).env,
-        );
-      }),
-    );
-  } finally {
-    await managed.dispose();
-  }
+  return success(
+    Layer.mergeAll(
+      adapters,
+      Layer.succeed(
+        HomeService,
+        homeLayout(home, {
+          poolRoot: resolvePoolRoot(home),
+          sessionsRoot: join(home, 'sessions'),
+        }),
+      ),
+    ) as Layer.Layer<CommandServices>,
+  );
 }
 
 /**
@@ -146,10 +123,13 @@ function resolvePoolRoot(home: string) {
     : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
 }
 
+/** Runs one more engine dispatch on the caller's runtime — the prune confirm pass. */
+type RunNext = (argv: readonly string[]) => Promise<Outcome>;
+
 type OutcomeRenderer = {
   [K in Outcome['kind']]: (
     out: Extract<Outcome, { kind: K }>,
-    env: KernelEnvironment,
+    run: RunNext,
   ) => Result<string> | Promise<Result<string>>;
 };
 
@@ -173,7 +153,7 @@ const RENDER: OutcomeRenderer = {
     ),
   'deactivated': (out) =>
     success(`deactivated ${out.repo} — sessions will refuse it until re-registered`),
-  'prune-plan': (out, env) => renderPrunePlan(out, env),
+  'prune-plan': (out, run) => renderPrunePlan(out, run),
   'prune-done': (out) => {
     const count =
       out.removed.sessions.length + out.removed.orphanWorktrees.length + out.removed.images.length;
@@ -200,20 +180,16 @@ const RENDER: OutcomeRenderer = {
   'error': (out) => success(`error: ${out.message}`),
 };
 
-async function render(result: Result<Outcome>, env: KernelEnvironment): Promise<Result<string>> {
-  if (!result.success) {
-    return failure(result.error);
-  }
-
-  const out = result.data;
+async function render(out: Outcome, run: RunNext): Promise<string> {
   // The discriminant lookup cannot correlate the union member for TS; the cast local
   // restores the (out.kind == renderer key) pairing the mapped type guarantees.
   const renderer = RENDER[out.kind] as (
     out: Outcome,
-    env: KernelEnvironment,
+    run: RunNext,
   ) => Result<string> | Promise<Result<string>>;
+  const rendered = await renderer(out, run);
 
-  return await renderer(out, env);
+  return rendered.success ? rendered.data : `error: ${rendered.error.message}`;
 }
 
 /**
@@ -222,7 +198,7 @@ async function render(result: Result<Outcome>, env: KernelEnvironment): Promise<
  */
 async function renderPrunePlan(
   out: Extract<Outcome, { kind: 'prune-plan' }>,
-  env: KernelEnvironment,
+  run: RunNext,
 ): Promise<Result<string>> {
   if (out.json) {
     return success(JSON.stringify(out.plan, null, 2));
@@ -247,9 +223,9 @@ async function renderPrunePlan(
     return success('aborted: nothing deleted');
   }
 
-  const confirmed = await engine(['prune', '--confirm'], env);
+  const confirmed = await run(['prune', '--confirm']);
 
-  return render(confirmed, env);
+  return success(await render(confirmed, run));
 }
 
 function renderProjects(out: Extract<Outcome, { kind: 'projects' }>) {

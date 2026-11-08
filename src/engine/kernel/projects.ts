@@ -1,16 +1,10 @@
-import { Effect } from 'effect';
+import { Effect, Result } from 'effect';
 import { z } from 'zod';
 
-import {
-  isFsErrorCode,
-  tryMkdir,
-  tryReadDir,
-  tryReadFile,
-  tryRename,
-  tryWriteFile,
-} from '../../lib/fs.ts';
-import { failure, success, tryCatch } from '../../lib/result.ts';
-import { type Git } from '../core/contracts.ts';
+import { describeError, ProjectError } from '../../lib/errors.ts';
+import { isFsErrorCode, mkdirE, readDirE, readFileE, renameE, writeFileE } from '../../lib/fs.ts';
+import { HomeService } from '../core/env.ts';
+import { GitService } from '../core/services.ts';
 
 /**
  * Projects are the filesystem-as-database (ADR-0001): one zod-validated record per project at
@@ -59,15 +53,11 @@ function deriveName(url: string) {
 /** Reads one project template's body at module load — boot seeding fails fast on an
  * unreadable template instead of registering with an empty slot later. */
 async function templateBody(fileName: string) {
-  const read = await tryReadFile(
-    new URL(`../../../templates/project/${fileName}`, import.meta.url),
+  const read = await Effect.runPromise(
+    readFileE(new URL(`../../../templates/project/${fileName}`, import.meta.url)),
   );
 
-  if (!read.success) {
-    throw read.error;
-  }
-
-  return read.data;
+  return read;
 }
 
 /**
@@ -98,283 +88,297 @@ const SLOTS = [
  */
 const HOME_TEMPLATES = new URL('../../../templates/home/', import.meta.url);
 
-async function seedHome(home: string) {
-  const entries = await tryReadDir(HOME_TEMPLATES);
+const seedHome = (home: string) =>
+  Effect.gen(function* () {
+    const entries = yield* readDirE(HOME_TEMPLATES);
 
-  if (!entries.success) {
-    return entries;
-  }
+    for (const entry of entries) {
+      if (!entry.isFile()) {
+        continue;
+      }
 
-  for (const entry of entries.data) {
-    if (!entry.isFile()) {
-      continue;
+      const read = yield* Effect.result(readFileE(new URL(entry.name, HOME_TEMPLATES)));
+      if (Result.isFailure(read)) {
+        return yield* Effect.die(read.failure);
+      }
+
+      const seeded = yield* Effect.result(
+        writeFileE({ path: `${home}/${entry.name}`, data: read.success, flag: 'wx' }),
+      );
+
+      if (Result.isFailure(seeded) && !isFsErrorCode(seeded.failure, 'EEXIST')) {
+        return yield* Effect.die(seeded.failure);
+      }
     }
-
-    const read = await tryReadFile(new URL(entry.name, HOME_TEMPLATES));
-
-    if (!read.success) {
-      return read;
-    }
-
-    const seeded = await tryWriteFile({
-      path: `${home}/${entry.name}`,
-      data: read.data,
-      flag: 'wx',
-    });
-
-    if (!seeded.success && !isFsErrorCode(seeded.error, 'EEXIST')) {
-      return seeded;
-    }
-  }
-
-  return success(null);
-}
+  });
 
 /** Maps the derived name to the repo id, or the fail-fast naming the fix. */
 function checkedRepo(url: string, name: string | undefined) {
   const derived = name ?? deriveName(url);
 
   if (!derived) {
-    return failure(
-      new Error(
-        `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
-      ),
+    return Effect.fail(
+      new ProjectError({
+        message: `cannot derive a project name from '${url}': pass an explicit name (seraphim register <git-url> <name>)`,
+      }),
     );
   }
 
   if (!NAME_PATTERN.test(derived)) {
-    return failure(
-      new Error(
-        `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
-      ),
+    return Effect.fail(
+      new ProjectError({
+        message: `invalid project name '${derived}': use letters, digits, dots, dashes or underscores`,
+      }),
     );
   }
 
-  return success(derived);
+  return Effect.succeed(derived);
 }
 
 /**
  * Creates the project directory and seeds the home ignore, before anything else touches
  * the filesystem. The first failure wins — nothing further is seeded.
  */
-async function makeDirAndSeedHome(home: string, repo: string) {
-  const dir = projectPath(home, repo);
-  const made = await tryMkdir(dir);
+const makeDirAndSeedHome = (home: string, repo: string) =>
+  Effect.gen(function* () {
+    const dir = projectPath(home, repo);
 
-  if (!made.success) {
-    return made;
-  }
+    const made = yield* Effect.result(mkdirE(dir));
+    if (Result.isFailure(made)) {
+      return yield* new ProjectError({
+        message: `could not create the project directory ${dir}: ${String(made.failure)}`,
+      });
+    }
 
-  return seedHome(home);
-}
+    const seeded = yield* Effect.result(seedHome(home));
+    if (Result.isFailure(seeded)) {
+      return yield* new ProjectError({
+        message: `could not seed the home directory ${home}: ${String(seeded.failure)}`,
+      });
+    }
+  });
+
+/**
+ * Seeds one slot into the project directory. Yields the artifact path whether the slot was
+ * written or already existed — an owner-edited file is kept, never clobbered (`wx`).
+ * Explicit rejection mode: every slot write is pre-wrapped to an infallible match (EEXIST
+ * is success), so the fan-out's error channel is empty by construction and the caller's
+ * aggregate fails only on a real write error.
+ */
+const seedSlot = (
+  dir: string,
+  repo: string,
+  slot: { readonly name: string; readonly body: string },
+) =>
+  Effect.gen(function* () {
+    const wrote = yield* Effect.result(
+      writeFileE({ path: `${dir}/${slot.name}`, data: slot.body, flag: 'wx' }),
+    );
+
+    if (Result.isSuccess(wrote) || isFsErrorCode(wrote.failure, 'EEXIST')) {
+      return `projects/${repo}/${slot.name}`;
+    }
+
+    return yield* new ProjectError({
+      message: `could not seed the project directory ${dir}: ${String(wrote.failure)}`,
+    });
+  });
 
 /**
  * Seeds every slot into the project directory. A slot already on disk is the owner's
- * content — skipped, never clobbered (`wx`). Fails if any slot could not be seeded.
+ * content — skipped, never clobbered (`wx`). First failure wins: one failed slot fails the
+ * seed and nothing further is written.
  */
-async function seedSlots(dir: string, repo: string) {
-  // A slot already on disk is the owner's content — skip it, never clobber (wx).
-  const written = await Promise.all(SLOTS.map((slot) => seedSlot(dir, repo, slot)));
-  const seeded = written.filter((artifact) => artifact != null);
-
-  if (seeded.length < SLOTS.length) {
-    return failure(new Error(`could not seed the project directory ${dir}`));
-  }
-
-  return success(seeded);
-}
-
-/**
- * Registers one project in the central directory: probe the remote (fail fast on an
- * unreachable URL before anything is seeded), reject duplicates, seed missing slots, write the
- * record. Re-registering an inactive project reactivates it and updates the remote.
- */
-export async function registerProject(
-  home: string,
-  git: Pick<Git, 'probeRemote'>,
-  url: string,
-  name?: string,
-) {
-  const repoCheck = checkedRepo(url, name);
-
-  if (!repoCheck.success) {
-    return repoCheck;
-  }
-
-  const repo = repoCheck.data;
-
-  const probe = await tryCatch(Effect.runPromise(git.probeRemote(url)));
-
-  if (!probe.success) {
-    const detail = probe.error instanceof Error ? probe.error.message : String(probe.error);
-    const error = new Error(`remote not reachable '${url}': ${detail}`, { cause: probe.error });
-
-    return failure(error);
-  }
-
-  const dir = projectPath(home, repo);
-  const ignored = await makeDirAndSeedHome(home, repo);
-
-  if (!ignored.success) {
-    return ignored;
-  }
-
-  const existing = await readRecord(dir);
-
-  // Reactivation path: an inactive record re-registers with the new remote; an active one
-  // is refused so a changed URL can never silently swap under a working project.
-  if (existing.success && existing.data.state == 'active') {
-    const error = new Error(
-      `project '${repo}' already registered: deactivate it first (seraphim deactivate ${repo}) to change its remote`,
+const seedSlots = (dir: string, repo: string) =>
+  Effect.gen(function* () {
+    // `Effect.all` fails fast — the first slot failure fails the whole seed, so every
+    // element of the result is a seeded path by construction.
+    return yield* Effect.all(
+      SLOTS.map((slot) => seedSlot(dir, repo, slot)),
+      { concurrency: 'unbounded' },
     );
-
-    return failure(error);
-  }
-
-  const seeded = await seedSlots(dir, repo);
-
-  if (!seeded.success) {
-    return seeded;
-  }
-
-  const record: ProjectRecord = { repo, remote: url, state: 'active', notify: null };
-  const wrote = await writeRecord(dir, record);
-
-  if (!wrote.success) {
-    return wrote;
-  }
-
-  return success({ record, reactivated: existing.success, artifacts: seeded.data });
-}
+  });
 
 /** The absent-file case of isFsErrorCode: everything else (corrupt record, bad dir) keeps its error. */
 function isMissing(error: unknown) {
   return isFsErrorCode(error, 'ENOENT');
 }
 
-/** Loads one project record. An absent record fails fast naming the register fix. */
-export async function loadProject(home: string, repo: string) {
-  return requireRegistered(home, repo);
-}
+/** Reads and schema-checks one `project.json`. Invalid shape is a ProjectError; never throws. */
+const readRecord = (dir: string): Effect.Effect<Result.Result<ProjectRecord, Error>> =>
+  Effect.gen(function* () {
+    const read = yield* Effect.result(readFileE(`${dir}/${RECORD_FILE}`));
+
+    if (Result.isFailure(read)) {
+      // A missing record file is the unregistered case — the raw fs error is kept so
+      // `requireRegistered` can map it to the fail-fast naming the register fix.
+      return Result.fail(read.failure);
+    }
+
+    let json: unknown;
+    try {
+      json = JSON.parse(read.success) as unknown;
+    } catch (error) {
+      return Result.fail(
+        new ProjectError({ message: `invalid project record in ${dir}: ${String(error)}` }),
+      );
+    }
+
+    const parsed = ProjectRecordSchema.safeParse(json);
+
+    return parsed.success
+      ? Result.succeed(parsed.data)
+      : Result.fail(
+          new ProjectError({
+            message: `invalid project record in ${dir}: ${parsed.error.message}`,
+          }),
+        );
+  });
 
 /** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
-async function requireRegistered(home: string, repo: string) {
-  const read = await readRecord(projectPath(home, repo));
+const requireRegistered = (home: string, repo: string) =>
+  Effect.gen(function* () {
+    const read = yield* readRecord(projectPath(home, repo));
 
-  if (read.success || !isMissing(read.error)) {
-    return read;
-  }
+    if (Result.isSuccess(read)) {
+      return read.success;
+    }
 
-  const error = new Error(
-    `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
-  );
+    if (!isMissing(read.failure)) {
+      // Every non-missing failure `readRecord` produces is a ProjectError (corrupt record,
+      // bad schema); the wider `Error` type only carries the raw fs miss.
+      return yield* Effect.fail(read.failure as ProjectError);
+    }
 
-  return failure(error);
-}
-
-/** Marks one project inactive in place — the record stays, nothing is deleted. */
-export async function deactivateProject(home: string, repo: string) {
-  const read = await requireRegistered(home, repo);
-
-  if (!read.success) {
-    return read;
-  }
-  if (read.data.state == 'inactive') {
-    const error = new Error(`project '${repo}' is already inactive`);
-
-    return failure(error);
-  }
-
-  const record: ProjectRecord = {
-    repo: read.data.repo,
-    remote: read.data.remote,
-    state: 'inactive',
-    notify: read.data.notify,
-  };
-
-  return writeRecord(projectPath(home, repo), record);
-}
-
-/** All registered projects, repo order. Corrupt records are skipped, never fatal. */
-export async function listProjects(home: string) {
-  const root = `${home}/projects`;
-  const dirs = await tryReadDir(root);
-
-  if (!dirs.success) {
-    return isMissing(dirs.error)
-      ? success({ projects: [], skipped: 0 })
-      : failure(new Error(`unreadable projects root ${root}: ${String(dirs.error)}`));
-  }
-  const listed = await Promise.all(
-    dirs.data
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => readRecord(`${root}/${entry.name}`)),
-  );
-  const records = listed
-    .filter((read) => read.success)
-    .map((read) => read.data)
-    .sort((a, b) => a.repo.localeCompare(b.repo));
-
-  return success({ projects: records, skipped: listed.length - records.length });
-}
-
-/** Reads and schema-checks one `project.json`. Invalid shape is a failure Result. */
-async function readRecord(dir: string) {
-  const raw = await tryReadFile(`${dir}/${RECORD_FILE}`);
-
-  if (!raw.success) {
-    return raw;
-  }
-
-  const json = tryCatch(() => JSON.parse(raw.data) as unknown);
-
-  if (!json.success) {
-    const error = new Error(`invalid project record in ${dir}: ${String(json.error)}`);
-
-    return failure(error);
-  }
-
-  const parsed = ProjectRecordSchema.safeParse(json.data);
-
-  return parsed.success
-    ? success(parsed.data)
-    : failure(new Error(`invalid project record in ${dir}: ${parsed.error.message}`));
-}
-
-/**
- * Seeds one slot into the project directory. Yields the artifact path whether the slot was
- * written or already existed — an owner-edited file is kept, never clobbered (`wx`).
- */
-async function seedSlot(
-  dir: string,
-  repo: string,
-  slot: { readonly name: string; readonly body: string },
-) {
-  const wrote = await tryWriteFile({ path: `${dir}/${slot.name}`, data: slot.body, flag: 'wx' });
-
-  if (wrote.success || isFsErrorCode(wrote.error, 'EEXIST')) {
-    return `projects/${repo}/${slot.name}`;
-  }
-
-  throw wrote.error;
-}
+    return yield* new ProjectError({
+      message: `unregistered project '${repo}': run 'seraphim register <git-url>' to register it`,
+    });
+  });
 
 /** Persists one record atomically: temp file then rename, so readers never see a torn row. */
-async function writeRecord(dir: string, record: ProjectRecord) {
-  const wrote = await persistAtomically(dir, JSON.stringify(record, null, 2));
+const writeRecord = (dir: string, record: ProjectRecord) =>
+  Effect.gen(function* () {
+    const tmpPath = `${dir}/${RECORD_FILE}.tmp`;
 
-  return wrote.success ? success(record) : wrote;
-}
+    const wrote = yield* Effect.result(
+      writeFileE({ path: tmpPath, data: `${JSON.stringify(record, null, 2)}\n` }),
+    );
+    if (Result.isFailure(wrote)) {
+      return yield* new ProjectError({
+        message: `could not write the project record ${dir}: ${String(wrote.failure)}`,
+      });
+    }
 
-/** Writes the record to a temp file, then renames it into place in one filesystem-visible step. */
-async function persistAtomically(dir: string, body: string) {
-  const tmpPath = `${dir}/${RECORD_FILE}.tmp`;
+    const renamed = yield* Effect.result(renameE({ path: tmpPath, to: `${dir}/${RECORD_FILE}` }));
+    if (Result.isFailure(renamed)) {
+      return yield* new ProjectError({
+        message: `could not persist the project record ${dir}: ${String(renamed.failure)}`,
+      });
+    }
 
-  const wrote = await tryWriteFile({ path: tmpPath, data: `${body}\n` });
+    return record;
+  });
 
-  if (!wrote.success) {
-    return wrote;
-  }
+/**
+ * Registers one project in the central directory: probe the remote (fail fast on an
+ * unreachable URL before anything is seeded), reject duplicates, seed missing slots, write the
+ * record. Re-registering an inactive project reactivates it and updates the remote.
+ * The probe rides the `Git` contract; the layout rides `Home`.
+ */
+export const registerProject = (url: string, name?: string) =>
+  Effect.gen(function* () {
+    const home = yield* HomeService;
+    const git = yield* GitService;
+    const repo = yield* checkedRepo(url, name);
 
-  return tryRename({ path: tmpPath, to: `${dir}/${RECORD_FILE}` });
-}
+    const probe = yield* Effect.result(git.probeRemote(url));
+
+    if (Result.isFailure(probe)) {
+      return yield* new ProjectError({
+        message: `remote not reachable '${url}': ${describeError(probe.failure)}`,
+      });
+    }
+
+    const dir = projectPath(home.home, repo);
+    yield* makeDirAndSeedHome(home.home, repo);
+
+    const existing = yield* readRecord(dir);
+
+    // Reactivation path: an inactive record re-registers with the new remote; an active one
+    // is refused so a changed URL can never silently swap under a working project.
+    if (Result.isSuccess(existing) && existing.success.state == 'active') {
+      return yield* new ProjectError({
+        message: `project '${repo}' already registered: deactivate it first (seraphim deactivate ${repo}) to change its remote`,
+      });
+    }
+
+    const artifacts = yield* seedSlots(dir, repo);
+
+    const record: ProjectRecord = { repo, remote: url, state: 'active', notify: null };
+    const wrote = yield* writeRecord(dir, record);
+
+    return { record: wrote, reactivated: Result.isSuccess(existing), artifacts };
+  });
+
+/** Loads one project record. An absent record fails fast naming the register fix. */
+export const loadProject = (repo: string) =>
+  Effect.gen(function* () {
+    const home = yield* HomeService;
+
+    return yield* requireRegistered(home.home, repo);
+  });
+
+/** Marks one project inactive in place — the record stays, nothing is deleted. */
+export const deactivateProject = (
+  repo: string,
+): Effect.Effect<{ readonly repo: string }, ProjectError, HomeService> =>
+  Effect.gen(function* () {
+    const home = yield* HomeService;
+    const read = yield* requireRegistered(home.home, repo);
+
+    if (read.state == 'inactive') {
+      return yield* new ProjectError({ message: `project '${repo}' is already inactive` });
+    }
+
+    const record: ProjectRecord = {
+      repo: read.repo,
+      remote: read.remote,
+      state: 'inactive',
+      notify: read.notify,
+    };
+
+    return yield* writeRecord(projectPath(home.home, repo), record);
+  });
+
+/** All registered projects, repo order. Corrupt records are skipped, never fatal. */
+export const listProjects = () =>
+  Effect.gen(function* () {
+    const home = yield* HomeService;
+    const root = `${home.home}/projects`;
+
+    const dirs = yield* Effect.result(readDirE(root));
+
+    if (Result.isFailure(dirs)) {
+      if (isMissing(dirs.failure)) {
+        return { projects: [], skipped: 0 };
+      }
+
+      return yield* new ProjectError({
+        message: `unreadable projects root ${root}: ${String(dirs.failure)}`,
+      });
+    }
+
+    const listed = yield* Effect.all(
+      dirs.success
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => readRecord(`${root}/${entry.name}`)),
+      { concurrency: 'unbounded' },
+    );
+
+    const records = listed.filter(Result.isSuccess).map((read) => read.success);
+
+    return {
+      projects: [...records].sort((a, b) => a.repo.localeCompare(b.repo)),
+      skipped: listed.length - records.length,
+    };
+  });

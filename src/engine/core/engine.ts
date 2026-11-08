@@ -1,45 +1,48 @@
-import { type KernelEnvironment } from './env.ts';
+import { Effect } from 'effect';
 
-import { success, failure } from '../../lib/result.ts';
-import { dispatch, getCommand } from '../kernel/dispatcher.ts';
+import { type CommandServices } from '../kernel/command.ts';
+import { dispatch, getCommand, type Invocation, type Outcome } from '../kernel/dispatcher.ts';
 
 /**
- * Parses raw argv into an invocation, or a failure Result for expected input errors (unknown
+ * The engine's front door for CLI and library callers alike: argv in, one Outcome out.
+ * Expected input errors (unknown command, stray top-level flag) are error outcomes — never a
+ * throw. The service stack is the Effect context: the composition root supplies the real
+ * adapters (or a test Layer), and the kernel's tagged errors never reach this far — the
+ * command scaffold translated them to error outcomes once, at its single policy point.
+ */
+export function engine(argv: readonly string[]): Effect.Effect<Outcome, never, CommandServices> {
+  const parsed = parse(argv);
+
+  if (!('command' in parsed)) {
+    return Effect.succeed(parsed);
+  }
+
+  return dispatch(parsed);
+}
+
+/**
+ * Parses raw argv into an invocation, or an error outcome for expected input errors (unknown
  * command). Empty argv means the top-level help view. Flags are not interpreted here — each
  * command's handler owns its own strict `parseArgs` pass, so `status --json` reaches its
  * handler intact while a stray top-level flag fails there with one clean error line.
  */
-function parse(argv: readonly string[]) {
+function parse(
+  argv: readonly string[],
+): Invocation | { readonly kind: 'error'; readonly message: string } {
   if (argv.length === 0) {
-    return success({ command: 'help' as const, args: [] });
+    return { command: 'help', args: [] };
   }
 
   const [first, ...rest] = argv;
 
   if ((first ?? '').startsWith('-')) {
-    return failure(new Error(`unrecognized option '${first}'`));
+    return { kind: 'error', message: `unrecognized option '${first}'` };
   }
 
   const name = first ?? '';
   const cmd = getCommand(name);
 
   return cmd
-    ? success({ command: cmd.name, args: rest })
-    : failure(new Error(`unknown command '${name}'`));
-}
-
-/**
- * The engine's front door for CLI and library callers alike: argv in, Result<Outcome> out.
- * Expected failure is a failure Result — never a throw — per the Errors doctrine. Async: the
- * session lifecycle is I/O-bound. The KernelEnvironment is threaded explicitly — no hidden globals (ADR-0002);
- * the composition root supplies the real adapters.
- */
-export async function engine(argv: readonly string[], env?: KernelEnvironment) {
-  const invocation = parse(argv);
-
-  if (!invocation.success) {
-    return invocation;
-  }
-
-  return dispatch(env, invocation.data);
+    ? { command: cmd.name, args: rest }
+    : { kind: 'error', message: `unknown command '${name}'` };
 }

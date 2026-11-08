@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 import { failure, success } from '../../../lib/result.ts';
 import { command } from '../command.ts';
 import { registerProject } from '../projects.ts';
@@ -14,19 +16,12 @@ export const registerCommand = command({
 
     return success({ url: args[0] ?? '', name: args[1] });
   },
-  execute: async (env, { url, name }) => {
-    const result = await registerProject(env.workspaceRoot, env.git, url, name);
-
-    if (!result.success) {
-      return failure(result.error);
-    }
-
-    return success({
+  execute: ({ url, name }) =>
+    Effect.map(registerProject(url, name), (result) => ({
       kind: 'registered' as const,
-      repo: result.data.record.repo,
-      remote: result.data.record.remote,
-      reactivated: result.data.reactivated,
-      artifacts: result.data.artifacts,
-    });
-  },
+      repo: result.record.repo,
+      remote: result.record.remote,
+      reactivated: result.reactivated,
+      artifacts: result.artifacts,
+    })),
 });

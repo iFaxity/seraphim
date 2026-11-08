@@ -65,9 +65,9 @@ describe('error vocabulary', () => {
 
   it.effect('held locks carry LockHeldError', () =>
     Effect.gen(function* () {
-      const tagged = yield* Effect.fail(new LockHeldError()).pipe(
-        Effect.catchTag('LockHeldError', (caught) => Effect.succeed(caught._tag)),
-      );
+      const tagged = yield* Effect.fail(
+        new LockHeldError({ message: 'lock on seraphim held by pid 42' }),
+      ).pipe(Effect.catchTag('LockHeldError', (caught) => Effect.succeed(caught._tag)));
       expect(tagged).toBe('LockHeldError');
     }),
   );
@@ -83,9 +83,9 @@ describe('error vocabulary', () => {
 
   it.effect('receipt write failures carry ReceiptWriteError', () =>
     Effect.gen(function* () {
-      const tagged = yield* Effect.fail(new ReceiptWriteError()).pipe(
-        Effect.catchTag('ReceiptWriteError', (caught) => Effect.succeed(caught._tag)),
-      );
+      const tagged = yield* Effect.fail(
+        new ReceiptWriteError({ message: 'manifest.json write failed' }),
+      ).pipe(Effect.catchTag('ReceiptWriteError', (caught) => Effect.succeed(caught._tag)));
       expect(tagged).toBe('ReceiptWriteError');
     }),
   );

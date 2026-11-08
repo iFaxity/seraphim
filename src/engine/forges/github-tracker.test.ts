@@ -13,7 +13,7 @@ import {
 } from './github-api.ts';
 import { CLAIMED_LABEL, trackerLayer } from './github-tracker.ts';
 
-import { expectFailure } from '../../../test/failure.ts';
+import { expectTaggedFailure } from '../../../test/exit.ts';
 import { ApiError, AuthError } from '../../lib/errors.ts';
 import { statusFailure } from '../../lib/request.ts';
 import { TrackerService } from '../core/services.ts';
@@ -265,7 +265,7 @@ describe('ghTracker listReady', () => {
         ),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.getIssue('owner/repo', 3)));
+      const error = yield* expectTaggedFailure(tracker.getIssue('owner/repo', 3));
 
       expect(error._tag).toBe('UnavailableError');
       expect((error.cause as Error).message).toContain(
@@ -285,7 +285,7 @@ describe('ghTracker listReady', () => {
         ),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.getIssue('owner/repo', 3)));
+      const error = yield* expectTaggedFailure(tracker.getIssue('owner/repo', 3));
 
       expect((error.cause as Error).message).toMatch(
         /issue read failed \(#3\): unexpected response shape/,
@@ -299,7 +299,7 @@ describe('ghTracker listReady', () => {
         scriptedClient([{ status: 401, body: '{"message":"Bad credentials"}' }]),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.listReady('owner/repo')));
+      const error = yield* expectTaggedFailure(tracker.listReady('owner/repo'));
 
       expect(error).toBeInstanceOf(AuthError);
       expect((error.cause as Error).message).toBe(
@@ -338,8 +338,8 @@ describe('ghTracker claim', () => {
 
       const tracker = yield* scriptedTracker(requester);
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(tracker.claim({ ...issue(9), labels: [CLAIMED_LABEL] })),
+      const error = yield* expectTaggedFailure(
+        tracker.claim({ ...issue(9), labels: [CLAIMED_LABEL] }),
       );
 
       expect(error.message).toBe('issue #9 already claimed (in-progress)');
@@ -353,7 +353,7 @@ describe('ghTracker claim', () => {
 
       const tracker = yield* scriptedTracker(requester);
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.claim(issue(5))));
+      const error = yield* expectTaggedFailure(tracker.claim(issue(5)));
 
       expect((error.cause as Error).message).toBe(
         'issue claim failed (#5): HTTP 422: {"message":"Validation Failed"}',
@@ -408,16 +408,14 @@ describe('ghTracker openDraftPr', () => {
         ),
       );
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(
-          tracker.openDraftPr({
-            repo: 'owner/repo',
-            issue: issue(1),
-            branch: 'missing-branch',
-            title: 't',
-            body: '',
-          }),
-        ),
+      const error = yield* expectTaggedFailure(
+        tracker.openDraftPr({
+          repo: 'owner/repo',
+          issue: issue(1),
+          branch: 'missing-branch',
+          title: 't',
+          body: '',
+        }),
       );
 
       expect((error.cause as Error).message).toBe(
@@ -436,7 +434,7 @@ describe('ghTracker error taxonomy', () => {
         scriptedClient([{ status: 403, body: '{"message":"Forbidden"}' }]),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.listReady('owner/repo')));
+      const error = yield* expectTaggedFailure(tracker.listReady('owner/repo'));
 
       expect(error._tag).toBe('AuthError');
     }),
@@ -448,7 +446,7 @@ describe('ghTracker error taxonomy', () => {
         scriptedClient([{ status: 429, body: '{"message":"Too many requests"}' }]),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.getIssue('owner/repo', 3)));
+      const error = yield* expectTaggedFailure(tracker.getIssue('owner/repo', 3));
 
       expect(error._tag).toBe('RateLimitError');
     }),
@@ -460,7 +458,7 @@ describe('ghTracker error taxonomy', () => {
         failingClient(new ApiError({ status: null, message: 'request failed: EAI_AGAIN' })),
       );
 
-      const error = yield* Effect.promise(() => expectFailure(tracker.listReady('owner/repo')));
+      const error = yield* expectTaggedFailure(tracker.listReady('owner/repo'));
 
       expect(error._tag).toBe('UnavailableError');
     }),
@@ -470,8 +468,8 @@ describe('ghTracker error taxonomy', () => {
     Effect.gen(function* () {
       const tracker = yield* scriptedTracker(scriptedClient([]));
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(tracker.claim({ ...issue(9), labels: [CLAIMED_LABEL] })),
+      const error = yield* expectTaggedFailure(
+        tracker.claim({ ...issue(9), labels: [CLAIMED_LABEL] }),
       );
 
       expect(error._tag).toBe('ClaimConflictError');

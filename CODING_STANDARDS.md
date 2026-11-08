@@ -21,7 +21,7 @@ rules immediately.
 - Absence is `Option<T>` inside Effect compositions; `null` at the boundaries — parsed payloads
   (plain structs), persisted/schema'd shapes, and host/system config. Never `undefined` or bare
   optional fields (`?:`/`.optional()`) as absence; map at the seam (`Option.fromNullable`/
-  `getOrNull`). Exceptions: optional _parameters_ at tail positions (`env?: KernelEnvironment`),
+  getOrNull`). Exceptions: optional _parameters_ at tail positions (`layer?: Layer.Layer<CommandServices>`),
   and receipt JSON keys may be omitted on disk — kernel-facing types still carry `| null`.
 
 ## Effect

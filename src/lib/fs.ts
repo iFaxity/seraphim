@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, type Stats } from 'node:fs';
+import { existsSync, readFileSync, type Dirent, type Stats } from 'node:fs';
 import { Effect } from 'effect';
 
 import { failure, success, tryCatch, type Result } from './result.ts';
@@ -33,46 +33,9 @@ export async function tryReadFile(path: string | URL) {
 
 /** Lists one directory's entries with types as a Result — an absent or unreadable
  * directory fails, never throws. */
-export async function tryReadDir(path: string | URL) {
-  return await tryCatch(readdir(path, { withFileTypes: true }));
-}
-
-/** Creates one directory as a Result — `recursive` by default, a failure is named, not thrown. */
-export async function tryMkdir(path: string | URL) {
-  const mkdirResult = await tryCatch(mkdir(path, { recursive: true }));
-
-  if (!mkdirResult.success) {
-    return mkdirResult;
-  }
-
-  return success();
-}
 
 /** Removes one file or directory tree as a Result — `recursive` + `force` prunes a whole
  * tree by default; pass flags to restrict it. */
-export async function tryRm(
-  path: string | URL,
-  options: { recursive?: boolean; force?: boolean } = { recursive: true, force: true },
-) {
-  const rmResult = await tryCatch(rm(path, options));
-
-  if (!rmResult.success) {
-    return rmResult;
-  }
-
-  return success();
-}
-
-/** Renames one path to another as a Result — the atomic move the record writer owns. */
-export async function tryRename({ path, to }: { path: string | URL; to: string | URL }) {
-  const renameResult = await tryCatch(rename(path, to));
-
-  if (!renameResult.success) {
-    return renameResult;
-  }
-
-  return success();
-}
 
 export type WriteFileOptions = {
   path: string | URL;
@@ -82,42 +45,11 @@ export type WriteFileOptions = {
 
 /** Writes one text file as a Result — `wx` first (never clobber an owner's copy) unless
  * the caller passes a different flag. */
-export async function tryWriteFile({ path, data, ...options }: WriteFileOptions) {
-  const writeResult = await tryCatch(writeFile(path, data, { ...options, encoding: 'utf8' }));
-
-  if (!writeResult.success) {
-    return writeResult;
-  }
-
-  return success();
-}
 
 export type CopyOptions = {
   path: string | URL;
   to: string | URL;
 };
-
-/** Unlinks one file as a Result. */
-export async function tryUnlink(path: string | URL) {
-  const unlinkResult = await tryCatch(unlink(path));
-
-  if (!unlinkResult.success) {
-    return unlinkResult;
-  }
-
-  return success();
-}
-
-/** Copies one directory tree as a Result — `recursive` by default. */
-export async function tryCp({ path, to }: CopyOptions) {
-  const cpResult = await tryCatch(cp(path, to, { recursive: true }));
-
-  if (!cpResult.success) {
-    return cpResult;
-  }
-
-  return success();
-}
 
 // — Effect-side fs primitives —
 // Same semantics as the `try*` helpers above, for modules composed in Effect: absence is a
@@ -127,6 +59,87 @@ export async function tryCp({ path, to }: CopyOptions) {
 /** Reads one UTF-8 text file; an absent or unreadable file fails, never throws. */
 export function readFileE(path: string | URL): Effect.Effect<string, Error> {
   return Effect.tryPromise({ try: () => readFile(path, 'utf8'), catch: (error) => error as Error });
+}
+
+/** Lists one directory's entries with types; an absent or unreadable directory fails. */
+export function readDirE(path: string | URL): Effect.Effect<Dirent[], Error> {
+  return Effect.tryPromise({
+    try: () => readdir(path, { withFileTypes: true }),
+    catch: (error) => error as Error,
+  });
+}
+
+/** Creates one directory (`recursive` by default); a failure is named, not thrown. */
+export function mkdirE(path: string | URL): Effect.Effect<void, Error> {
+  return Effect.tryPromise({
+    try: async () => {
+      await mkdir(path, { recursive: true });
+    },
+    catch: (error) => error as Error,
+  });
+}
+
+/** Writes a file with `wx`-default flags (create, never clobber) and UTF-8 encoding. */
+export function writeFileE({
+  path,
+  data,
+  ...options
+}: WriteFileOptions): Effect.Effect<void, Error> {
+  return Effect.tryPromise({
+    try: async () => {
+      await writeFile(path, data, { ...options, encoding: 'utf8' });
+    },
+    catch: (error) => error as Error,
+  });
+}
+
+/** Removes one file; missing paths read as success (idempotent). */
+export function unlinkE(path: string | URL): Effect.Effect<void, Error> {
+  return Effect.tryPromise({
+    try: async () => {
+      await unlink(path);
+    },
+    catch: (error) => error as Error,
+  });
+}
+
+/** Removes a path recursively and forcibly. */
+export function rmE(
+  path: string | URL,
+  options: { recursive?: boolean; force?: boolean } = { recursive: true, force: true },
+): Effect.Effect<void, Error> {
+  return Effect.tryPromise({
+    try: async () => {
+      await rm(path, options);
+    },
+    catch: (error) => error as Error,
+  });
+}
+
+/** Effect twin of `tryRename` — the atomic move the record writer owns. */
+export function renameE({
+  path,
+  to,
+}: {
+  path: string | URL;
+  to: string | URL;
+}): Effect.Effect<void, Error> {
+  return Effect.tryPromise({
+    try: async () => {
+      await rename(path, to);
+    },
+    catch: (error) => error as Error,
+  });
+}
+
+/** Copies one directory tree, recursive by default. */
+export function cpE({ path, to }: CopyOptions): Effect.Effect<void, Error> {
+  return Effect.tryPromise({
+    try: async () => {
+      await cp(path, to, { recursive: true });
+    },
+    catch: (error) => error as Error,
+  });
 }
 
 /** Shared stat probe under the `is*` read: missing/unreadable paths read as not-a-kind. */

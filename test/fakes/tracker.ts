@@ -1,7 +1,7 @@
 import { Effect, Layer } from 'effect';
 
-import { type Issue, type Tracker } from '../core/contracts.ts';
-import { TrackerService } from '../core/services.ts';
+import { type Issue, type Tracker } from '../../src/engine/core/contracts.ts';
+import { TrackerService } from '../../src/engine/core/services.ts';
 
 /**
  * Hand-written fake for the tracker contract (ADR-0002 keeps fakes engine-side): records the

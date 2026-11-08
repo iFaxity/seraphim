@@ -1,7 +1,8 @@
+import { Clock, Effect, Result } from 'effect';
+
 import { type Caps, type Turn } from './receipts.ts';
 
-import { failure, success, type Result } from '../../lib/result.ts';
-import { toEpochMs } from '../../lib/time.ts';
+import { fromEpochMs } from '../../lib/time.ts';
 import { type TurnResult } from '../core/contracts.ts';
 
 /** Free-text artifacts that sit alongside — never replace — the schema'd receipt JSON. */
@@ -11,9 +12,9 @@ export type TranscriptFile = {
 };
 
 /**
- * Why a turn could not proceed, as the error of a failure Result: `cap` is a budget breach
- * (the reason is quoted into the session transcript); `turn` is a runtime turn that ended
- * in a non-completed state.
+ * Why a turn could not proceed, as the error of a failed gate/record: `cap` is a budget
+ * breach (the reason is quoted into the session transcript); `turn` is a runtime turn that
+ * ended in a non-completed state.
  */
 export class TurnAborted extends Error {
   readonly kind: 'cap' | 'turn';
@@ -32,13 +33,15 @@ export class TurnAborted extends Error {
   }
 }
 
-/** The kernel `Turn` is the receipt schema's record with instants; this input builds one. */
+/**
+ * The kernel `Turn` is the receipt schema's record with instants; this input builds one.
+ * The runtime outcome rides an `Either`: `right` is the normalized result, `left` the crash.
+ */
 export type TurnInput = {
   readonly prompt: string;
   /** When the gate opened — the instant dispatch began, captured by `gate`. */
   readonly startedAt: Temporal.Instant;
-  /** The already-normalized runtime outcome: success, or the crash as a failure Result. */
-  readonly outcome: Result<TurnResult, Error>;
+  readonly outcome: Result.Result<TurnResult, Error>;
 };
 
 /**
@@ -47,30 +50,29 @@ export type TurnInput = {
  * no adapter implements it — and receipt-blind: it returns facts (records, transcripts,
  * abort reasons), never mutates a manifest. The turn cap counts completed records; the
  * wall clock gates before dispatch and flags overshoot after a turn that outlived it.
+ * Both budget checks read the Effect `Clock`, so a test `TestClock` drives them.
  */
 export type TurnEngine = {
   /**
    * The pre-dispatch gate: both caps checked here, so flow code cannot dispatch past a
    * budget by catching the abort. Success carries the dispatch instant for `record`.
    */
-  gate(): Result<{ readonly startedAt: Temporal.Instant }, TurnAborted>;
+  readonly gate: Effect.Effect<{ readonly startedAt: Temporal.Instant }, TurnAborted, Clock.Clock>;
   /**
    * Records one finished turn: the ledger entry, the per-turn transcript, and the session
    * transcript section. A turn that crashed, ended non-completed, or outlived the wall
-   * clock returns a failure Result — the record is still kept; only the run stops.
+   * clock fails — the record is still kept; only the run stops.
    */
-  record(input: TurnInput): Result<{ readonly exitState: TurnResult['exitState'] }, TurnAborted>;
+  readonly record: (
+    input: TurnInput,
+  ) => Effect.Effect<{ readonly exitState: TurnResult['exitState'] }, TurnAborted, Clock.Clock>;
   /** The accumulated facts for the receipt write: turn records and transcript files. */
-  snapshot(): {
+  readonly snapshot: () => {
     readonly turns: readonly Turn[];
     readonly transcripts: readonly TranscriptFile[];
   };
 };
 
-/**
- * Creates the turn engine over one session's budget. `now` defaults to the kernel clock;
- * tests inject a fake to make cap-overshoot deterministic.
- */
 /** The shared ledger state the gate and record closures read and append to. */
 type Ledger = {
   readonly turns: Turn[];
@@ -82,17 +84,17 @@ type Ledger = {
 function capAbort(ledger: Ledger, reason: string) {
   ledger.sessionTranscript.push(`## cap hit\n\n> ${reason}\n`);
 
-  return failure<TurnAborted>(new TurnAborted('cap', 'cap-hit', reason));
+  return Effect.fail(new TurnAborted('cap', 'cap-hit', reason));
 }
 
 /** Fails the turn on either cap: wall-clock exhausted, or the turn budget reached. */
 function gateCaps(
   ledger: Ledger,
   caps: Caps,
-  now: () => Temporal.Instant,
+  nowMs: number,
   deadline: number,
-): Result<{ readonly startedAt: Temporal.Instant }, TurnAborted> {
-  if (toEpochMs(now()) >= deadline) {
+): Effect.Effect<{ readonly startedAt: Temporal.Instant }, TurnAborted> {
+  if (nowMs >= deadline) {
     return capAbort(
       ledger,
       `wall-clock cap of ${caps.wallClockMs}ms exhausted before turn ${ledger.turns.length + 1}`,
@@ -106,7 +108,7 @@ function gateCaps(
     );
   }
 
-  return success({ startedAt: now() });
+  return Effect.succeed({ startedAt: fromEpochMs(nowMs) });
 }
 
 /**
@@ -128,58 +130,75 @@ function captureTranscripts(ledger: Ledger, prompt: string, transcript: string) 
 function appendTurn(
   ledger: Ledger,
   turn: Omit<Turn, 'index' | 'endedAt'>,
-  now: () => Temporal.Instant,
+  endedAt: Temporal.Instant,
 ) {
-  ledger.turns.push({ ...turn, index: ledger.turns.length + 1, endedAt: now() });
+  ledger.turns.push({ ...turn, index: ledger.turns.length + 1, endedAt });
 }
 
 /**
- * Creates the turn engine over one session's budget. `now` defaults to the kernel clock;
- * tests inject a fake to make cap-overshoot deterministic.
+ * Creates the turn engine over one session's budget. Budget deadlines read the Effect
+ * `Clock` — tests drive the wall clock with a `TestClock`.
  */
 export function createTurnEngine(config: {
   readonly caps: Caps;
   readonly agent: string;
   readonly model: string;
-  readonly now: () => Temporal.Instant;
-}) {
-  const { caps, agent, model, now } = config;
+}): TurnEngine {
+  const { caps, agent, model } = config;
 
   const ledger: Ledger = {
     turns: [],
     transcripts: [],
     sessionTranscript: [],
   };
-  const deadline = toEpochMs(now()) + caps.wallClockMs;
+
+  // The deadline anchors to the first gate read — the session's own start, whatever the
+  // clock says then — not to engine construction.
+  let deadline: number | null = null;
 
   function gate() {
-    return gateCaps(ledger, caps, now, deadline);
+    return Effect.gen(function* () {
+      const nowMs = yield* Clock.currentTimeMillis;
+
+      if (deadline === null) {
+        deadline = nowMs + caps.wallClockMs;
+      }
+
+      return yield* gateCaps(ledger, caps, nowMs, deadline);
+    });
   }
 
   function record({ prompt, startedAt, outcome }: TurnInput) {
-    const exitState = !outcome.success ? ('failed' as const) : outcome.data.exitState;
+    return Effect.gen(function* () {
+      const endedAt = fromEpochMs(yield* Clock.currentTimeMillis);
+      const exitState = Result.isSuccess(outcome) ? outcome.success.exitState : ('failed' as const);
 
-    appendTurn(ledger, { prompt, agent, model, exitState, startedAt }, now);
+      appendTurn(ledger, { prompt, agent, model, exitState, startedAt }, endedAt);
 
-    const transcript = outcome.success ? outcome.data.transcript : String(outcome.error);
+      const transcript = Result.isSuccess(outcome)
+        ? outcome.success.transcript
+        : String(outcome.failure);
 
-    captureTranscripts(ledger, prompt, transcript);
+      captureTranscripts(ledger, prompt, transcript);
 
-    if (exitState != 'completed') {
-      return failure<TurnAborted>(new TurnAborted('turn', exitState));
-    }
+      if (exitState != 'completed') {
+        return yield* Effect.fail(new TurnAborted('turn', exitState));
+      }
 
-    // A turn that outlived the deadline still ran to completion — the runtime is not
-    // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
-    // completed (spec: exceeding wall clock is a cap hit with the retention contract).
-    if (toEpochMs(now()) >= deadline) {
-      return capAbort(
-        ledger,
-        `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${ledger.turns.length}`,
-      );
-    }
+      const nowMs = yield* Clock.currentTimeMillis;
 
-    return success({ exitState });
+      // A turn that outlived the deadline still ran to completion — the runtime is not
+      // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
+      // completed (spec: exceeding wall clock is a cap hit with the retention contract).
+      if (deadline !== null && nowMs >= deadline) {
+        return yield* capAbort(
+          ledger,
+          `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${ledger.turns.length}`,
+        );
+      }
+
+      return { exitState };
+    });
   }
 
   function snapshot() {
@@ -192,7 +211,7 @@ export function createTurnEngine(config: {
     };
   }
 
-  const engine: TurnEngine = { gate, record, snapshot };
-
-  return engine;
+  // `gate` is the effect value itself (built eagerly, run lazily); `record` and `snapshot`
+  // stay methods.
+  return { gate: gate(), record, snapshot };
 }
