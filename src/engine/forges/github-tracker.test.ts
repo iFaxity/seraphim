@@ -1,5 +1,5 @@
 import { it } from '@effect/vitest';
-import { Effect, Layer, Schema } from 'effect';
+import { Effect, Layer, Option, Schema } from 'effect';
 import { describe, expect } from 'vite-plus/test';
 
 import {
@@ -50,17 +50,17 @@ function scriptedClient(outcomes: readonly ScriptedOutcome[]) {
         }
 
         if (outcome.status >= 300) {
-          // A >=300 status always maps to a failure here; the null case is 2xx-only.
+          // A >=300 status always maps to a failure here; the none case is 2xx-only.
           const statusError = yield* statusFailure(
             { status: outcome.status, text: async () => outcome.body },
             outcome.status,
           );
 
-          if (statusError == null) {
+          if (Option.isNone(statusError)) {
             throw new Error(`status ${outcome.status} unexpectedly mapped to no failure`);
           }
 
-          return yield* Effect.fail(statusError);
+          return yield* Effect.fail(statusError.value);
         }
 
         let parsed: unknown;

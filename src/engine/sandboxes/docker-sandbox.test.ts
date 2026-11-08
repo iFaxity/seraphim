@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, Option } from 'effect';
 import { beforeEach, describe, expect } from 'vite-plus/test';
 
 import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
@@ -309,11 +309,11 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
 });
 
 describe('imageTagFor', () => {
-  it.effect('returns an empty tag when the project directory has no Dockerfile', () =>
+  it.effect('reads none when the project directory has no Dockerfile — absence as Option', () =>
     Effect.gen(function* () {
       const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
 
-      expect(yield* imageTagFor(dir)).toBe('');
+      expect(Option.isNone(yield* imageTagFor(dir))).toBe(true);
     }),
   );
 });

@@ -1,6 +1,6 @@
 import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Effect, Option } from 'effect';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
@@ -268,8 +268,8 @@ async function staleImages(workspaceRoot: string, docker: DockerRunner) {
     const tag = await Effect.runPromise(imageTagFor(join(workspaceRoot, 'projects', project.repo)));
 
     // A project without a Dockerfile has no current tag, so all of its old tags are stale.
-    if (tag) {
-      currentTags.add(tag);
+    if (Option.isSome(tag)) {
+      currentTags.add(tag.value);
     } else {
       hashlessRepos.add(project.repo);
     }
