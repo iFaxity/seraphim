@@ -8,7 +8,6 @@ import {
   GitHubClientService,
   GithubApiRoot,
   GithubToken,
-  statusFailure,
   type GitHubCall,
   type GitHubClient,
 } from './github-api.ts';
@@ -16,6 +15,7 @@ import { CLAIMED_LABEL, trackerLayer } from './github-tracker.ts';
 
 import { expectFailure } from '../../../test/failure.ts';
 import { ApiError, AuthError } from '../../lib/errors.ts';
+import { statusFailure } from '../../lib/request.ts';
 import { TrackerService } from '../core/services.ts';
 
 /** A scripted client outcome: a forge reply, or a client failure. */
