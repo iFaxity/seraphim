@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { Effect, Option, Schema } from 'effect';
 
 import { ApiError } from './errors.ts';
 
@@ -30,26 +30,29 @@ export type RequestCall<T> = {
  * The one failure mapping every non-2xx carries: the HTTP status and the forge's own body
  * text. 401/403 are credential rejections, 429 asks for a backoff, 5xx and the rest are
  * service states the caller treats as unavailable — the named vocabulary classes branch on
- * `status` downstream (classes, never message text). 2xx reads null, so the caller's pipeline
- * proceeds to the body.
+ * `status` downstream (classes, never message text). A 2xx reads `Option.none()`, so the
+ * caller's pipeline proceeds to the body.
  */
 export function statusFailure(
   response: { status: number; text(): Promise<string> },
   status: number,
-): Effect.Effect<ApiError | null, ApiError> {
-  function failureWith(message: string): Effect.Effect<ApiError, ApiError> {
-    return Effect.tryPromise({
-      try: async () => {
-        const body = await response.text();
+): Effect.Effect<Option.Option<ApiError>, ApiError> {
+  function failureWith(message: string): Effect.Effect<Option.Option<ApiError>, ApiError> {
+    return Effect.map(
+      Effect.tryPromise({
+        try: async () => {
+          const body = await response.text();
 
-        return new ApiError({ status, message: `${message}${body.trim()}` });
-      },
-      catch: (error) =>
-        new ApiError({
-          status: null,
-          message: `failed reading the error body: ${String(error)}`,
-        }),
-    });
+          return new ApiError({ status, message: `${message}${body.trim()}` });
+        },
+        catch: (error) =>
+          new ApiError({
+            status: null,
+            message: `failed reading the error body: ${String(error)}`,
+          }),
+      }),
+      Option.some,
+    );
   }
 
   if (status == 401 || status == 403) {
@@ -58,7 +61,9 @@ export function statusFailure(
 
   if (status == 429) {
     return Effect.succeed(
-      new ApiError({ status, message: 'rate limited (HTTP 429): back off and retry later' }),
+      Option.some(
+        new ApiError({ status, message: 'rate limited (HTTP 429): back off and retry later' }),
+      ),
     );
   }
 
@@ -70,7 +75,7 @@ export function statusFailure(
     return failureWith(`HTTP ${status}: `);
   }
 
-  return Effect.succeed(null);
+  return Effect.succeed(Option.none());
 }
 
 export function request<T>(call: RequestCall<T>): Effect.Effect<RequestResponse<T>, ApiError> {
@@ -87,8 +92,8 @@ export function request<T>(call: RequestCall<T>): Effect.Effect<RequestResponse<
 
     const statusError = yield* statusFailure(response, response.status);
 
-    if (statusError != null) {
-      return yield* Effect.fail(statusError);
+    if (Option.isSome(statusError)) {
+      return yield* Effect.fail(statusError.value);
     }
 
     const contentType = response.headers.get('content-type');

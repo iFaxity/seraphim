@@ -49,9 +49,7 @@ export function webhookNotifier(
         // catches and logs it, keeping the receipt as the source of truth.
         if (!response.ok) {
           return yield* Effect.fail(
-            new UnavailableError({
-              cause: new Error(`notify webhook responded ${response.status}`),
-            }),
+            new UnavailableError({ message: `notify webhook responded ${response.status}` }),
           );
         }
       }),

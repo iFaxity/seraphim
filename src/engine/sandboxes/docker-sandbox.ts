@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
-import { Context, Effect, Layer } from 'effect';
+import { Context, Effect, Layer, Option } from 'effect';
 
-import { UnavailableError } from '../../lib/errors.ts';
+import {
+  DockerfileMissingError,
+  ImageProvisionError,
+  InvalidRepoNameError,
+  UnavailableError,
+  WorktreeMissingError,
+} from '../../lib/errors.ts';
 import { dirExistsE, fileExistsE, readFileE } from '../../lib/fs.ts';
 import { runCli } from '../../lib/proc.ts';
 import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
@@ -55,33 +61,33 @@ type ExecInput = {
   readonly command: readonly string[];
 };
 
-/** POSIX "command not found" — what a shell would report for an unresolvable binary. */
-const CLI_NOT_FOUND = 127;
-
 /**
- * Cache probe: an image already tagged for this exact content means no rebuild. A malformed
- * inspect payload is a docker-side anomaly, not a cache miss; `null` means miss.
+ * Cache probe: an image already tagged for this exact content means no rebuild — `none`
+ * means miss. A malformed inspect payload is a docker-side anomaly, not a cache miss,
+ * so it fails instead of reading as absence.
  */
 function cachedImage(
   docker: DockerRunner,
   repo: string,
   tag: string,
-): Effect.Effect<Image | null, Error> {
+): Effect.Effect<Option.Option<Image>, ImageProvisionError> {
   return Effect.gen(function* () {
     const inspect = yield* docker.run(['image', 'inspect', '--format', '{{json .Id}}', tag]);
 
     if (inspect.exitCode !== 0) {
-      return null;
+      return Option.none();
     }
 
     // The `{{json .Id}}` payload is a JSON string; a parse failure is docker-side anomaly.
     const id = yield* Effect.try({
       try: () => JSON.parse(inspect.stdout) as string,
       catch: () =>
-        new Error(`image inspect returned malformed output for '${repo}': ${inspect.stdout}`),
+        new ImageProvisionError({
+          message: `image inspect returned malformed output for '${repo}': ${inspect.stdout}`,
+        }),
     });
 
-    return { id };
+    return Option.some({ id });
   });
 }
 
@@ -95,14 +101,16 @@ function buildImage(
   repo: string,
   dir: string,
   tag: string,
-): Effect.Effect<Image, Error> {
+): Effect.Effect<Image, ImageProvisionError> {
   return Effect.gen(function* () {
     const build = yield* docker.run(['buildx', 'build', '--load', '-q', '-t', tag, dir]);
 
     if (build.exitCode != 0) {
       const detail = build.stderr || build.stdout;
 
-      return yield* Effect.fail(new Error(`image build failed for '${repo}': ${detail}`));
+      return yield* Effect.fail(
+        new ImageProvisionError({ message: `image build failed for '${repo}': ${detail}` }),
+      );
     }
 
     return { id: build.stdout.trim() };
@@ -114,12 +122,17 @@ function buildImage(
  * bind-mount source fails the whole container run), and the image tag comes last so exec
  * runs against the project's current image even without a prior ensureImage.
  */
-function execArgs(projectsRoot: string, input: ExecInput): Effect.Effect<string[], Error> {
+function execArgs(
+  projectsRoot: string,
+  input: ExecInput,
+): Effect.Effect<string[], SandboxArgError> {
   return Effect.gen(function* () {
     const worktree = yield* dirExistsE(input.worktreePath);
 
     if (!worktree) {
-      return yield* Effect.fail(new Error(`worktree not found: ${input.worktreePath}`));
+      return yield* Effect.fail(
+        new WorktreeMissingError({ message: `worktree not found: ${input.worktreePath}` }),
+      );
     }
 
     const dir = join(projectsRoot, input.repo);
@@ -148,7 +161,13 @@ function execArgs(projectsRoot: string, input: ExecInput): Effect.Effect<string[
       args.push('--env-file', envFile);
     }
 
-    args.push(yield* imageTagFor(dir), ...input.command);
+    const tag = yield* imageTagFor(dir);
+
+    if (Option.isNone(tag)) {
+      return yield* Effect.fail(new DockerfileMissingError(missingDockerfile(input.repo, dir)));
+    }
+
+    args.push(tag.value, ...input.command);
 
     return args;
   });
@@ -156,37 +175,39 @@ function execArgs(projectsRoot: string, input: ExecInput): Effect.Effect<string[
 
 /**
  * `ensureImage`'s body: the docker-side failure detail (probe anomaly, failed build, missing
- * Dockerfile) stays on the `Error` channel here and flows through the contract edge, which
- * tags every failure `UnavailableError`.
+ * Dockerfile) rides the sandbox's named classes here and flows through the contract edge,
+ * which tags every failure `UnavailableError`.
  */
 function ensureImageFor(
   projectsRoot: string,
   docker: DockerRunner,
   repo: string,
-): Effect.Effect<Image, Error> {
+): Effect.Effect<Image, ImageProvisionError | DockerfileMissingError | InvalidRepoNameError> {
   return Effect.gen(function* () {
     yield* validateRepoName(repo);
 
     const dir = join(projectsRoot, repo);
-    const dockerfilePath = join(dir, 'Dockerfile');
-    const hasDockerfile = yield* fileExistsE(dockerfilePath);
-
-    if (!hasDockerfile) {
-      return yield* Effect.fail(
-        new Error(`no Dockerfile for '${repo}': expected ${dockerfilePath}`),
-      );
-    }
-
     const tag = yield* imageTagFor(dir);
-    const cached = yield* cachedImage(docker, repo, tag);
 
-    if (cached != null) {
-      return cached;
+    if (Option.isNone(tag)) {
+      return yield* Effect.fail(new DockerfileMissingError(missingDockerfile(repo, dir)));
     }
 
-    return yield* buildImage(docker, repo, dir, tag);
+    const cached = yield* cachedImage(docker, repo, tag.value);
+
+    if (Option.isSome(cached)) {
+      return cached.value;
+    }
+
+    return yield* buildImage(docker, repo, dir, tag.value);
   });
 }
+
+type SandboxArgError =
+  | InvalidRepoNameError
+  | WorktreeMissingError
+  | DockerfileMissingError
+  | ImageProvisionError;
 
 /**
  * `exec`'s body: runs one docker `run` composed by `execArgs`, returning the observed
@@ -196,7 +217,7 @@ function execFor(
   projectsRoot: string,
   docker: DockerRunner,
   input: ExecInput,
-): Effect.Effect<SandboxExec, Error> {
+): Effect.Effect<SandboxExec, SandboxArgError> {
   return Effect.gen(function* () {
     yield* validateRepoName(input.repo);
 
@@ -248,29 +269,39 @@ export function dockerSandbox(options: DockerSandboxOptions) {
 }
 
 /** Repo names compose asset paths and image tags — anything path-shaped is a caller bug. */
-function validateRepoName(repo: string): Effect.Effect<string, Error> {
+function validateRepoName(repo: string): Effect.Effect<string, InvalidRepoNameError> {
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(repo)) {
-    return Effect.fail(new Error(`invalid repo name '${repo}': expected a plain directory name`));
+    return Effect.fail(
+      new InvalidRepoNameError({
+        message: `invalid repo name '${repo}': expected a plain directory name`,
+      }),
+    );
   }
 
   return Effect.succeed(repo);
+}
+
+/** The missing-Dockerfile diagnostic shared by ensureImage and execArguments. */
+function missingDockerfile(repo: string, dir: string) {
+  return { message: `no Dockerfile for '${repo}': expected ${join(dir, 'Dockerfile')}` };
 }
 
 /**
  * The image tag from a sha256 over the Dockerfile plus every lockfile present — the spec's
  * "tagged by content hash over Dockerfile + lockfiles, rebuilt only on change". Exported so
  * prune computes "current" by the same scheme ensureImage builds under — the two can never
- * disagree about which cache tags are live. Unreadable or missing files are skipped rather
- * than failing the hash: a lockfile appearing or disappearing is exactly the content change
- * the tag exists to track.
+ * disagree about which cache tags are live. `none` means no Dockerfile — absence as an
+ * `Option`, the caller maps it onto its own channel. Unreadable or missing files are
+ * skipped rather than failing the hash: a lockfile appearing or disappearing is exactly the
+ * content change the tag exists to track.
  */
-export function imageTagFor(dir: string): Effect.Effect<string> {
+export function imageTagFor(dir: string): Effect.Effect<Option.Option<string>> {
   return Effect.gen(function* () {
     const dockerfilePath = join(dir, 'Dockerfile');
     const hasDockerfile = yield* fileExistsE(dockerfilePath);
 
     if (!hasDockerfile) {
-      return '';
+      return Option.none();
     }
 
     const paths = [dockerfilePath, ...LOCKFILES.map((name) => join(dir, name))];
@@ -278,24 +309,30 @@ export function imageTagFor(dir: string): Effect.Effect<string> {
     // lockfiles are not failures, the hash skips them), so the fan-out's error channel is
     // empty by construction and "abort on first failure" cannot fire.
     const reads = paths.map((path) =>
-      Effect.match(readFileE(path), { onFailure: () => null, onSuccess: (body) => body }),
+      Effect.match(readFileE(path), {
+        onFailure: () => Option.none<string>(),
+        onSuccess: (body) => Option.some(body),
+      }),
     );
     const bodies = yield* Effect.all(reads);
-    const parts = bodies.filter((body) => body != null);
+    const parts = bodies.filter(Option.isSome).map((body) => body.value);
     const hash = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 16);
 
-    return `seraphim/${basename(dir)}:${hash}`;
+    return Option.some(`seraphim/${basename(dir)}:${hash}`);
   });
 }
 
 /**
  * The production runner: one `docker` CLI invocation per `run` call, full argv passthrough
- * (the shared `runCli` machinery). A missing/unspawnable binary reports as exit 127 —
- * POSIX "command not found" — so callers keep one structured failure shape.
+ * (the shared `runCli` capture machinery). A missing/unspawnable binary reports as exit
+ * 127 — POSIX "command not found" — so callers keep one structured failure shape.
  */
 export const cliDocker: DockerRunner = {
   run: (args) => runCli('docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
 };
+
+/** POSIX "command not found" — what a shell would report for an unresolvable binary. */
+const CLI_NOT_FOUND = 127;
 
 /** Production wiring: the real `docker` CLI subprocess runner. */
 export const dockerCliLayer: Layer.Layer<DockerRunnerService> = Layer.succeed(

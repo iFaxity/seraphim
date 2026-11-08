@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Effect, Option } from 'effect';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
@@ -160,7 +160,13 @@ describe('planPrune', () => {
     await writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n');
     await registerProject(root, fakeGit(), 'https://example.invalid/acme/demo.git', 'demo');
 
-    const tag = await Effect.runPromise(imageTagFor(projectDir));
+    const someTag = await Effect.runPromise(imageTagFor(projectDir));
+
+    if (!Option.isSome(someTag)) {
+      throw new Error('expected a tag for the seeded project');
+    }
+
+    const tag = someTag.value;
     const planned = await planPrune(envWith(fakeGit(), dockerListing([tag])));
 
     expect(planned.success).toBe(true);

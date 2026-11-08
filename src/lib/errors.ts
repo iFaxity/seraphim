@@ -19,6 +19,8 @@ export class RateLimitError extends Data.TaggedError('RateLimitError')<{
   readonly cause?: unknown;
 }> {}
 export class UnavailableError extends Data.TaggedError('UnavailableError')<{
+  /** Diagnostic detail when no underlying error exists to ride as `cause`. */
+  readonly message?: string;
   readonly cause?: unknown;
 }> {}
 
@@ -44,6 +46,32 @@ export class TurnRuntimeError extends Data.TaggedError('TurnRuntimeError') {}
  * git's diagnostics ride in `message` so logging and test assertions keep the detail.
  */
 export class GitError extends Data.TaggedError('GitError')<{ message: string }> {}
+
+// — Sandbox adapter (docker) internals —
+// Names for the sandbox's own failure states: the adapter's inner generators fail with
+// these, and its contract edge folds them into `UnavailableError({ cause })` (the caller
+// branches on the tagged contract errors, not these). `message` keeps the human
+// diagnostics — build output, expected paths, bad names — observable in the cause.
+
+/** The project directory has no Dockerfile, so there is nothing to build or exec against. */
+export class DockerfileMissingError extends Data.TaggedError('DockerfileMissingError')<{
+  message: string;
+}> {}
+
+/** An image build failed or a cache-probe inspect payload was malformed. */
+export class ImageProvisionError extends Data.TaggedError('ImageProvisionError')<{
+  message: string;
+}> {}
+
+/** The session worktree a sandbox exec bind-mounts is not on disk. */
+export class WorktreeMissingError extends Data.TaggedError('WorktreeMissingError')<{
+  message: string;
+}> {}
+
+/** A repo name that composes asset paths and image tags is path-shaped — a caller bug. */
+export class InvalidRepoNameError extends Data.TaggedError('InvalidRepoNameError')<{
+  message: string;
+}> {}
 
 /**
  * A forge-REST-client failure carrying its structural discriminant: the HTTP `status` it

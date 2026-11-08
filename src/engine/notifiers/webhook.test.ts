@@ -93,8 +93,7 @@ describe('webhookNotifier', () => {
       );
 
       expect(error).toBeInstanceOf(UnavailableError);
-      expect(error.cause).toBeInstanceOf(Error);
-      expect((error.cause as Error).message).toMatch(/503/);
+      expect(error.message).toMatch(/503/);
     }),
   );
 });
