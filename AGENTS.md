@@ -51,6 +51,6 @@ point) — never bare binaries, `npx`, or `pnpm`:
 
 Fallow enforces architecture boundaries, complexity ceilings, and dead-code regression gates. Config: `.fallowrc.jsonc` (cyclomatic 15, cognitive 10, CRAP 30; boundaries: lib isolated, downward-only imports). The codebase is debt-free with no baseline: `fallow audit` fails on any finding your changes introduce — inherited debt is attributed against the merge-base, but there is nothing to attribute.
 
-- Before opening a PR: `vp run fallow:audit` (exit 0 = clean). The pre-commit hook no longer runs it (removed by operator request); run it manually before committing.
+- Before opening a PR: `vp run fallow:audit` (exit 0 = clean). Before committing: it runs in the `pre-commit` hook.
 - Real CRAP scores need fresh coverage: `vp test run --coverage` regenerates `coverage/`.
 - Debug a finding: `vp exec fallow explain <issue-type>`; trace with `vp exec fallow trace --path <from> <to>`.
