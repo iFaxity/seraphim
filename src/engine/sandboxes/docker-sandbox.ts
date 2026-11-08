@@ -1,10 +1,10 @@
-import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
 
 import { UnavailableError } from '../../lib/errors.ts';
 import { dirExistsE, fileExistsE, readFileE } from '../../lib/fs.ts';
+import { runCli } from '../../lib/proc.ts';
 import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
 import { SandboxService } from '../core/services.ts';
 
@@ -57,9 +57,6 @@ type ExecInput = {
 
 /** POSIX "command not found" — what a shell would report for an unresolvable binary. */
 const CLI_NOT_FOUND = 127;
-
-/** Per-stream output cap: gates can log hard, but nothing here needs more than this retained. */
-const MAX_STREAM_BYTES = 10 * 1024 * 1024;
 
 /**
  * Cache probe: an image already tagged for this exact content means no rebuild. A malformed
@@ -292,59 +289,13 @@ export function imageTagFor(dir: string): Effect.Effect<string> {
 }
 
 /**
- * The production runner: one `docker` CLI invocation per `run` call, full argv passthrough.
- * Output is captured per stream and capped — a runaways gate stops accruing bytes rather than
- * growing without bound; real streaming is the runtime adapter's concern (transcript capture).
+ * The production runner: one `docker` CLI invocation per `run` call, full argv passthrough
+ * (the shared `runCli` machinery). A missing/unspawnable binary reports as exit 127 —
+ * POSIX "command not found" — so callers keep one structured failure shape.
  */
 export const cliDocker: DockerRunner = {
-  run: (args) => Effect.promise(() => runDockerCli([...args])),
+  run: (args) => runCli('docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
 };
-
-async function runDockerCli(args: readonly string[]) {
-  let child: ChildProcess;
-
-  try {
-    child = spawn('docker', [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (error) {
-    // An unspawnable binary surfaces as a synchronous throw, not an event — report it
-    // through the runner's structured result so callers keep one failure shape.
-    return { exitCode: CLI_NOT_FOUND, stdout: '', stderr: String(error) };
-  }
-
-  const stdout = captureStream(child.stdout);
-  const stderr = captureStream(child.stderr);
-
-  // 'error' (binary missing/unspawnable) and 'close' (normal exit) are mutually exclusive
-  // completions; whichever fires first resolves.
-  const withResolvers = Promise.withResolvers<{ exitCode: number; error?: string }>();
-  const { promise, resolve } = withResolvers;
-
-  child.once('error', (error: NodeJS.ErrnoException) =>
-    resolve({ exitCode: CLI_NOT_FOUND, error: error.message }),
-  );
-  child.once('close', (code) => resolve({ exitCode: code ?? CLI_NOT_FOUND }));
-
-  const outcome = await promise;
-  const captured = stderr.join('');
-  const stderrText = captured.length > 0 ? captured : (outcome.error ?? '');
-
-  return { exitCode: outcome.exitCode, stdout: stdout.join(''), stderr: stderrText };
-}
-
-/** Collects one stdout/stderr stream into strings, dropping bytes past the retention cap. */
-function captureStream(target: NodeJS.ReadableStream | null) {
-  const chunks: string[] = [];
-  let captured = 0;
-
-  target?.on('data', (chunk: Buffer) => {
-    if (captured < MAX_STREAM_BYTES) {
-      captured += chunk.length;
-      chunks.push(String(chunk));
-    }
-  });
-
-  return chunks;
-}
 
 /** Production wiring: the real `docker` CLI subprocess runner. */
 export const dockerCliLayer: Layer.Layer<DockerRunnerService> = Layer.succeed(
