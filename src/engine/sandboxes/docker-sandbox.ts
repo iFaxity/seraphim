@@ -281,8 +281,11 @@ function validateRepoName(repo: string): Effect.Effect<string, InvalidRepoNameEr
   return Effect.succeed(repo);
 }
 
-/** The missing-Dockerfile diagnostic shared by ensureImage and execArguments. */
-function missingDockerfile(repo: string, dir: string) {
+/**
+ * The missing-Dockerfile diagnostic shared by ensureImage, execArguments, and the session's
+ * pre-claim preflight — one site owns the wording, every consumer emits it.
+ */
+export function missingDockerfile(repo: string, dir: string) {
   return { message: `no Dockerfile for '${repo}': expected ${join(dir, 'Dockerfile')}` };
 }
 

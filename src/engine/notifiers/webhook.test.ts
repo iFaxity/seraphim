@@ -4,7 +4,7 @@ import { describe, expect } from 'vite-plus/test';
 
 import { nullNotifier, webhookNotifier } from './webhook.ts';
 
-import { expectFailure } from '../../../test/failure.ts';
+import { expectTaggedFailure } from '../../../test/exit.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 
 /** A fetch double that records the call and returns a scripted response status. */
@@ -80,16 +80,14 @@ describe('webhookNotifier', () => {
     Effect.gen(function* () {
       const { post } = recordingPost(503);
 
-      const error = yield* Effect.promise(() =>
-        expectFailure(
-          webhookNotifier({ url: 'https://ntfy.invalid/seraphim', token: 'tk', post }).notify({
-            repo: 'acme/widgets',
-            issueNumber: 44,
-            event: 'cap-hit',
-            summary: 'cap hit',
-            target: null,
-          }),
-        ),
+      const error = yield* expectTaggedFailure(
+        webhookNotifier({ url: 'https://ntfy.invalid/seraphim', token: 'tk', post }).notify({
+          repo: 'acme/widgets',
+          issueNumber: 44,
+          event: 'cap-hit',
+          summary: 'cap hit',
+          target: null,
+        }),
       );
 
       expect(error).toBeInstanceOf(UnavailableError);

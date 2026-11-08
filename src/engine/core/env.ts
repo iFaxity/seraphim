@@ -1,30 +1,47 @@
-import {
-  type AgentRuntime,
-  type Git,
-  type Notifier,
-  type Sandbox,
-  type Tracker,
-} from './contracts.ts';
-
-import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
+import { join } from 'node:path';
+import { Context } from 'effect';
 
 /**
- * The engine-wide composition interface (ADR-0002): the adapter contracts the kernel drives plus
- * the filesystem roots it reads and writes. Declared apart from `session.ts` so `dispatcher`,
- * `engine`, and the fakes import it without reaching through a 500-line module. KernelEnvironment are
- * threaded explicitly — no hidden globals.
+ * The engine-wide filesystem identity (ADR-0002): one home directory on disk from which
+ * every kernel path root derives — projects, sessions, skills, repos, worktrees, locks.
+ * Declared as a `Context` service so kernel code depends on the interface and the
+ * composition root (or a test Layer) supplies the concrete paths; the three path roots
+ * derive from one `home`, never threaded as a 10-field env object.
  */
-export type KernelEnvironment = {
-  readonly tracker: Tracker;
-  readonly sandbox: Sandbox;
-  readonly runtime: AgentRuntime;
-  readonly git: Git;
-  readonly workspaceRoot: string;
+
+/** The kernel's filesystem layout: one home, with the roots derived (or composed) from it. */
+export type Home = {
+  /** The seraphim home directory — every other root hangs off it. */
+  readonly home: string;
+  /** Project records, flows, Dockerfiles, and env slots (the central directory). */
+  readonly projectsRoot: string;
+  /** Session receipts (the filesystem-as-database sessions tree). */
   readonly sessionsRoot: string;
   /** The curated skill pool the kernel enforces declarations against and stages from. */
   readonly poolRoot: string;
-  /** The docker CLI runner prune reuses for stale-image listing and untagging. */
-  readonly docker: DockerRunner;
-  /** The operator page channel: failed, cap-hit, and PR-opened notifications. */
-  readonly notifier: Notifier;
+  /** The shared clones, one per registered repo. */
+  readonly reposRoot: string;
+  /** The per-session worktrees the kernel owns. */
+  readonly worktreesRoot: string;
 };
+
+/** The kernel's filesystem layout as a `Context` service. */
+export class HomeService extends Context.Service<HomeService, Home>()('seraphim/core/Home') {}
+
+/**
+ * Derives the layout from one home directory. Overrides exist for the tests' split temp
+ * roots (sessions/pool on their own tmpdirs) — production composition passes only `home`.
+ */
+export function homeLayout(
+  home: string,
+  overrides: { readonly sessionsRoot?: string; readonly poolRoot?: string } = {},
+): Home {
+  return {
+    home,
+    projectsRoot: join(home, 'projects'),
+    sessionsRoot: overrides.sessionsRoot ?? join(home, 'sessions'),
+    poolRoot: overrides.poolRoot ?? join(home, 'skills'),
+    reposRoot: join(home, 'repos'),
+    worktreesRoot: join(home, 'worktrees'),
+  };
+}

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Clock, Context, Effect, Result } from 'effect';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -9,17 +9,40 @@ import { checkDeclaredSkills, stageSkills } from './skills.ts';
 import { createTurnEngine, type TurnAborted, type TurnEngine } from './turns.ts';
 
 import {
-  type ClaimConflictError,
-  type GitError,
-  type TurnRuntimeError,
-  type UnavailableError,
+  ClaimConflictError,
+  describeError,
+  DockerfileMissingError,
+  GitError,
+  LockHeldError,
+  ProjectError,
+  type ReceiptReadError,
+  ReceiptWriteError,
+  SkillPoolError,
+  UnavailableError,
 } from '../../lib/errors.ts';
-import { fileExists } from '../../lib/fs.ts';
-import { failure, flatten, success, tryCatch, type Result } from '../../lib/result.ts';
+import { fileExistsE } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { type Issue, type NotifyEvent, type TrackerError } from '../core/contracts.ts';
-import { type KernelEnvironment } from '../core/env.ts';
+import {
+  type KernelFailure,
+  type AgentRuntime,
+  type Git,
+  type Issue,
+  type NotifyEvent,
+  type Notifier,
+  type Sandbox,
+  type Tracker,
+  type TrackerError,
+} from '../core/contracts.ts';
+import { HomeService, type Home } from '../core/env.ts';
 import { type FlowConfig, type SessionContext } from '../core/flow-api.ts';
+import {
+  AgentRuntimeService,
+  GitService,
+  NotifierService,
+  SandboxService,
+  TrackerService,
+} from '../core/services.ts';
+import { missingDockerfile } from '../sandboxes/docker-sandbox.ts';
 
 /**
  * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
@@ -34,39 +57,19 @@ export type SessionInput = {
   readonly issueNumber: number;
 };
 
-/**
- * Operator-facing error text: tagged-error tags carry no diagnostics themselves, so the
- * message rides the underlying cause — what a human sees in a log keeps its detail.
- */
-function errorText(error: unknown) {
-  return error instanceof Error && 'cause' in error ? String(error.cause) : String(error);
-}
+/** Everything a session run can fail with: the kernel vocabulary minus receipt reads
+ * (sessions never read other sessions' receipts). Tags survive to the composition root. */
+export type SessionError = Exclude<KernelFailure, ReceiptReadError>;
 
-/**
- * Runs one adapter step, normalizing any rejection into a labeled failure Result. The one
- * place `runSession`'s steps report failure, so each call site is a single await + branch.
- */
-function step<TResult>(action: PromiseLike<TResult>, label: string) {
-  return tryCatch(action).then((result) =>
-    result.success
-      ? result
-      : failure(new Error(`${label}: ${errorText(result.error)}`, { cause: result.error })),
-  );
-}
-
-/**
- * One contract Effect through the kernel's promise seam: `runPromise` under the same
- * labeled step, so the call sites branch on one flat Result without per-site plumbing.
- */
-function runStep<TResult>(
-  effect: Effect.Effect<
-    TResult,
-    TrackerError | ClaimConflictError | GitError | UnavailableError | TurnRuntimeError
-  >,
-  label: string,
-) {
-  return step(Effect.runPromise(effect), label);
-}
+/** The services one session run resolves: the adapter contracts plus the home layout. */
+export type SessionServices =
+  | TrackerService
+  | SandboxService
+  | AgentRuntimeService
+  | GitService
+  | NotifierService
+  | HomeService
+  | Clock.Clock;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {
@@ -75,20 +78,19 @@ type RunnableFlow = {
 };
 
 /**
- * The session-scoped state the ctx helpers read and mutate, as one traveller: the
- * manifest records exit state and PR URL, the logs array gathers the session log, and
- * `turnsEngine` gates and records turns. Passing them as one struct keeps dispatch, gate
- * commands, and finalization reading the same session.
- */
-/**
  * The kernel's in-place draft of a session manifest: same shape as `Session`, fields
  * mutable so the ctx callbacks and the exit recorder can mutate during the run (the
  * persisted schema stays untouched).
  */
 type SessionDraft = { -readonly [K in keyof Session]: Session[K] };
 
+/**
+ * The mutable session state the receipt is built from. Adapter services are NOT part of it:
+ * they ride the session's Effect context (resolved per call site), so this struct is only
+ * the state one run owns — never the deleted environment-object funnel reborn.
+ */
 type SessionRun = {
-  readonly env: KernelEnvironment;
+  readonly home: Home;
   readonly input: SessionInput;
   readonly worktreePath: string;
   readonly model: string;
@@ -101,56 +103,72 @@ type SessionRun = {
   readonly notifyTarget: string | null;
 };
 
-/**
- * Everything that must hold before any effect: registration resolves the remote (and
- * fail-fast names the register fix for unregistered repos), the flow file loads, a flow
- * naming a skill the pool does not have stops before a claim, a clone, or a worktree
- * exists, and the runtime adapter for the configured agent is
- * present — the adapter's own report is trusted, the kernel never branches on a backend
- * name.
- */
-async function resolveRunnableFlow(
-  env: KernelEnvironment,
+/** Everything that must hold before any effect: the project is registered and active, the flow
+ * file loads, a flow naming a skill the pool does not have stops before a claim, a clone, or a
+ * worktree exists, and the runtime adapter for the configured agent is present — the adapter's
+ * own report is trusted, the kernel never branches on a backend name. */
+/** Everything the pre-run resolution can fail with: the kernel vocabulary minus the receipt
+ * writes (nothing is persisted before the worktree exists). */
+type RunnableFlowError = Exclude<KernelFailure, ReceiptReadError | ReceiptWriteError>;
+
+const resolveRunnableFlow = (
+  home: Home,
   input: SessionInput,
-): Promise<Result<RunnableFlow>> {
-  const project = await loadProject(env.workspaceRoot, input.repo);
+): Effect.Effect<
+  RunnableFlow & { tracker: Tracker; git: Git; runtime: AgentRuntime },
+  RunnableFlowError,
+  TrackerService | GitService | AgentRuntimeService | HomeService
+> =>
+  Effect.gen(function* () {
+    const tracker = yield* TrackerService;
+    const git = yield* GitService;
+    const runtime = yield* AgentRuntimeService;
 
-  if (!project.success) {
-    return project;
-  }
+    const project = yield* loadProject(input.repo);
 
-  if (project.data.state != 'active') {
-    return failure(
-      new Error(
-        `project '${input.repo}' is inactive: re-register it (seraphim register <git-url>) to run sessions`,
-      ),
-    );
-  }
+    if (project.state != 'active') {
+      return yield* new ProjectError({
+        message: `project '${input.repo}' is inactive: re-register it (seraphim register <git-url>) to run sessions`,
+      });
+    }
 
-  const flow = await loadFlow(env.workspaceRoot, input.repo);
+    const flow = yield* loadFlow(home.home, input.repo);
+    yield* checkDeclaredSkills(home.poolRoot, flow.config.skills);
+    yield* checkPreflight(home, input.repo);
 
-  if (!flow.success) {
-    return flow;
-  }
+    if (!runtime.available(flow.config.agent)) {
+      return yield* new UnavailableError({
+        message: `adapter not available: ${flow.config.agent}`,
+      });
+    }
 
-  const skills = await checkDeclaredSkills(env.poolRoot, flow.data.config.skills);
+    return { project, flow, tracker, git, runtime } satisfies RunnableFlow & {
+      tracker: Tracker;
+      git: Git;
+      runtime: AgentRuntime;
+    };
+  });
 
-  if (!skills.success) {
-    return skills;
-  }
+/**
+ * Fails fast on missing Dockerfile-shaped prerequisites before the issue is claimed — the
+ * sandbox's own checks stay the enforcement point at the exec/ensureImage edge; this only
+ * moves the failure ahead of the claim so a broken project never consumes an issue. The
+ * diagnostic wording lives once, in the sandbox module.
+ */
+const checkPreflight = (home: Home, repo: string) =>
+  Effect.gen(function* () {
+    const dockerfilePath = join(home.projectsRoot, repo, 'Dockerfile');
+    const hasDockerfile = yield* fileExistsE(dockerfilePath);
 
-  const preflight = await checkPreflight(env, input.repo);
+    if (!hasDockerfile) {
+      const missing = missingDockerfile(repo, home.projectsRoot);
 
-  if (!preflight.success) {
-    return preflight;
-  }
-
-  if (!env.runtime.available(flow.data.config.agent)) {
-    return failure(new Error(`adapter not available: ${flow.data.config.agent}`));
-  }
-
-  return success({ project: project.data, flow: flow.data });
-}
+      return yield* new UnavailableError({
+        message: missing.message,
+        cause: new DockerfileMissingError(missing),
+      });
+    }
+  });
 
 /**
  * Runs one session end-to-end over injected adapters: preflight fail-fast, image ensure,
@@ -158,64 +176,69 @@ async function resolveRunnableFlow(
  * `ctx.run(prompt)` dispatch into the runtime, receipt files under the sessions root.
  * Failures stop for human takeover: state is recorded, branch retained.
  */
-export async function runSession(env: KernelEnvironment, input: SessionInput) {
-  const resolved = await resolveRunnableFlow(env, input);
-  if (!resolved.success) {
-    return resolved;
-  }
+export const runSession = (
+  input: SessionInput,
+): Effect.Effect<{ readonly manifest: Session }, SessionError, SessionServices> =>
+  Effect.gen(function* () {
+    const home = yield* HomeService;
+    const notifier = yield* NotifierService;
+    const sandbox = yield* SandboxService;
 
-  const { project, flow } = resolved.data;
+    const resolved = yield* resolveRunnableFlow(home, input);
+    const { project, flow, tracker, git } = resolved;
 
-  // The repo lock serializes only the shared mutations across concurrent sessions on one
-  // repo — image build and clone/pull; the worktree and turn dispatch below stay outside it
-  // (parallel issues per repo are the intended use case).
-  const repoPath = join(env.workspaceRoot, 'repos', input.repo);
-  const attempt = await claimAndSyncIssue(env, input, repoPath, project.remote);
+    // The repo lock serializes only the shared mutations across concurrent sessions on one
+    // repo — image build and clone/pull; the worktree and turn dispatch below stay outside it
+    // (parallel issues per repo are the intended use case).
+    const repoPath = join(home.reposRoot, input.repo);
+    const issue = yield* claimAndSyncIssue(
+      home,
+      input,
+      repoPath,
+      project.remote,
+      tracker,
+      git,
+      sandbox,
+    );
 
-  if (!attempt.success) {
-    return attempt;
-  }
+    const prepared = yield* prepareWorktree(home, input, flow.config, repoPath, git);
+    const { startedAt, relDir, worktreePath, branch } = prepared;
+    const turnsEngine = createTurnEngine({
+      caps: flow.config.caps,
+      agent: flow.config.agent,
+      model: flow.config.model,
+    });
+    const logs: string[] = [];
 
-  const { issue } = attempt.data;
+    // Drafted now for the ctx callbacks to mutate; the manifest schema is checked once, at
+    // write time below, so the validated shape is the one actually persisted — not an
+    // empty-turns snapshot.
+    const manifest = createSessionManifest(input, flow, { startedAt, branch, worktreePath });
 
-  const prepared = await prepareWorktree(env, input, flow.config, repoPath);
+    const run: SessionRun = {
+      home,
+      input,
+      worktreePath,
+      model: flow.config.model,
+      manifest,
+      turnsEngine,
+      logs,
+      issueTitle: issue.title,
+      notifyTarget: project.notify?.target ?? null,
+    };
 
-  if (!prepared.success) {
-    return prepared;
-  }
+    // The flow runs as an untrusted promise inside the session's context: ctx closures
+    // dispatch through the same service stack (Clock included), so a TestClock at the
+    // composition root governs the turn budgets the flow dispatches under.
+    const context = yield* Effect.context<SessionServices>();
+    const ctx = createFlowContext(run, { issue, branch, repoPath }, context);
 
-  const { startedAt, relDir, worktreePath, branch } = prepared.data;
-  const turnsEngine = createTurnEngine({
-    caps: flow.config.caps,
-    agent: flow.config.agent,
-    model: flow.config.model,
-    now,
+    const flowRun = yield* Effect.result(
+      Effect.tryPromise({ try: () => flow.run(ctx), catch: (error) => error as Error }),
+    );
+
+    return yield* finalizeSessionReceipt(run, notifier, relDir, flowRun);
   });
-  const logs: string[] = [];
-
-  // Drafted now for the ctx callbacks to mutate; the manifest schema is checked once, at
-  // write time below, so the validated shape is the one actually persisted — not an
-  // empty-turns snapshot.
-  const manifest = createSessionManifest(input, flow, { startedAt, branch, worktreePath });
-
-  const run: SessionRun = {
-    env,
-    input,
-    worktreePath,
-    model: flow.config.model,
-    manifest,
-    turnsEngine,
-    logs,
-    issueTitle: issue.title,
-    notifyTarget: project.notify?.target ?? null,
-  };
-
-  const ctx = createFlowContext(run, { issue, branch, repoPath });
-
-  const flowRun = await tryCatch(flow.run(ctx));
-
-  return finalizeSessionReceipt(run, relDir, flowRun);
-}
 
 /** Thrown by ctx.run when a turn fails or hits a cap — the flow stops, state is recorded. */
 class TurnAbortedError extends Error {
@@ -224,78 +247,38 @@ class TurnAbortedError extends Error {
   }
 }
 
-/** Fails fast on missing Dockerfile-shaped prerequisites; loadFlow owns the flow file. */
-async function checkPreflight(env: KernelEnvironment, repo: string) {
-  const dockerfilePath = join(env.workspaceRoot, 'projects', repo, 'Dockerfile');
-  const hasDockerfile = await fileExists(dockerfilePath);
-
-  if (!hasDockerfile) {
-    return failure(
-      new Error(
-        `no Dockerfile for '${repo}': expected ${env.workspaceRoot}/projects/${repo}/Dockerfile`,
-      ),
-    );
-  }
-
-  return success();
-}
-
 /**
  * Claims the issue and synchronizes the repo, all under the repo lock. Claiming on pickup
  * means concurrent sessions cannot double-run the same issue; the lock serializes the shared
  * mutations (image build, clone/pull) so a locked or expired-wait repo fails fast without
  * stranding a claimed issue. Returns the claimed issue for the turn phase.
  */
-async function claimAndSyncIssue(
-  env: KernelEnvironment,
+const claimAndSyncIssue = (
+  home: Home,
   input: SessionInput,
   repoPath: string,
   remote: string,
-) {
-  const locked = await step(
-    withRepoLock(env.workspaceRoot, input.repo, async () => {
-      const issue = await runStep(
-        env.tracker.getIssue(input.repo, input.issueNumber),
-        'tracker read failed',
-      );
+  tracker: Tracker,
+  git: Git,
+  sandbox: Sandbox,
+): Effect.Effect<
+  Issue,
+  TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
+  never
+> =>
+  withRepoLock(
+    home.home,
+    input.repo,
+    Effect.gen(function* () {
+      const issue = yield* tracker.getIssue(input.repo, input.issueNumber);
+      yield* tracker.claim(issue);
+      yield* sandbox.ensureImage(input.repo);
+      yield* git.cloneIfMissing(repoPath, remote);
+      yield* git.pull(repoPath);
 
-      if (!issue.success) {
-        return issue;
-      }
-
-      const claimed = await runStep(env.tracker.claim(issue.data), 'tracker claim failed');
-
-      if (!claimed.success) {
-        return claimed;
-      }
-
-      const image = await runStep(env.sandbox.ensureImage(input.repo), 'image build failed');
-
-      if (!image.success) {
-        return image;
-      }
-
-      const clone = await runStep(env.git.cloneIfMissing(repoPath, remote), 'clone failed');
-
-      if (!clone.success) {
-        return clone;
-      }
-
-      const pull = await runStep(env.git.pull(repoPath), 'pull failed');
-
-      if (!pull.success) {
-        return pull;
-      }
-
-      return success({ issue: issue.data });
+      return issue;
     }),
-    'repo lock failed',
   );
-
-  // `step` wraps the inner Result in another Result for the lock rejection; flatten
-  // collapses that layer so callers see one flat Result.
-  return flatten(locked);
-}
 
 /**
  * Creates the session worktree off the repo's default branch and stages the flow's declared
@@ -303,60 +286,44 @@ async function claimAndSyncIssue(
  * turn runs, so the agent session discovers them without global installation.
  * The worktree is host filesystem here; the sandbox bind-mounts it at /workspace.
  */
-async function prepareWorktree(
-  env: KernelEnvironment,
+const prepareWorktree = (
+  home: Home,
   input: SessionInput,
   config: FlowConfig,
   repoPath: string,
-) {
-  const startedAt = now();
-  const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
-  const worktreePath = join(
-    env.workspaceRoot,
-    'worktrees',
-    input.repo,
-    `${input.issueNumber}-${toEpochMs(startedAt)}`,
-  );
-  const defaultBranch = await runStep(
-    env.git.defaultBranch(repoPath),
-    'default branch lookup failed',
-  );
+  git: Git,
+): Effect.Effect<
+  { startedAt: Temporal.Instant; relDir: string; worktreePath: string; branch: string },
+  GitError | SkillPoolError,
+  never
+> =>
+  Effect.gen(function* () {
+    const startedAt = now();
+    const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
+    const worktreePath = join(
+      home.worktreesRoot,
+      input.repo,
+      `${input.issueNumber}-${toEpochMs(startedAt)}`,
+    );
+    const defaultBranch = yield* git.defaultBranch(repoPath);
 
-  if (!defaultBranch.success) {
-    return defaultBranch;
-  }
-
-  const branch = `seraphim/${input.repo}/${input.issueNumber}-${toEpochMs(startedAt)}`;
-  const worktree = await runStep(
-    env.git.createWorktree({
+    const branch = `seraphim/${input.repo}/${input.issueNumber}-${toEpochMs(startedAt)}`;
+    yield* git.createWorktree({
       repoPath,
       branch,
       path: worktreePath,
-      baseBranch: defaultBranch.data,
-    }),
-    'worktree creation failed',
-  );
+      baseBranch: defaultBranch,
+    });
 
-  if (!worktree.success) {
-    return worktree;
-  }
-
-  const staged = await step(
-    stageSkills({
-      poolRoot: env.poolRoot,
+    yield* stageSkills({
+      poolRoot: home.poolRoot,
       worktreePath,
       agent: config.agent,
       declared: config.skills,
-    }),
-    'skill staging failed',
-  );
+    });
 
-  if (!staged.success) {
-    return staged;
-  }
-
-  return success({ startedAt, relDir, worktreePath, branch });
-}
+    return { startedAt, relDir, worktreePath, branch };
+  });
 
 /**
  * Drafts the running-state manifest for one session: identity, branch, and the flow's
@@ -400,36 +367,40 @@ function createSessionManifest(
  * (recovery turns) must stay silent: a self-heal that never reaches a terminal state never
  * pages the operator.
  */
-async function notifyOperator(run: SessionRun, event: NotifyEvent, detail: string) {
-  const sent = await tryCatch(
-    Effect.runPromise(
-      run.env.notifier.notify({
-        repo: run.input.repo,
-        issueNumber: run.input.issueNumber,
-        event,
-        summary: `${run.input.repo}#${run.input.issueNumber} ${run.issueTitle} — ${detail}`,
-        target: run.notifyTarget,
-      }),
-    ),
-  );
-
-  if (!sent.success) {
-    run.logs.push(`notify failed: ${errorText(sent.error)}`);
-  }
-}
+const notifyOperator = (run: SessionRun, notifier: Notifier, event: NotifyEvent, detail: string) =>
+  notifier
+    .notify({
+      repo: run.input.repo,
+      issueNumber: run.input.issueNumber,
+      event,
+      summary: `${run.input.repo}#${run.input.issueNumber} ${run.issueTitle} — ${detail}`,
+      target: run.notifyTarget,
+    })
+    .pipe(
+      Effect.catch((error: unknown) =>
+        Effect.sync(() => run.logs.push(`notify failed: ${describeError(error)}`)),
+      ),
+    );
 
 /**
  * Builds the flow-facing `SessionContext` over the session's adapters and turn ledger:
  * logging, gate commands, draft-PR opening, branch pushing, and turn dispatch. The ctx
  * closures mutate the manifest (the receipt) and the session log; `ctx.run` gates and
- * records every turn through the turn engine.
+ * records every turn through the turn engine. The session's captured context bridges the
+ * flow's promises back into the session's service stack.
  */
 function createFlowContext(
   run: SessionRun,
   identity: { readonly issue: Issue; readonly branch: string; readonly repoPath: string },
+  context: Context.Context<SessionServices>,
 ): SessionContext {
-  const { env, input, worktreePath, manifest } = run;
+  const { input, worktreePath, manifest } = run;
   const { issue, branch, repoPath } = identity;
+
+  // Each closure resolves the adapter it needs from the session's captured context — the
+  // adapters ride the service stack, never the run struct.
+  const bridged = <A, E>(effect: Effect.Effect<A, E, SessionServices>) =>
+    Effect.runPromise(effect.pipe(Effect.provideContext(context)));
 
   return {
     repo: input.repo,
@@ -438,23 +409,41 @@ function createFlowContext(
     log: (message: string) => {
       run.logs.push(message);
     },
-    sh: (command: readonly string[]) => runGateCommand(run, command),
+    sh: (command: readonly string[]) =>
+      bridged(
+        Effect.gen(function* () {
+          const sandbox = yield* SandboxService;
+
+          return yield* runGateCommand(run, sandbox, command);
+        }),
+      ),
     tracker: {
       openDraftPr: (prInput: { readonly title: string; readonly body: string }) =>
-        Effect.runPromise(
-          env.tracker.openDraftPr({
-            repo: input.repo,
-            issue,
-            branch,
-            title: prInput.title,
-            body: prInput.body,
-          }),
-        ).then(async (pr) => {
-          manifest.prUrl = pr.url;
-          await notifyOperator(run, 'pr-opened', `draft PR opened: ${pr.url}`);
+        bridged(
+          Effect.gen(function* () {
+            const tracker = yield* TrackerService;
+            const notifier = yield* NotifierService;
 
-          return pr;
-        }),
+            return yield* tracker
+              .openDraftPr({
+                repo: input.repo,
+                issue,
+                branch,
+                title: prInput.title,
+                body: prInput.body,
+              })
+              .pipe(
+                Effect.tap((pr) =>
+                  Effect.sync(() => {
+                    manifest.prUrl = pr.url;
+                  }),
+                ),
+                Effect.tap((pr) =>
+                  notifyOperator(run, notifier, 'pr-opened', `draft PR opened: ${pr.url}`),
+                ),
+              );
+          }),
+        ),
     },
     forge: {
       // Flow-authored, optional: the kernel binds the session clone and branch — flows
@@ -462,26 +451,41 @@ function createFlowContext(
       // container never sees the push credentials. A push failure propagates into the
       // flow like any other adapter rejection; the kernel never pre-checks an unpushed
       // branch (an unknown head fails at the forge).
-      push: () => Effect.runPromise(env.git.push({ repoPath, branch })),
+      push: () =>
+        bridged(
+          Effect.gen(function* () {
+            const git = yield* GitService;
+
+            return yield* git.push({ repoPath, branch });
+          }),
+        ),
     },
-    run: (prompt: string) => dispatchTurn(run, prompt),
+    run: (prompt: string) =>
+      bridged(
+        Effect.gen(function* () {
+          const runtime = yield* AgentRuntimeService;
+
+          return yield* dispatchTurn(run, runtime, prompt);
+        }),
+      ),
   };
 }
 
 /**
  * Records the exit state on the manifest (plus the budget reason for a cap breach), then
- * throws to stop the flow. One helper so every abort records the same way — the manifest
- * is the receipt, and the transcript (engine-side) tells the human what the flow wanted
- * next.
+ * fails with the promise-boundary error so the flow stops. One helper so every abort records
+ * the same way — the manifest is the receipt, and the transcript (engine-side) tells the
+ * human what the flow wanted next. Called exactly once per dispatch failure: the caller
+ * short-circuits on the failure, so there is no double-abort.
  */
-function abort(manifest: SessionDraft, aborted: TurnAborted): never {
+function abort(manifest: SessionDraft, aborted: TurnAborted) {
   manifest.state = aborted.exitState;
 
   if (aborted.kind === 'cap') {
     manifest.capHit = aborted.reason;
   }
 
-  throw new TurnAbortedError(aborted.exitState);
+  return Effect.fail(new TurnAbortedError(aborted.exitState));
 }
 
 /**
@@ -489,120 +493,104 @@ function abort(manifest: SessionDraft, aborted: TurnAborted): never {
  * `/workspace`. Returns the exit code; nonzero means the gate failed — the flow decides
  * what that means.
  */
-async function runGateCommand(run: SessionRun, command: readonly string[]) {
-  const executed = await Effect.runPromise(
-    run.env.sandbox.exec({
+const runGateCommand = (run: SessionRun, sandbox: Sandbox, command: readonly string[]) =>
+  Effect.gen(function* () {
+    const executed = yield* sandbox.exec({
       repo: run.input.repo,
       worktreePath: run.worktreePath,
       command,
-    }),
-  );
+    });
 
-  // Gate output rides the session log: a red exit code with no captured output is a
-  // diagnosis dead end for a human taking over.
-  const detail = [executed.stdout, executed.stderr]
-    .map((stream) => stream.trim())
-    .filter((stream) => stream !== '')
-    .join('\n');
+    // Gate output rides the session log: a red exit code with no captured output is a
+    // diagnosis dead end for a human taking over.
+    const detail = [executed.stdout, executed.stderr]
+      .map((stream) => stream.trim())
+      .filter((stream) => stream !== '')
+      .join('\n');
 
-  run.logs.push(
-    `gate: ${command.join(' ')} → exit ${executed.exitCode}${detail ? `\n${detail}` : ''}`,
-  );
+    run.logs.push(
+      `gate: ${command.join(' ')} → exit ${executed.exitCode}${detail ? `\n${detail}` : ''}`,
+    );
 
-  return executed.exitCode;
-}
+    return executed.exitCode;
+  });
 
 /**
  * The kernel's turn dispatch behind `ctx.run`: both caps gate before the prompt goes to
- * the runtime, the turn is recorded, and any failure aborts the flow. A throw, not a
- * Result, because flow code (`flow.run(ctx)`) is untrusted and must not be able to
- * swallow the abort; tryCatch at the flow-run call site converts it back.
+ * the runtime, the turn is recorded, and any failure aborts the flow. A rejection, not a
+ * Result, because flow code (`flow.run(ctx)`) is untrusted and must not be able to swallow
+ * the abort; the tryPromise at the flow-run call site converts it back into the exit state.
  */
-async function dispatchTurn(run: SessionRun, prompt: string) {
-  const { env, input, worktreePath, model, manifest, turnsEngine } = run;
+const dispatchTurn = (run: SessionRun, runtime: AgentRuntime, prompt: string) =>
+  Effect.gen(function* () {
+    const { input, worktreePath, model, manifest, turnsEngine } = run;
 
-  // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
-  // not be able to dispatch past a budget by catching the abort (spec: caps live in
-  // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
-  const gate = turnsEngine.gate();
+    // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
+    // not be able to dispatch past a budget by catching the abort (spec: caps live in
+    // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
+    const gate = yield* turnsEngine.gate.pipe(
+      Effect.catch((aborted: TurnAborted) => abort(manifest, aborted)),
+    );
 
-  if (!gate.success) {
-    abort(manifest, gate.error);
-  }
-
-  // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
-  // non-interactive contract, flows stay prompt-pure.
-  const turn = await tryCatch(
-    Effect.runPromise(
-      env.runtime.run({
+    // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
+    // non-interactive contract, flows stay prompt-pure. A runtime failure rides the outcome
+    // as data — the turn record and transcript are kept either way.
+    const outcome = yield* Effect.result(
+      runtime.run({
         repo: input.repo,
         cwd: worktreePath,
         prompt: `${AFK_PREAMBLE}\n\n${prompt}`,
         model,
       }),
-    ),
-  );
+    );
 
-  const recorded = turnsEngine.record({
-    prompt,
-    startedAt: gate.data.startedAt,
-    outcome: turn,
+    // Failures always stop for human takeover — no recovery, no further turns.
+    yield* turnsEngine
+      .record({ prompt, startedAt: gate.startedAt, outcome })
+      .pipe(Effect.catch((aborted: TurnAborted) => abort(manifest, aborted)));
   });
-
-  // Failures always stop for human takeover — no recovery, no further turns.
-  if (!recorded.success) {
-    abort(manifest, recorded.error);
-  }
-}
 
 /**
  * Records the flow's exit state on the manifest, snapshots the turn ledger, and writes
  * the finalized receipt — endedAt plus the turn records — under the session's directory.
  * The manifest is the receipt; this only settles and persists it.
  */
-async function finalizeSessionReceipt(
+const finalizeSessionReceipt = (
   run: SessionRun,
+  notifier: Notifier,
   relDir: string,
-  flowRun: Result<void, Error>,
-) {
-  const { env, manifest, turnsEngine, logs } = run;
+  flowRun: Result.Result<void, Error>,
+): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, never> =>
+  Effect.gen(function* () {
+    const { home, manifest, turnsEngine, logs } = run;
 
-  // A turn that already set a terminal state keeps it — cap-hit stays cap-hit.
-  if (!flowRun.success && manifest.state == 'running') {
-    manifest.state = 'failed';
-  }
+    // A turn that already set a terminal state keeps it — cap-hit stays cap-hit.
+    if (Result.isFailure(flowRun) && manifest.state == 'running') {
+      manifest.state = 'failed';
+    }
 
-  if (manifest.state == 'running') {
-    manifest.state = 'completed';
-  }
+    if (manifest.state == 'running') {
+      manifest.state = 'completed';
+    }
 
-  const { turns, transcripts } = turnsEngine.snapshot();
-  const finalManifest = { ...manifest, endedAt: now(), turns };
-  // Terminal-state pages: a failure or cap breach stops for human takeover, so the operator
-  // is paged. Completed sessions stay silent; the PR-opened page already fired in the ctx
-  // callback above.
-  if (finalManifest.state == 'failed' || finalManifest.state == 'cap-hit') {
-    await notifyOperator(
-      run,
-      finalManifest.state,
-      finalManifest.capHit
-        ? `cap hit: ${finalManifest.capHit}`
-        : 'session failed — human takeover required',
-    );
-  }
+    const { turns, transcripts } = turnsEngine.snapshot();
+    const finalManifest = { ...manifest, endedAt: now(), turns };
 
-  const write = await writeReceipt(
-    env.sessionsRoot,
-    relDir,
-    finalManifest,
-    turns,
-    logs,
-    transcripts,
-  );
+    // Terminal-state pages: a failure or cap breach stops for human takeover, so the operator
+    // is paged. Completed sessions stay silent; the PR-opened page already fired in the ctx
+    // callback above.
+    if (finalManifest.state == 'failed' || finalManifest.state == 'cap-hit') {
+      yield* notifyOperator(
+        run,
+        notifier,
+        finalManifest.state,
+        finalManifest.capHit
+          ? `cap hit: ${finalManifest.capHit}`
+          : 'session failed — human takeover required',
+      );
+    }
 
-  if (!write.success) {
-    return write;
-  }
+    yield* writeReceipt(home.sessionsRoot, relDir, finalManifest, turns, logs, transcripts);
 
-  return success({ manifest: finalManifest });
-}
+    return { manifest: finalManifest };
+  });

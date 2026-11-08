@@ -53,16 +53,16 @@
         "patterns": ["src/engine/core/**"],
       },
       {
-        "name": "engine/fakes",
-        "patterns": ["src/engine/fakes/**"],
-      },
-      {
         "name": "engine/forges",
         "patterns": ["src/engine/forges/**"],
       },
       {
         "name": "engine/kernel",
         "patterns": ["src/engine/kernel/**"],
+      },
+      {
+        "name": "test",
+        "patterns": ["test/**"],
       },
       {
         "name": "engine/runtimes",
@@ -84,27 +84,36 @@
         "from": "engine/core",
         "allow": ["lib", "engine/kernel", "engine/sandboxes"],
       },
-      // kernel orchestrates all engine submodules + core + lib
+      // kernel orchestrates all engine submodules + core + lib; colocated kernel suites
+      // import the adapter fakes under test/.
       {
         "from": "engine/kernel",
         "allow": [
           "engine/core",
           "lib",
-          "engine/fakes",
           "engine/sandboxes",
           "engine/forges",
           "engine/runtimes",
+          "test",
         ],
       },
       // TODO(follow-up): forges imports kernel/git.ts — move git.ts down a layer, then drop "engine/kernel"
       {
         "from": "engine/forges",
-        "allow": ["engine/core", "lib", "engine/kernel"],
+        "allow": ["engine/core", "lib", "engine/kernel", "test"],
       },
-      // TODO(follow-up): fakes imports sandboxes/docker-sandbox.ts — decouple, then drop "engine/sandboxes"
+      // Test helpers may reach every engine zone + lib; the fakes under test/ stand in
+      // for the adapters the kernel composes.
       {
-        "from": "engine/fakes",
-        "allow": ["engine/core", "lib", "engine/sandboxes"],
+        "from": "test",
+        "allow": [
+          "engine/core",
+          "lib",
+          "engine/kernel",
+          "engine/forges",
+          "engine/runtimes",
+          "engine/sandboxes",
+        ],
       },
       {
         "from": "engine/runtimes",
@@ -112,7 +121,7 @@
       },
       {
         "from": "engine/sandboxes",
-        "allow": ["engine/core", "lib"],
+        "allow": ["engine/core", "lib", "test"],
       },
       // Architecture: downward-only imports; engine submodules reach core + lib; only
       // kernel orchestrates sandboxes/fakes.
@@ -122,7 +131,7 @@
           "engine/core",
           "lib",
           "engine/kernel",
-          "engine/fakes",
+          "test",
           "engine/forges",
           "engine/runtimes",
           "engine/sandboxes",

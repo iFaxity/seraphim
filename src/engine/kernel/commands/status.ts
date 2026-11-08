@@ -1,5 +1,7 @@
-import { failure, success } from '../../../lib/result.ts';
+import { Effect } from 'effect';
+
 import { toEpochMs } from '../../../lib/time.ts';
+import { HomeService } from '../../core/env.ts';
 import { command, strictFlags } from '../command.ts';
 import { listSessions, type SessionListing, type SessionState } from '../receipts.ts';
 
@@ -46,20 +48,18 @@ export const statusCommand = command({
   summary: 'list sessions and worktrees',
   usage: 'status [--json]',
   parse: strictFlags('status', { json: { type: 'boolean', default: false } }),
-  execute: async (env, values) => {
-    const listed = await listSessions(env.sessionsRoot);
+  execute: (values) =>
+    Effect.gen(function* () {
+      const home = yield* HomeService;
+      const listed = yield* listSessions(home.sessionsRoot);
 
-    if (!listed.success) {
-      return failure(listed.error);
-    }
+      const sessions: SessionLine[] = listed.sessions.map(toSessionLine);
 
-    const sessions: SessionLine[] = listed.data.map(toSessionLine);
-
-    return success({
-      kind: 'status' as const,
-      sessions,
-      skipped: listed.skipped > 0 ? listed.skipped : null,
-      json: values['json'] === true,
-    });
-  },
+      return {
+        kind: 'status' as const,
+        sessions,
+        skipped: listed.skipped > 0 ? listed.skipped : null,
+        json: values['json'] === true,
+      };
+    }),
 });

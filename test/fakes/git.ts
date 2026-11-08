@@ -1,7 +1,7 @@
 import { Effect, Layer } from 'effect';
 
-import { type Git } from '../core/contracts.ts';
-import { GitService } from '../core/services.ts';
+import { type Git } from '../../src/engine/core/contracts.ts';
+import { GitService } from '../../src/engine/core/services.ts';
 
 /**
  * Hand-written fake for the git contract (ADR-0002 keeps fakes engine-side): records clones,

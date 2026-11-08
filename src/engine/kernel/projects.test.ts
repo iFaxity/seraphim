@@ -1,8 +1,9 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 
+import { type CommandServices } from './command.ts';
 import { loadFlow } from './flow.ts';
 import {
   deactivateProject,
@@ -12,9 +13,17 @@ import {
   registerProject,
 } from './projects.ts';
 
+import { FakeGit, fakeGit } from '../../../test/fakes/git.ts';
+import { FakeNotifier } from '../../../test/fakes/notifier.ts';
+import { FakeRuntime } from '../../../test/fakes/runtime.ts';
+import { FakeSandbox } from '../../../test/fakes/sandbox.ts';
+import { FakeTracker } from '../../../test/fakes/tracker.ts';
+import { run } from '../../../test/run.ts';
 import { GitError } from '../../lib/errors.ts';
+import { type Git } from '../core/contracts.ts';
 import { engine } from '../core/engine.ts';
-import { fakeKernelEnvironment } from '../fakes/env.ts';
+import { homeLayout, HomeService } from '../core/env.ts';
+import { GitService } from '../core/services.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 const REMOTE = 'https://example.invalid/acme/widgets.git';
@@ -29,11 +38,19 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+function homeLayer(): Layer.Layer<HomeService> {
+  return Layer.succeed(HomeService, homeLayout(root));
+}
+
+function projectLayer(git: Git) {
+  return Layer.mergeAll(homeLayer(), Layer.succeed(GitService, git));
+}
+
 describe('registerProject', () => {
   it('creates the central directory: record, flow template, Dockerfile and env slots', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    const result = await registerProject(root, env.git, REMOTE);
+    const result = await run(registerProject(REMOTE), projectLayer(git));
 
     expect(result.success).toBe(true);
 
@@ -68,28 +85,25 @@ describe('registerProject', () => {
   });
 
   it('seeds the home .gitignore for kernel state, keeping an owner-curated one intact', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    await registerProject(root, env.git, REMOTE, 'widgets');
+    await run(registerProject(REMOTE, 'widgets'), projectLayer(git));
     expect(await readFile(join(root, '.gitignore'), 'utf8')).toEqual(
       expect.stringContaining('.env\nsessions/\nrepos/\nworktrees/\nlocks/'),
     );
 
     // Owner content is never clobbered by a re-register.
     await writeFile(join(root, '.gitignore'), 'sessions/\n');
-    await registerProject(root, env.git, REMOTE, 'other').then(
-      () => {},
-      () => {},
-    );
+    await run(registerProject(REMOTE, 'other'), projectLayer(git));
     expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('sessions/\n');
   });
 
   it('seeds a flow template that loads with no imports or engine tree present', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    await registerProject(root, env.git, REMOTE);
+    await run(registerProject(REMOTE), projectLayer(git));
 
-    const flow = await loadFlow(root, 'widgets');
+    const flow = await run(loadFlow(root, 'widgets'), Layer.empty);
 
     expect(flow.success).toBe(true);
 
@@ -100,9 +114,9 @@ describe('registerProject', () => {
   });
 
   it('accepts an explicit project name', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    const result = await registerProject(root, env.git, REMOTE, 'gadgets');
+    const result = await run(registerProject(REMOTE, 'gadgets'), projectLayer(git));
 
     expect(result.success).toBe(true);
 
@@ -112,9 +126,12 @@ describe('registerProject', () => {
   });
 
   it('derives the name from scp-like remotes', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    const result = await registerProject(root, env.git, 'git@example.invalid:acme/pipes.git');
+    const result = await run(
+      registerProject('git@example.invalid:acme/pipes.git'),
+      projectLayer(git),
+    );
 
     expect(result.success).toBe(true);
 
@@ -124,13 +141,12 @@ describe('registerProject', () => {
   });
 
   it('fails fast when the remote is unreachable and seeds nothing', async () => {
-    const { git } = fakeKernelEnvironment({ workspaceRoot: root });
     const broken = {
-      ...git,
+      ...fakeGit(),
       probeRemote: () => Effect.fail(new GitError({ message: 'ls-remote exited 128' })),
     };
 
-    const result = await registerProject(root, broken, REMOTE);
+    const result = await run(registerProject(REMOTE), projectLayer(broken));
 
     expect(result.success).toBe(false);
 
@@ -142,10 +158,10 @@ describe('registerProject', () => {
   });
 
   it('fails fast on duplicate registration', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
-    await registerProject(root, env.git, REMOTE);
+    const git = fakeGit();
+    await run(registerProject(REMOTE), projectLayer(git));
 
-    const again = await registerProject(root, env.git, REMOTE);
+    const again = await run(registerProject(REMOTE), projectLayer(git));
 
     expect(again.success).toBe(false);
 
@@ -155,11 +171,11 @@ describe('registerProject', () => {
   });
 
   it('reactivates an inactive project and stores the new remote', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
-    await registerProject(root, env.git, REMOTE);
-    await deactivateProject(root, 'widgets');
+    const git = fakeGit();
+    await run(registerProject(REMOTE), projectLayer(git));
+    await run(deactivateProject('widgets'), projectLayer(git));
     const newer = 'https://example.invalid/acme/widgets-fork.git';
-    const result = await registerProject(root, env.git, newer, 'widgets');
+    const result = await run(registerProject(newer, 'widgets'), projectLayer(git));
 
     expect(result.success).toBe(true);
 
@@ -170,9 +186,9 @@ describe('registerProject', () => {
   });
 
   it('fails fast when it cannot derive a project name', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    const result = await registerProject(root, env.git, 'https://example.invalid/');
+    const result = await run(registerProject('https://example.invalid/'), projectLayer(git));
 
     expect(result.success).toBe(false);
 
@@ -182,9 +198,9 @@ describe('registerProject', () => {
   });
 
   it('rejects unsafe project names', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    const result = await registerProject(root, env.git, REMOTE, '../escape');
+    const result = await run(registerProject(REMOTE, '../escape'), projectLayer(git));
 
     expect(result.success).toBe(false);
 
@@ -194,13 +210,13 @@ describe('registerProject', () => {
   });
 
   it('never overwrites an owner-edited flow file', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
     const projectDir = join(root, 'projects', 'widgets');
 
     await mkdir(projectDir, { recursive: true });
     await writeFile(join(projectDir, 'flow.ts'), 'export default null;\n');
 
-    const result = await registerProject(root, env.git, REMOTE);
+    const result = await run(registerProject(REMOTE), projectLayer(git));
 
     expect(result.success).toBe(true);
 
@@ -212,7 +228,7 @@ describe('registerProject', () => {
 
 describe('loadProject', () => {
   it('fails fast naming the fix for an unregistered repo', async () => {
-    const read = await loadProject(root, 'ghost');
+    const read = await run(loadProject('ghost'), homeLayer());
 
     expect(read.success).toBe(false);
 
@@ -229,7 +245,7 @@ describe('loadProject', () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'project.json'), '{not json');
 
-    const read = await loadProject(root, 'broken');
+    const read = await run(loadProject('broken'), homeLayer());
 
     expect(read.success).toBe(false);
 
@@ -249,7 +265,7 @@ describe('project notify override', () => {
       JSON.stringify({ repo: 'legacy', remote: REMOTE, state: 'active' }),
     );
 
-    const read = await loadProject(root, 'legacy');
+    const read = await run(loadProject('legacy'), homeLayer());
 
     expect(read.success).toBe(true);
 
@@ -272,7 +288,7 @@ describe('project notify override', () => {
       }),
     );
 
-    const read = await loadProject(root, 'override');
+    const read = await run(loadProject('override'), homeLayer());
 
     expect(read.success).toBe(true);
 
@@ -284,10 +300,10 @@ describe('project notify override', () => {
 
 describe('deactivateProject', () => {
   it('marks the project inactive without deleting anything', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
-    await registerProject(root, env.git, REMOTE);
+    const git = fakeGit();
+    await run(registerProject(REMOTE), projectLayer(git));
 
-    const result = await deactivateProject(root, 'widgets');
+    const result = await run(deactivateProject('widgets'), projectLayer(git));
 
     expect(result.success).toBe(true);
 
@@ -295,7 +311,7 @@ describe('deactivateProject', () => {
 
     expect(files).toContain('flow.ts');
 
-    const read = await loadProject(root, 'widgets');
+    const read = await run(loadProject('widgets'), homeLayer());
 
     expect(read.success).toBe(true);
 
@@ -305,7 +321,7 @@ describe('deactivateProject', () => {
   });
 
   it('fails fast for an unregistered repo', async () => {
-    const result = await deactivateProject(root, 'ghost');
+    const result = await run(deactivateProject('ghost'), homeLayer());
 
     expect(result.success).toBe(false);
 
@@ -315,11 +331,11 @@ describe('deactivateProject', () => {
   });
 
   it('fails fast when already inactive', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
-    await registerProject(root, env.git, REMOTE);
-    await deactivateProject(root, 'widgets');
+    const git = fakeGit();
+    await run(registerProject(REMOTE), projectLayer(git));
+    await run(deactivateProject('widgets'), projectLayer(git));
 
-    const result = await deactivateProject(root, 'widgets');
+    const result = await run(deactivateProject('widgets'), projectLayer(git));
 
     expect(result.success).toBe(false);
 
@@ -331,14 +347,14 @@ describe('deactivateProject', () => {
 
 describe('listProjects', () => {
   it('lists registered projects sorted by repo, skipping corrupt records', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+    const git = fakeGit();
 
-    await registerProject(root, env.git, REMOTE);
-    await registerProject(root, env.git, 'https://example.invalid/acme/apples.git');
+    await run(registerProject(REMOTE), projectLayer(git));
+    await run(registerProject('https://example.invalid/acme/apples.git'), projectLayer(git));
     await mkdir(join(root, 'projects', 'broken'), { recursive: true });
     await writeFile(join(root, 'projects', 'broken', 'project.json'), '{not json');
 
-    const listed = await listProjects(root);
+    const listed = await run(listProjects(), homeLayer());
 
     expect(listed.success).toBe(true);
 
@@ -349,17 +365,25 @@ describe('listProjects', () => {
   });
 
   it('lists no projects on a fresh home', async () => {
-    const listed = await listProjects(root);
+    const listed = await run(listProjects(), homeLayer());
 
     expect(listed).toEqual({ success: true, data: { projects: [], skipped: 0 } });
   });
 });
 
 describe('engine contract: register, list, deactivate', () => {
-  it('registers and lists through the engine', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
+  const commandLayer = (): Layer.Layer<CommandServices> =>
+    Layer.mergeAll(
+      FakeTracker.layer(),
+      FakeSandbox.layer(),
+      FakeRuntime.layer(),
+      FakeGit.layer(),
+      FakeNotifier.layer(),
+      homeLayer(),
+    ) as Layer.Layer<CommandServices>;
 
-    const registered = await engine(['register', REMOTE], env);
+  it('registers and lists through the engine', async () => {
+    const registered = await run(engine(['register', REMOTE]), commandLayer());
 
     expect(registered.success).toBe(true);
 
@@ -368,7 +392,7 @@ describe('engine contract: register, list, deactivate', () => {
       expect(registered.data.reactivated).toBe(false);
     }
 
-    const listed = await engine(['list', '--json'], env);
+    const listed = await run(engine(['list', '--json']), commandLayer());
 
     expect(listed.success).toBe(true);
 
@@ -379,10 +403,8 @@ describe('engine contract: register, list, deactivate', () => {
   });
 
   it('validates register and deactivate arguments', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root });
-
-    const noUrl = await engine(['register'], env);
-    const tooMany = await engine(['register', REMOTE, 'a', 'b'], env);
+    const noUrl = await run(engine(['register']), commandLayer());
+    const tooMany = await run(engine(['register', REMOTE, 'a', 'b']), commandLayer());
 
     expect(noUrl.success && noUrl.data.kind == 'error' && noUrl.data.message).toBe(
       'expected usage: register <git-url> [name]',
@@ -391,7 +413,7 @@ describe('engine contract: register, list, deactivate', () => {
       'expected usage: register <git-url> [name]',
     );
 
-    const noRepo = await engine(['deactivate'], env);
+    const noRepo = await run(engine(['deactivate']), commandLayer());
 
     expect(noRepo.success && noRepo.data.kind == 'error' && noRepo.data.message).toBe(
       'expected usage: deactivate <repo>',

@@ -1,24 +1,44 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Schema } from 'effect';
+import { Effect, Layer, Result, Schema } from 'effect';
 import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 
+import { type CommandServices, type ErrorOutcome } from './command.ts';
+import { runCommand } from './commands/run.ts';
+import { statusCommand } from './commands/status.ts';
 import { withRepoLock } from './lock.ts';
 import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
-import { runSession } from './session.ts';
+import {
+  runSession,
+  type SessionError,
+  type SessionInput,
+  type SessionServices,
+} from './session.ts';
 
+import { expectTaggedFailure } from '../../../test/exit.ts';
+import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
+import { fakeNotifier } from '../../../test/fakes/notifier.ts';
+import { fakeRuntime } from '../../../test/fakes/runtime.ts';
+import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
+import { fakeTracker, type FakeTracker } from '../../../test/fakes/tracker.ts';
+import { run } from '../../../test/run.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
-import { type Sandbox, type Tracker } from '../core/contracts.ts';
+import { type AgentRuntime, type Notifier, type Sandbox, type Tracker } from '../core/contracts.ts';
 import { engine } from '../core/engine.ts';
-import { fakeKernelEnvironment } from '../fakes/env.ts';
-import { fakeRuntime } from '../fakes/runtime.ts';
-import { fakeSandbox } from '../fakes/sandbox.ts';
-import { fakeTracker, type FakeTracker } from '../fakes/tracker.ts';
-import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { HomeService, homeLayout } from '../core/env.ts';
+import {
+  AgentRuntimeService,
+  GitService,
+  NotifierService,
+  SandboxService,
+  TrackerService,
+} from '../core/services.ts';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 /** The remote seedProject registers; tests assert the session clones exactly this URL. */
 function seedRemote(repo: string) {
@@ -43,9 +63,15 @@ function deadPid() {
 }
 
 async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
-  const { env } = fakeKernelEnvironment({ workspaceRoot: root });
-
-  await registerProject(root, env.git, seedRemote(repo), repo);
+  await Effect.runPromise(
+    Effect.provide(
+      registerProject(seedRemote(repo), repo),
+      Layer.mergeAll(
+        Layer.succeed(HomeService, homeLayout(root)),
+        Layer.succeed(GitService, fakeGit()),
+      ),
+    ),
+  );
 
   const projectDir = join(root, 'projects', repo);
 
@@ -97,6 +123,82 @@ async function writeRepoLock(root: string, repo: string, lock: LockFileBody) {
 /** The lock record shape on disk (epoch-ms timestamp); test helpers only. */
 type LockFileBody = { readonly pid: number; readonly at: number };
 
+/** Per-test service overrides: any adapter contract the test drives its own fake for. */
+type FakeOverrides = {
+  readonly git?: FakeGit;
+  readonly tracker?: Tracker;
+  readonly sandbox?: Sandbox;
+  readonly runtime?: AgentRuntime;
+  readonly notifier?: Notifier;
+};
+
+/**
+ * The test service stack: eager fake instances under `Layer.succeed`, so tests assert on the
+ * recording fakes they built instead of pulling them back out of a layer.
+ */
+function sessionLayers(overrides: FakeOverrides = {}) {
+  const stack = Layer.mergeAll(
+    Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
+    Layer.succeed(GitService, overrides.git ?? fakeGit()),
+    Layer.succeed(TrackerService, overrides.tracker ?? fakeTracker()),
+    Layer.succeed(AgentRuntimeService, overrides.runtime ?? fakeRuntime()),
+    Layer.succeed(SandboxService, overrides.sandbox ?? fakeSandbox()),
+    Layer.succeed(NotifierService, overrides.notifier ?? fakeNotifier()),
+  );
+
+  // `mergeAll` widens the union instead of narrowing to the provided service set; the cast
+  // pins the stack to the exact `SessionServices` composition `runSession` requires.
+  return stack as unknown as Layer.Layer<SessionServices>;
+}
+
+/** One session run over the fake stack. */
+const sessionOver = (input: SessionInput, overrides: FakeOverrides = {}) =>
+  Effect.provide(runSession(input), sessionLayers(overrides));
+
+/** The engine front door over the fake stack — an Outcome back, never a rejection. The
+ * composed dispatcher union degrades to `unknown` upstream (rows whose commands infer
+ * `unknown` channels), so this seam re-derives the two outcomes the engine contract asserts
+ * — `run` and `status` — from their own command rows. */
+type CommandOutcome<C> = C extends {
+  readonly handler: (args: readonly string[]) => Effect.Effect<infer O, never, unknown>;
+}
+  ? O
+  : never;
+
+type EngineOutcome =
+  | Exclude<CommandOutcome<typeof runCommand>, ErrorOutcome>
+  | Exclude<CommandOutcome<typeof statusCommand>, ErrorOutcome>
+  | ErrorOutcome;
+
+async function engineOutcome(
+  argv: readonly string[],
+  overrides: FakeOverrides = {},
+): Promise<EngineOutcome> {
+  const outcome = await run(
+    // The composed dispatcher union degrades to `unknown` upstream, so the effect rides
+    // widened to its declared outcome; the EngineOutcome type re-derives the safe rows.
+    engine(argv) as Effect.Effect<EngineOutcome, never, CommandServices>,
+    sessionLayers(overrides),
+  );
+
+  return outcome.success ? outcome.data : outcome.error;
+}
+
+/** Narrowing tagged errors to their human detail without re-deriving failure prose. */
+function messageOf(error: SessionError): string {
+  return error instanceof Error && error.message != null ? error.message : String(error);
+}
+
+/** Fails one session run out of its Exit, so the kernel's tagged error reaches the assertions. */
+async function sessionFailure(
+  input: SessionInput,
+  overrides: FakeOverrides = {},
+): Promise<SessionError> {
+  return Effect.runPromise(
+    expectTaggedFailure(sessionOver(input, overrides), 'expected runSession failure'),
+  );
+}
+
 let root: string;
 let sessionsRoot: string;
 
@@ -113,17 +215,12 @@ afterAll(async () => {
 describe('runSession', () => {
   it('runs a full session over fakes: branch off default, worktree recorded, receipts written, clean exit', async () => {
     await seedProject(root, 'demo');
-    const { env, runtime, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const git = fakeGit();
+    const runtime = fakeRuntime();
 
-    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    const { manifest } = result.data;
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'demo', issueNumber: 7 }, { git, runtime }),
+    );
 
     // The session clones from the registered remote — never any other URL
     expect(git.clones).toEqual([{ path: join(root, 'repos', 'demo'), url: seedRemote('demo') }]);
@@ -154,31 +251,29 @@ describe('runSession', () => {
   });
 
   it('fails fast naming the register fix for an unregistered repo', async () => {
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const error = await sessionFailure({ repo: 'ghost', issueNumber: 1 });
 
-    const result = await runSession(env, { repo: 'ghost', issueNumber: 1 });
-
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/unregistered project 'ghost'/);
-      expect(result.error.message).toMatch(/seraphim register/);
-    }
+    expect(messageOf(error)).toMatch(/unregistered project 'ghost'/);
+    expect(messageOf(error)).toMatch(/seraphim register/);
   });
 
   it('fails fast for an inactive project, naming the re-register fix', async () => {
     await seedProject(root, 'dormant');
-    await deactivateProject(root, 'dormant');
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    // deactivateProject's Effect infers `unknown` error/requirement channels (the source's
+    // untyped reads widen them), so the sibling suites recover the result by runtime Result
+    // narrowing instead of layer-type subtraction.
+    await Effect.runPromise(
+      Effect.result(
+        deactivateProject('dormant').pipe(
+          Effect.provide(Layer.succeed(HomeService, homeLayout(root))),
+        ),
+      ) as unknown as Effect.Effect<Result.Result<void, unknown>>,
+    );
 
-    const result = await runSession(env, { repo: 'dormant', issueNumber: 9 });
+    const error = await sessionFailure({ repo: 'dormant', issueNumber: 9 });
 
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/inactive/);
-      expect(result.error.message).toMatch(/seraphim register/);
-    }
+    expect(messageOf(error)).toMatch(/inactive/);
+    expect(messageOf(error)).toMatch(/seraphim register/);
   });
 
   it('fails fast when a flow omits its budget — caps are required, no silent default', async () => {
@@ -196,52 +291,38 @@ describe('runSession', () => {
 export default flow;
 `,
     );
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(env, { repo: 'nobudget', issueNumber: 5 });
+    const error = await sessionFailure({ repo: 'nobudget', issueNumber: 5 });
 
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/caps/);
-    }
+    expect(messageOf(error)).toMatch(/caps/);
   });
 
   it('fails fast with a clear error when the Dockerfile is missing', async () => {
     await seedProject(root, 'nodocker');
     await rm(join(root, 'projects', 'nodocker', 'Dockerfile'));
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(env, { repo: 'nodocker', issueNumber: 2 });
+    const error = await sessionFailure({ repo: 'nodocker', issueNumber: 2 });
 
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/no Dockerfile for 'nodocker'/);
-    }
+    expect(messageOf(error)).toMatch(/no Dockerfile for 'nodocker'/);
   });
 
   it('rejects the claude adapter as not available', async () => {
     await seedProject(root, 'claudeflow', 'claude');
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const result = await runSession(env, { repo: 'claudeflow', issueNumber: 3 });
+    const error = await sessionFailure({ repo: 'claudeflow', issueNumber: 3 });
 
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toBe('adapter not available: claude');
-    }
+    expect(error instanceof UnavailableError).toBe(true);
+    expect(messageOf(error)).toBe('adapter not available: claude');
   });
 
   it('claims the issue on pickup before any session work', async () => {
     await seedProject(root, 'claimed');
-    const { env, tracker } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const tracker = fakeTracker();
 
-    await runSession(env, { repo: 'claimed', issueNumber: 4 });
+    await Effect.runPromise(sessionOver({ repo: 'claimed', issueNumber: 4 }, { tracker }));
 
     if (!isFakeTracker(tracker)) {
-      throw new Error('expected the default FakeTracker with call recording');
+      throw new Error('expected the fake tracker with call recording');
     }
 
     expect(tracker.calls.claimed).toEqual(['claimed#4']);
@@ -271,28 +352,25 @@ export default flow;
 `,
     );
 
-    const { env, runtime, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const git = fakeGit();
+    const runtime = fakeRuntime();
 
-    const result = await runSession(env, { repo: 'turncap', issueNumber: 20 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'turncap', issueNumber: 20 }, { git, runtime }),
+    );
 
     expect(runtime.prompts).toHaveLength(2); // third ctx.run rejected by the kernel
-    expect(result.data.manifest.state).toBe('cap-hit');
-    expect(result.data.manifest.branch).toBe(git.worktrees[0]?.branch);
+    expect(manifest.state).toBe('cap-hit');
+    expect(manifest.branch).toBe(git.worktrees[0]?.branch);
 
     const receiptDirs = await readdir(join(sessionsRoot, 'turncap'));
     const receiptDir = join(sessionsRoot, 'turncap', receiptDirs[0] ?? '');
     const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
-    const manifest = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
+    const persisted = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
 
-    expect(manifest.caps).toEqual({ maxTurns: 2, wallClockMs: 60000 });
-    expect(manifest.capHit).toMatch(/turn cap/);
-    expect(manifest.turns).toHaveLength(2);
+    expect(persisted.caps).toEqual({ maxTurns: 2, wallClockMs: 60000 });
+    expect(persisted.capHit).toMatch(/turn cap/);
+    expect(persisted.turns).toHaveLength(2);
   });
 
   it('stops a flow when the wall clock is exhausted, with the same retention contract', async () => {
@@ -317,20 +395,17 @@ export default flow;
 `,
     );
 
-    const { env, runtime, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const git = fakeGit();
+    const runtime = fakeRuntime();
 
-    const result = await runSession(env, { repo: 'clockcap', issueNumber: 21 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'clockcap', issueNumber: 21 }, { git, runtime }),
+    );
 
     expect(runtime.prompts).toHaveLength(0); // clock exhausted before the first turn
-    expect(result.data.manifest.state).toBe('cap-hit');
-    expect(result.data.manifest.branch).toBe(git.worktrees[0]?.branch);
-    expect(result.data.manifest.turns).toHaveLength(0);
+    expect(manifest.state).toBe('cap-hit');
+    expect(manifest.branch).toBe(git.worktrees[0]?.branch);
+    expect(manifest.turns).toHaveLength(0);
   });
 
   it('records cap-hit, not completed, when a dispatched turn outlives the wall clock', async () => {
@@ -355,26 +430,19 @@ export default flow;
 `,
     );
 
-    const { env, runtime, git } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      // Wide margins so the race cannot flip on machine speed: setup reliably finishes
-      // inside the wall clock, and the fake turn reliably outlives it.
-      runtimeDelayMs: 2000,
-    });
+    const git = fakeGit();
+    // Wide margins so the race cannot flip on machine speed: setup reliably finishes
+    // inside the wall clock, and the fake turn reliably outlives it.
+    const runtime = fakeRuntime('completed', 2000);
 
-    const result = await runSession(env, { repo: 'overshoot', issueNumber: 22 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'overshoot', issueNumber: 22 }, { git, runtime }),
+    );
 
     expect(runtime.prompts).toHaveLength(1); // the turn ran, the runtime was not killed
-    expect(result.data.manifest.state).toBe('cap-hit');
-    expect(result.data.manifest.branch).toBe(git.worktrees[0]?.branch); // retention contract
-    expect(result.data.manifest.capHit).toMatch(/exceeded by turn 1/);
+    expect(manifest.state).toBe('cap-hit');
+    expect(manifest.branch).toBe(git.worktrees[0]?.branch); // retention contract
+    expect(manifest.capHit).toMatch(/exceeded by turn 1/);
   });
 
   it('records the rejected prompt as a cap-hit marker in the session transcript', async () => {
@@ -400,19 +468,13 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
-
-    const result = await runSession(env, { repo: 'transcriptcap', issueNumber: 23 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'transcriptcap', issueNumber: 23 }),
+    );
 
     const dir = sessionDir(
       sessionsRoot,
-      sessionRelDir('transcriptcap', 23, toEpochMs(result.data.manifest.startedAt)),
+      sessionRelDir('transcriptcap', 23, toEpochMs(manifest.startedAt)),
     );
     const session = await readFile(join(dir, 'session.transcript.md'), 'utf8');
 
@@ -448,20 +510,16 @@ export default flow;
 `,
     );
 
-    const { env, runtime } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const runtime = fakeRuntime();
 
-    const result = await runSession(env, { repo: 'bypasser', issueNumber: 25 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'bypasser', issueNumber: 25 }, { runtime }),
+    );
 
     // Turn one dispatched; the catch's ctx.run is rejected by the gate, not dispatched.
     expect(runtime.prompts).toHaveLength(1);
-    expect(result.data.manifest.state).toBe('cap-hit');
-    expect(result.data.manifest.capHit).toMatch(/turn cap/);
+    expect(manifest.state).toBe('cap-hit');
+    expect(manifest.capHit).toMatch(/turn cap/);
   });
 
   it('records completed, not cap-hit, when the flow ends exactly at the turn budget', async () => {
@@ -487,19 +545,15 @@ export default flow;
 `,
     );
 
-    const { env, runtime } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const runtime = fakeRuntime();
 
-    const result = await runSession(env, { repo: 'exactbudget', issueNumber: 26 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'exactbudget', issueNumber: 26 }, { runtime }),
+    );
 
     expect(runtime.prompts).toHaveLength(2);
-    expect(result.data.manifest.state).toBe('completed');
-    expect(result.data.manifest.capHit).toBeNull();
+    expect(manifest.state).toBe('completed');
+    expect(manifest.capHit).toBeNull();
   });
 
   it('saves one transcript per session containing every turn the runtime emitted', async () => {
@@ -519,15 +573,11 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'transcripted', issueNumber: 22 }),
+    );
 
-    const result = await runSession(env, { repo: 'transcripted', issueNumber: 22 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    expect(manifest.state).toBe('completed');
 
     const receiptDirs = await readdir(join(sessionsRoot, 'transcripted'));
     const receiptDir = join(sessionsRoot, 'transcripted', receiptDirs[0] ?? '');
@@ -541,9 +591,9 @@ export default flow;
 
   it('prepends the AFK no-user preamble to every prompt sent to the runtime', async () => {
     await seedProject(root, 'preamble');
-    const { env, runtime } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const runtime = fakeRuntime();
 
-    await runSession(env, { repo: 'preamble', issueNumber: 23 });
+    await Effect.runPromise(sessionOver({ repo: 'preamble', issueNumber: 23 }, { runtime }));
 
     expect(runtime.prompts[0]).toContain('implement issue');
     expect(runtime.prompts[0]).toContain('no user input');
@@ -566,19 +616,9 @@ export default flow;
 `,
     );
 
-    const { env, runtime } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: fakeRuntime('failed'),
-    });
+    const runtime = fakeRuntime('failed');
 
-    const result = await runSession(env, { repo: 'noretry', issueNumber: 24 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    await Effect.runPromise(sessionOver({ repo: 'noretry', issueNumber: 24 }, { runtime }));
 
     expect(runtime.prompts).toHaveLength(1); // no retry after the failed turn
 
@@ -590,9 +630,9 @@ export default flow;
     expect(files).toContain('turn-1.json');
 
     const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
-    const manifest = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
+    const persisted = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
 
-    expect(manifest.state).toBe('failed');
+    expect(persisted.state).toBe('failed');
 
     const transcript = await readFile(join(receiptDir, 'session.transcript.md'), 'utf8');
 
@@ -616,23 +656,14 @@ export default flow;
 `,
     );
 
-    const failing = fakeRuntime('failed');
-    const { env, runtime } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: failing,
-    });
+    const runtime = fakeRuntime('failed');
 
-    const result = await runSession(env, { repo: 'multi', issueNumber: 5 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'multi', issueNumber: 5 }, { runtime }),
+    );
 
     expect(runtime.prompts).toHaveLength(1); // second ctx.run never dispatched
-    expect(result.data.manifest.state).toBe('failed');
+    expect(manifest.state).toBe('failed');
   });
 
   it('records the PR URL when the flow opens a draft PR through ctx.tracker', async () => {
@@ -652,17 +683,9 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'prflow', issueNumber: 6 }));
 
-    const result = await runSession(env, { repo: 'prflow', issueNumber: 6 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.prUrl).toBe('https://example.invalid/prflow/pull/99');
+    expect(manifest.prUrl).toBe('https://example.invalid/prflow/pull/99');
   });
 
   it('executes gate commands through ctx.sh inside the sandbox', async () => {
@@ -685,22 +708,13 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'gates', issueNumber: 8 }));
 
-    const result = await runSession(env, { repo: 'gates', issueNumber: 8 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.state).toBe('completed');
+    expect(manifest.state).toBe('completed');
   });
 
   it('stages declared skills into the worktree at the runtime project path before the flow runs', async () => {
     await seedProject(root, 'staging');
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
     // The flow sees the staged skill through the worktree the sandbox mounts.
     const projectDir = join(root, 'projects', 'staging');
@@ -723,11 +737,17 @@ export default flow;
 `,
     );
 
-    const result = await runSession(env, { repo: 'staging', issueNumber: 12 });
+    const result = await Effect.runPromise(
+      sessionOver({ repo: 'staging', issueNumber: 12 }).pipe(
+        Effect.map((ran) => {
+          // The flow itself asserts the staged SKILL.md's content through the worktree path —
+          // a completed session means the runtime-visible staging path held the skill.
+          expect(ran.manifest.state).toBe('completed');
+        }),
+      ),
+    );
 
-    // The flow itself asserts the staged SKILL.md's content through the worktree path —
-    // a completed session means the runtime-visible staging path held the skill.
-    expect(result.success).toBe(true);
+    expect(result).toBeUndefined();
   });
 
   it('fails fast on a skill the pool does not have, before any tracker claim', async () => {
@@ -744,19 +764,18 @@ export default flow;
 `,
     );
 
-    const { env, tracker, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
-    const fake = tracker as FakeTracker;
+    const tracker = fakeTracker();
+    const git = fakeGit();
+    const error = await sessionFailure({ repo: 'noskill', issueNumber: 13 }, { tracker, git });
 
-    const result = await runSession(env, { repo: 'noskill', issueNumber: 13 });
-
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toContain('nonexistent');
-      expect(result.error.message).toMatch(/pool/);
+    if (!isFakeTracker(tracker)) {
+      throw new Error('expected the fake tracker with call recording');
     }
 
-    expect(fake.calls.claimed).toEqual([]);
+    expect(messageOf(error)).toContain('nonexistent');
+    expect(messageOf(error)).toMatch(/pool/);
+
+    expect(tracker.calls.claimed).toEqual([]);
     expect(git.worktrees).toEqual([]);
   });
 
@@ -777,35 +796,24 @@ export default flow;
     );
 
     const base = fakeSandbox();
-    const env = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      sandbox: {
-        ...base,
-        exec: (input) =>
-          Effect.map(base.exec(input), (executed) => ({
-            ...executed,
-            exitCode: 1,
-            stdout: '',
-            stderr: 'oops: the lint failed',
-          })),
-      },
-    }).env;
+    const sandbox: Sandbox = {
+      ...base,
+      exec: (input) =>
+        Effect.map(base.exec(input), (executed) => ({
+          ...executed,
+          exitCode: 1,
+          stdout: '',
+          stderr: 'oops: the lint failed',
+        })),
+    };
 
-    const result = await runSession(env, { repo: 'gatelog', issueNumber: 9 });
-
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'gatelog', issueNumber: 9 }, { sandbox }),
+    );
 
     const log = await readFile(
       join(
-        sessionDir(
-          sessionsRoot,
-          sessionRelDir('gatelog', 9, toEpochMs(result.data.manifest.startedAt)),
-        ),
+        sessionDir(sessionsRoot, sessionRelDir('gatelog', 9, toEpochMs(manifest.startedAt))),
         'flow.log',
       ),
       'utf8',
@@ -820,20 +828,17 @@ export default flow;
 describe('engine contract: run then status', () => {
   it('lists the session just executed', async () => {
     await seedProject(root, 'contract');
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
-    const ran = await engine(['run', 'contract', '11'], env);
+    const ran = await engineOutcome(['run', 'contract', '11']);
 
-    expect(ran.success).toBe(true);
+    expect(ran.kind).toBe('session-ran');
 
-    const listed = await engine(['status', '--json'], env);
+    const listed = await engineOutcome(['status', '--json']);
 
-    expect(listed.success).toBe(true);
-
-    if (listed.success && listed.data.kind == 'status') {
-      expect(listed.data.sessions).toHaveLength(1);
-      expect(listed.data.sessions[0]?.repo).toBe('contract');
-      expect(listed.data.sessions[0]?.issueNumber).toBe(11);
+    if (listed.kind == 'status') {
+      expect(listed.sessions).toHaveLength(1);
+      expect(listed.sessions[0]?.repo).toBe('contract');
+      expect(listed.sessions[0]?.issueNumber).toBe(11);
     }
   });
 
@@ -860,17 +865,13 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    await engineOutcome(['run', 'capstatus', '15']);
 
-    await engine(['run', 'capstatus', '15'], env);
+    const listed = await engineOutcome(['status', '--json']);
 
-    const listed = await engine(['status', '--json'], env);
-
-    expect(listed.success).toBe(true);
-
-    if (listed.success && listed.data.kind == 'status') {
-      expect(listed.data.sessions[0]?.state).toBe('cap-hit');
-      expect(listed.data.sessions[0]?.capHit).toMatch(/turn cap/);
+    if (listed.kind == 'status') {
+      expect(listed.sessions[0]?.state).toBe('cap-hit');
+      expect(listed.sessions[0]?.capHit).toMatch(/turn cap/);
     }
   });
 
@@ -880,38 +881,24 @@ export default flow;
     await mkdir(corrupt, { recursive: true });
     await writeFile(join(corrupt, 'manifest.json'), '{not json');
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const listed = await engineOutcome(['status', '--json']);
 
-    const listed = await engine(['status', '--json'], env);
-
-    expect(listed.success).toBe(true);
-
-    if (listed.success) {
-      expect(listed.data.kind).toBe('status'); // corrupt dir skipped, no rejection
-    }
+    expect(listed.kind).toBe('status'); // corrupt dir skipped, no rejection
   });
 });
 
 describe('receipt regressions', () => {
   it('preserves cap-hit as the terminal state, not failed', async () => {
     await seedProject(root, 'capflow');
-    const { env } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: fakeRuntime('cap-hit'),
-    });
+    const runtime = fakeRuntime('cap-hit');
 
-    const result = await runSession(env, { repo: 'capflow', issueNumber: 12 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'capflow', issueNumber: 12 }, { runtime }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.state).toBe('cap-hit');
-    expect(result.data.manifest.turns).toHaveLength(1);
-    expect(result.data.manifest.turns[0]?.exitState).toBe('cap-hit');
+    expect(manifest.state).toBe('cap-hit');
+    expect(manifest.turns).toHaveLength(1);
+    expect(manifest.turns[0]?.exitState).toBe('cap-hit');
   });
 
   it('writes flow.log and turn transcripts alongside the schema files', async () => {
@@ -932,14 +919,9 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
-    const result = await runSession(env, { repo: 'logged', issueNumber: 13 });
+    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'logged', issueNumber: 13 }));
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    expect(manifest.state).toBe('completed');
 
     const receiptDirs = await readdir(join(sessionsRoot, 'logged'));
     const receiptDir = join(sessionsRoot, 'logged', receiptDirs[0] ?? '');
@@ -971,16 +953,12 @@ export default flow;
 `,
     );
 
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    await engineOutcome(['run', 'contractlog', '14']);
 
-    await engine(['run', 'contractlog', '14'], env);
+    const listed = await engineOutcome(['status', '--json']);
 
-    const listed = await engine(['status', '--json'], env);
-
-    expect(listed.success).toBe(true);
-
-    if (listed.success && listed.data.kind == 'status') {
-      expect(listed.data.sessions[0]?.lastLog).toBe('dispatched turn 1');
+    if (listed.kind == 'status') {
+      expect(listed.sessions[0]?.lastLog).toBe('dispatched turn 1');
     }
   });
 });
@@ -988,7 +966,7 @@ export default flow;
 describe('per-repo lock', () => {
   it('serializes image build across two concurrent runs on one repo; worktrees stay parallel', async () => {
     await seedProject(root, 'demo');
-    const { env, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const git = fakeGit();
     const base = fakeSandbox();
     let inFlight = 0;
     let maxInFlight = 0;
@@ -1001,9 +979,12 @@ describe('per-repo lock', () => {
             maxInFlight = Math.max(maxInFlight, inFlight);
             // The overlap window needs real time: the lock queue is internal, so no deterministic
             // hook exists at this seam to signal "second session reached the mutex".
+            // inFlight is counted in real time — this seam is the one integration point the
+            // overlap-window assertion needs, so a genuine timer is the tool (see comment).
             const { promise, resolve } = Promise.withResolvers<void>();
 
-            setTimeout(resolve, 25);
+            const timer = setTimeout(resolve, 25);
+            timer.unref?.();
             await promise;
             const result = await Effect.runPromise(base.ensureImage());
             inFlight -= 1;
@@ -1014,16 +995,18 @@ describe('per-repo lock', () => {
         }),
     };
 
-    const [first, second] = await Promise.all([
-      runSession({ ...env, sandbox }, { repo: 'demo', issueNumber: 7 }),
-      runSession({ ...env, sandbox }, { repo: 'demo', issueNumber: 8 }),
-    ]);
+    const [first, second] = await Effect.runPromise(
+      Effect.all(
+        [
+          sessionOver({ repo: 'demo', issueNumber: 7 }, { git, sandbox }),
+          sessionOver({ repo: 'demo', issueNumber: 8 }, { git, sandbox }),
+        ],
+        { concurrency: 'unbounded' },
+      ),
+    );
 
-    expect(first.success).toBe(true);
-    if (!second.success) {
-      throw second.error;
-    }
-    expect(second.success).toBe(true);
+    expect(first.manifest.state).toBe('completed');
+    expect(second.manifest.state).toBe('completed');
     expect(maxInFlight).toBe(1);
 
     // Parallel issues stay parallel: one distinct worktree per session
@@ -1043,27 +1026,25 @@ describe('per-repo lock', () => {
     }
 
     try {
-      const lockPath = await writeRepoLock(root, 'demo', {
-        pid: holder.pid,
-        at: toEpochMs(now()) - 120_000,
-      });
+      // The wait cap polls on the kernel's own Clock — here the live one, since the poll
+      // loop interleaves real fs reads, which a TestClock cannot advance deterministically.
+      // The awaited signal is the LockHeldError itself, not a fixed wait: the cap shortens
+      // the wait (pollMs 50, spent in ~100ms) and the holder's write is backdated 120s, so
+      // the failure lands at holding-age ≈120s either way.
+      const nowMs = toEpochMs(now());
+      const lockPath = await writeRepoLock(root, 'demo', { pid: holder.pid, at: nowMs - 120_000 });
 
-      // The wait cap reads actual elapsed time from the injected clock, which the delay advances.
-      let fakeEpochMs = 0;
-      const thrown = await withRepoLock(root, 'demo', () => Promise.resolve(1), {
-        pollMs: 1,
-        maxWaitMs: 5_000,
-        delay: async () => {
-          fakeEpochMs += 10_000;
-        },
-        clock: () => fakeEpochMs,
-      }).then(
-        () => null,
-        (error: unknown) => error,
+      const error = await Effect.runPromise(
+        expectTaggedFailure(
+          withRepoLock(homeLayout(root).home, 'demo', Effect.succeed(1), {
+            pollMs: 50,
+            maxWaitMs: 100,
+          }),
+          'expected the lock wait cap to fail',
+        ),
       );
 
-      expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain(
+      expect(messageOf(error)).toContain(
         `repo 'demo' is locked by a live session (pid ${holder.pid}, holding for 120s)`,
       );
 
@@ -1085,26 +1066,19 @@ describe('per-repo lock', () => {
     try {
       const lockPath = await writeRepoLock(root, 'demo', { pid: holder.pid, at: toEpochMs(now()) });
 
-      // The first poll simulates the holder releasing: its lock file disappears.
-      let polls = 0;
-      const heldPid = await withRepoLock(
-        root,
-        'demo',
-        async () => JSON.parse(await readFile(lockPath, 'utf8')).pid,
-        {
+      // The holder releases on its own (a real unlink from its pid) while the waiter polls.
+      // A real timer is intentional: the waiter's polls run on the live clock here, so the
+      // unlink must land on that same timeline — no fake timer joins them.
+      setTimeout(() => unlinkSync(lockPath), 5).unref?.();
+
+      // The waiter acquires once the file is gone; the guarded effect answers with our pid.
+      const heldPid = await Effect.runPromise(
+        withRepoLock(homeLayout(root).home, 'demo', Effect.succeed(process.pid), {
           pollMs: 1,
           maxWaitMs: 60_000,
-          delay: async () => {
-            polls += 1;
-
-            if (polls == 1) {
-              await unlink(lockPath);
-            }
-          },
-        },
+        }),
       );
 
-      expect(polls).toBe(1);
       expect(heldPid).toBe(process.pid);
 
       // Scoped acquisition releases on exit — nothing manual to forget
@@ -1116,11 +1090,13 @@ describe('per-repo lock', () => {
 
   it('breaks and takes a stale lock left by a dead session', async () => {
     await seedProject(root, 'demo');
-    const { env, git } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const git = fakeGit();
     const lockPath = await writeRepoLock(root, 'demo', { pid: deadPid(), at: toEpochMs(now()) });
-    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'demo', issueNumber: 7 }, { git }),
+    );
 
-    expect(result.success).toBe(true);
+    expect(manifest.state).toBe('completed');
     expect(git.worktrees).toHaveLength(1);
 
     // Taken by this run, released cleanly on completion
@@ -1134,55 +1110,45 @@ describe('per-repo lock', () => {
       ...tracker,
       getIssue: () => Effect.fail(new UnavailableError({})),
     };
-    const { env, git } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      tracker: broken,
-    });
+    const git = fakeGit();
 
-    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+    const error = await sessionFailure({ repo: 'demo', issueNumber: 7 }, { tracker: broken, git });
 
-    expect(result.success).toBe(false);
+    expect(error instanceof UnavailableError).toBe(true);
     expect(git.clones).toEqual([]);
 
     // A failed session must not wedge the repo: the next session acquires and runs.
-    const following = await runSession({ ...env, tracker }, { repo: 'demo', issueNumber: 7 });
+    const following = await Effect.runPromise(
+      sessionOver({ repo: 'demo', issueNumber: 7 }, { tracker, git }),
+    );
 
-    expect(following.success).toBe(true);
-    expect(await fileExists(join(root, 'repos', '.demo.lock'))).toBe(false);
+    expect(following.manifest.state).toBe('completed');
+    expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
   });
 
   it('treats a corrupt lock file as stale — a crash mid-write cannot wedge the repo', async () => {
     await seedProject(root, 'demo');
-    const { env } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
 
     await writeRepoLock(root, 'demo', { pid: 12.5, at: toEpochMs(now()) });
 
-    const result = await runSession(env, { repo: 'demo', issueNumber: 7 });
+    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'demo', issueNumber: 7 }));
 
-    expect(result.success).toBe(true);
-    expect(await fileExists(join(root, 'repos', '.demo.lock'))).toBe(false);
+    expect(manifest.state).toBe('completed');
+    expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
   });
 });
 
 describe('runSession notifications', () => {
   it('pages failed when the runtime turn fails', async () => {
     await seedProject(root, 'notifyfail');
-    const { env, notifier } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: fakeRuntime('failed'),
-    });
+    const runtime = fakeRuntime('failed');
+    const notifier = fakeNotifier();
 
-    const result = await runSession(env, { repo: 'notifyfail', issueNumber: 9 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'notifyfail', issueNumber: 9 }, { runtime, notifier }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.state).toBe('failed');
+    expect(manifest.state).toBe('failed');
     expect(notifier.events).toHaveLength(1);
     expect(notifier.events[0]).toMatchObject({
       repo: 'notifyfail',
@@ -1195,21 +1161,14 @@ describe('runSession notifications', () => {
 
   it('pages cap-hit when the turn budget is breached', async () => {
     await seedProject(root, 'notifycap');
-    const { env, notifier } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: fakeRuntime('cap-hit'),
-    });
+    const runtime = fakeRuntime('cap-hit');
+    const notifier = fakeNotifier();
 
-    const result = await runSession(env, { repo: 'notifycap', issueNumber: 12 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'notifycap', issueNumber: 12 }, { runtime, notifier }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.state).toBe('cap-hit');
+    expect(manifest.state).toBe('cap-hit');
     expect(notifier.events).toHaveLength(1);
     expect(notifier.events[0]?.event).toBe('cap-hit');
   });
@@ -1231,15 +1190,13 @@ export default flow;
 `,
     );
 
-    const { env, notifier } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const notifier = fakeNotifier();
 
-    const result = await runSession(env, { repo: 'notifypr', issueNumber: 6 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'notifypr', issueNumber: 6 }, { notifier }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
+    expect(manifest.prUrl).toBe('https://example.invalid/notifypr/pull/99');
 
     expect(notifier.events).toHaveLength(1);
     expect(notifier.events[0]).toMatchObject({
@@ -1253,17 +1210,13 @@ export default flow;
 
   it('stays silent on a completed session with no PR', async () => {
     await seedProject(root, 'notifyquiet');
-    const { env, notifier } = fakeKernelEnvironment({ workspaceRoot: root, sessionsRoot });
+    const notifier = fakeNotifier();
 
-    const result = await runSession(env, { repo: 'notifyquiet', issueNumber: 3 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'notifyquiet', issueNumber: 3 }, { notifier }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.state).toBe('completed');
+    expect(manifest.state).toBe('completed');
     expect(notifier.events).toEqual([]);
   });
 
@@ -1280,45 +1233,30 @@ export default flow;
       }),
     );
 
-    const { env, notifier } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: fakeRuntime('failed'),
-    });
+    const runtime = fakeRuntime('failed');
+    const notifier = fakeNotifier();
 
-    const result = await runSession(env, { repo: 'notifytarget', issueNumber: 5 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'notifytarget', issueNumber: 5 }, { runtime, notifier }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
+    expect(manifest.state).toBe('failed');
     expect(notifier.events).toHaveLength(1);
     expect(notifier.events[0]?.target).toBe('https://ntfy.invalid/acme/notifytarget');
   });
 
   it('logs a failed delivery instead of failing the session', async () => {
     await seedProject(root, 'notifydown');
-    const { env } = fakeKernelEnvironment({
-      workspaceRoot: root,
-      sessionsRoot,
-      runtime: fakeRuntime('failed'),
-      notifier: {
-        notify: () =>
-          Effect.fail(new UnavailableError({ cause: new Error('webhook unreachable') })),
-      },
-    });
+    const runtime = fakeRuntime('failed');
+    const notifier: Notifier = {
+      notify: () => Effect.fail(new UnavailableError({ cause: new Error('webhook unreachable') })),
+    };
 
-    const result = await runSession(env, { repo: 'notifydown', issueNumber: 7 });
+    const { manifest } = await Effect.runPromise(
+      sessionOver({ repo: 'notifydown', issueNumber: 7 }, { runtime, notifier }),
+    );
 
-    expect(result.success).toBe(true);
-
-    if (!result.success) {
-      return;
-    }
-
-    expect(result.data.manifest.state).toBe('failed');
+    expect(manifest.state).toBe('failed');
 
     const receiptDirs = await readdir(join(sessionsRoot, 'notifydown'));
     const flowLog = await readFile(

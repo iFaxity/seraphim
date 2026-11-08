@@ -72,6 +72,6 @@ _Avoid_: seam, port, service interface
 The operator page channel: one authenticated webhook POST per terminal session outcome (`failed`, `cap-hit`, `pr-opened`); ntfy is the first consumer. Composed once from the global kernel config (`~/.seraphim/config.json`); a nullable per-project override (`project.json` `notify.target`) reroutes one project's pages. Unconfigured = silent.
 _Avoid_: alerting, push channel, messaging adapter
 
-**KernelEnvironment**:
-The record of contract instances plus filesystem roots (`workspaceRoot`, `sessionsRoot`, `poolRoot`) the kernel runs against, threaded explicitly into `engine()` — composed once in `src/main.ts` (`composeKernelEnvironment`), faked wholesale in tests (`fakeKernelEnvironment`).
+**HomeService**:
+The Effect service carrying the kernel's filesystem layout (`home`, `projectsRoot`, `sessionsRoot`, `poolRoot`, `reposRoot`, `worktreesRoot`), built once via `homeLayout()` and provided through the adapter Layer stack composed in `src/main.ts` (`composeEngineLayer`) — tests substitute a Layer over a tempdir home. Formerly the `KernelEnvironment` env object, retired in the Effect migration (#73).
 _Avoid_: deps, dependencies, context

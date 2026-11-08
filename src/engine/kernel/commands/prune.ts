@@ -1,4 +1,5 @@
-import { failure, success } from '../../../lib/result.ts';
+import { Effect } from 'effect';
+
 import { command, strictFlags } from '../command.ts';
 import { planPrune, runPrune } from '../prune.ts';
 
@@ -12,30 +13,27 @@ export const pruneCommand = command({
     json: { type: 'boolean', default: false },
     confirm: { type: 'boolean', default: false },
   }),
-  execute: async (env, values) => {
-    // Deletion runs over a freshly computed plan: the operator confirmed the listing, and
-    // the executor re-derives eligibility so nothing deleted in between is touched twice.
-    const planned = await planPrune(env);
+  execute: (values) =>
+    Effect.gen(function* () {
+      // Deletion runs over a freshly computed plan: the operator confirmed the listing, and
+      // the executor re-derives eligibility so nothing deleted in between is touched twice.
+      const planned = yield* planPrune;
 
-    if (!planned.success) {
-      return failure(planned.error);
-    }
+      if (!values['confirm']) {
+        return {
+          kind: 'prune-plan' as const,
+          plan: planned,
+          json: values['json'] === true,
+        };
+      }
 
-    if (!values['confirm']) {
-      return success({
-        kind: 'prune-plan' as const,
-        plan: planned.data,
-        json: values['json'] === true,
-      });
-    }
+      // runPrune is infallible: per-item failures ride the result's failed list.
+      const done = yield* runPrune(planned);
 
-    // runPrune is infallible: per-item failures ride the result's failed list.
-    const done = await runPrune(env, planned.data);
-
-    return success({
-      kind: 'prune-done' as const,
-      removed: done.data.removed,
-      failed: done.data.failed,
-    });
-  },
+      return {
+        kind: 'prune-done' as const,
+        removed: done.removed,
+        failed: done.failed,
+      };
+    }),
 });

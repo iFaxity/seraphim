@@ -1,7 +1,7 @@
 import { Effect, Layer } from 'effect';
 
-import { type Sandbox } from '../core/contracts.ts';
-import { SandboxService } from '../core/services.ts';
+import { type Sandbox } from '../../src/engine/core/contracts.ts';
+import { SandboxService } from '../../src/engine/core/services.ts';
 
 /**
  * Hand-written fake for the sandbox contract (ADR-0002 keeps fakes engine-side): records the
