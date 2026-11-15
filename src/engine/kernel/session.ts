@@ -17,7 +17,6 @@ import {
   ProjectError,
   type ReceiptReadError,
   ReceiptWriteError,
-  SkillPoolError,
   UnavailableError,
 } from '../../lib/errors.ts';
 import { fileExistsE } from '../../lib/fs.ts';
@@ -203,7 +202,7 @@ export const runSession = (
 
     const prepared = yield* prepareWorktree(home, input, flow.config, repoPath, git);
     const { startedAt, relDir, worktreePath, branch } = prepared;
-    const turnsEngine = createTurnEngine({
+    const turnsEngine = yield* createTurnEngine({
       caps: flow.config.caps,
       agent: flow.config.agent,
       model: flow.config.model,
@@ -292,11 +291,7 @@ const prepareWorktree = (
   config: FlowConfig,
   repoPath: string,
   git: Git,
-): Effect.Effect<
-  { startedAt: Temporal.Instant; relDir: string; worktreePath: string; branch: string },
-  GitError | SkillPoolError,
-  never
-> =>
+) =>
   Effect.gen(function* () {
     const startedAt = now();
     const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));

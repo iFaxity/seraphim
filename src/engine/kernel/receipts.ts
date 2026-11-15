@@ -4,7 +4,7 @@ import { Effect, Result, Schema } from 'effect';
 import { type TranscriptFile } from './turns.ts';
 
 import { ReceiptReadError, ReceiptWriteError } from '../../lib/errors.ts';
-import { isFsErrorCode, mkdirE, readDirE, readFileE, writeFileE } from '../../lib/fs.ts';
+import { fsTagged, isMissing, mkdirE, readDirE, readFileE, writeFileE } from '../../lib/fs.ts';
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
 
 /**
@@ -114,41 +114,50 @@ export function sessionDir(sessionsRoot: string, relDir: string) {
 /** Reads one receipt directory's manifest. Invalid JSON or shape is a labeled read error. */
 const readManifest = (sessionPath: string) =>
   Effect.gen(function* () {
-    const raw = yield* Effect.result(readFileE(join(sessionPath, MANIFEST_FILE)));
+    const raw = yield* readFileE(join(sessionPath, MANIFEST_FILE)).pipe(
+      fsTagged(
+        (failure) =>
+          new ReceiptReadError({
+            message: `unreadable manifest in ${sessionPath}: ${String(failure)}`,
+          }),
+      ),
+    );
 
-    if (Result.isFailure(raw)) {
-      return yield* new ReceiptReadError({
-        message: `unreadable manifest in ${sessionPath}: ${String(raw.failure)}`,
-      });
+    const json = yield* Effect.result(
+      Effect.try({
+        try: () => JSON.parse(raw) as unknown,
+        catch: (error) =>
+          new ReceiptReadError({
+            message: `invalid manifest JSON in ${sessionPath}: ${String(error)}`,
+          }),
+      }),
+    );
+
+    if (Result.isFailure(json)) {
+      return yield* json.failure;
     }
 
-    let json: unknown;
-    try {
-      json = JSON.parse(raw.success) as unknown;
-    } catch (error) {
-      return yield* new ReceiptReadError({
-        message: `invalid manifest JSON in ${sessionPath}: ${String(error)}`,
-      });
-    }
-
-    // Schema.decodeUnknownSync throws on invalid shape; a caught throw turns into the
+    // Schema.decodeUnknownSync throws on invalid shape; the caught throw turns into the
     // labeled read error the list contract publishes.
-    let decoded: SessionManifest;
-    try {
-      decoded = Schema.decodeUnknownSync(SessionManifestSchema)(json);
-    } catch (error) {
-      return yield* new ReceiptReadError({
-        message: `invalid manifest in ${sessionPath}: ${String(error)}`,
-      });
+    const decoded = yield* Effect.result(
+      Effect.try({
+        try: () => Schema.decodeUnknownSync(SessionManifestSchema)(json.success),
+        catch: (error) =>
+          new ReceiptReadError({ message: `invalid manifest in ${sessionPath}: ${String(error)}` }),
+      }),
+    );
+
+    if (Result.isFailure(decoded)) {
+      return yield* decoded.failure;
     }
 
     // The kernel-facing shape: instants. The disk saw numbers; the conversion happens once,
     // here, at the same edge that validated them.
     return {
-      ...decoded,
-      startedAt: fromEpochMs(decoded.startedAt),
-      endedAt: decoded.endedAt == null ? null : fromEpochMs(decoded.endedAt),
-      turns: decoded.turns.map((turn) => ({
+      ...decoded.success,
+      startedAt: fromEpochMs(decoded.success.startedAt),
+      endedAt: decoded.success.endedAt == null ? null : fromEpochMs(decoded.success.endedAt),
+      turns: decoded.success.turns.map((turn) => ({
         ...turn,
         startedAt: fromEpochMs(turn.startedAt),
         endedAt: fromEpochMs(turn.endedAt),
@@ -217,7 +226,7 @@ export const listSessions = (sessionsRoot: string) =>
     const repos = yield* Effect.result(readDirE(sessionsRoot));
 
     if (Result.isFailure(repos)) {
-      if (isFsErrorCode(repos.failure, 'ENOENT')) {
+      if (isMissing(repos.failure)) {
         return { sessions: [], skipped: 0 };
       }
 
@@ -228,6 +237,8 @@ export const listSessions = (sessionsRoot: string) =>
 
     const skipped = { count: 0 };
 
+    // Explicit rejection mode: each element pre-wraps its own failures (an unreadable repo
+    // is a skip), so the fan-out's default fail-fast never fires — all repos are walked.
     const listings = yield* Effect.all(
       repos.success
         .filter((repoEntry) => repoEntry.isDirectory())
@@ -275,13 +286,18 @@ const writeSessionManifest = (dir: string, manifest: Session) =>
     };
     // Same decode boundary as readManifest: a SchemaError here means the kernel-drafted
     // manifest does not match the persisted contract.
-    let validated: SessionManifest;
-    try {
-      validated = Schema.decodeUnknownSync(SessionManifestSchema)(diskManifest);
-    } catch (error) {
-      return yield* new ReceiptWriteError({
-        message: `session manifest invalid: ${(error as Error).message}`,
-      });
+    const validated = yield* Effect.result(
+      Effect.try({
+        try: () => Schema.decodeUnknownSync(SessionManifestSchema)(diskManifest),
+        catch: (error) =>
+          new ReceiptWriteError({
+            message: `session manifest invalid: ${(error as Error).message}`,
+          }),
+      }),
+    );
+
+    if (Result.isFailure(validated)) {
+      return yield* validated.failure;
     }
 
     const made = yield* Effect.result(mkdirE(dir));
@@ -291,18 +307,15 @@ const writeSessionManifest = (dir: string, manifest: Session) =>
       });
     }
 
-    const wrote = yield* Effect.result(
-      writeFileE({
-        path: join(dir, MANIFEST_FILE),
-        data: `${JSON.stringify(validated, null, 2)}\n`,
-      }),
+    yield* writeFileE({
+      path: join(dir, MANIFEST_FILE),
+      data: `${JSON.stringify(validated.success, null, 2)}\n`,
+    }).pipe(
+      fsTagged(
+        (failure) =>
+          new ReceiptWriteError({ message: `manifest write failed: ${String(failure)}` }),
+      ),
     );
-
-    if (Result.isFailure(wrote)) {
-      return yield* new ReceiptWriteError({
-        message: `manifest write failed: ${String(wrote.failure)}`,
-      });
-    }
   });
 
 /**
@@ -377,13 +390,24 @@ export const writeReceipt = (
 /**
  * Writes every file, reporting the first failure. The one write fan-out the receipts module
  * owns — manifest, turn records, and transcripts all go through it; first failure wins.
+ * Explicit rejection mode: every write is pre-wrapped to an infallible `Result`, so the
+ * fan-out's default fail-fast never interrupts its siblings — all writes complete, and the
+ * first failure by index wins, matching the old awaited-loop semantics. The failure stays
+ * the raw fs `Error`: the callers own the labeled `ReceiptWriteError` mapping with their
+ * per-site messages.
  */
 const writeAll = (dir: string, files: readonly { name: string; body: string }[]) =>
   Effect.gen(function* () {
-    const writes = yield* Effect.all(
-      files.map((file) => writeFileE({ path: join(dir, file.name), data: file.body })),
+    const results = yield* Effect.all(
+      files.map((file) =>
+        Effect.result(writeFileE({ path: join(dir, file.name), data: file.body })),
+      ),
       { concurrency: 'unbounded' },
     );
 
-    return writes;
+    const firstFailure = results.find(Result.isFailure);
+
+    if (firstFailure !== undefined) {
+      return yield* Effect.fail(firstFailure.failure);
+    }
   });

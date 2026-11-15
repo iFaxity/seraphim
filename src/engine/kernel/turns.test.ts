@@ -1,8 +1,9 @@
+import { it } from '@effect/vitest';
 import { Clock, Duration, Effect, Layer, Result } from 'effect';
 import { TestClock } from 'effect/testing';
-import { describe, expect, it } from 'vite-plus/test';
+import { describe, expect } from 'vite-plus/test';
 
-import { createTurnEngine, type TurnEngine } from './turns.ts';
+import { createTurnEngine } from './turns.ts';
 
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
 import { type TurnResult } from '../core/contracts.ts';
@@ -13,39 +14,37 @@ function completed(transcript = 'did the work'): TurnResult {
   return { exitState: 'completed', transcript };
 }
 
-/** The test clock, installed as the `Clock` service the engine reads. */
-const TestClockLayer = TestClock.layer() as unknown as Layer.Layer<Clock.Clock>;
+/**
+ * Installs the test clock as the `Clock` service (`it.effect` runs it at runtime but types its
+ * bodies as `Scope`-only, so the requirement is discharged explicitly).
+ */
+const withTestClock = <A, E>(effect: Effect.Effect<A, E, Clock.Clock>): Effect.Effect<A, E> =>
+  Effect.provide(TestClock.layer() as unknown as Layer.Layer<Clock.Clock>)(effect);
 
-function run<A, E>(
-  engine: TurnEngine,
-  body: (eng: TurnEngine) => Effect.Effect<A, E, Clock.Clock>,
-): Promise<A> {
-  return Effect.runPromise(Effect.provide(body(engine), TestClockLayer));
-}
-
-/** The current test-clock instant. */
+/** The current test-clock instant (the test clock rides it.effect's TestContext). */
 const now = Effect.map(Clock.currentTimeMillis, fromEpochMs);
 
 describe('turn engine: gate', () => {
-  it('opens the gate and hands the caller the turn start instant', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
+  it.effect('opens the gate and hands the caller the turn start instant', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
         const gate = yield* Effect.result(eng.gate);
 
         expect(Result.isSuccess(gate)).toBe(true);
       }),
-    );
-  });
+    ),
+  );
 
-  it('rejects before dispatch once the wall clock is exhausted, naming the cap', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
+  it.effect('rejects before dispatch once the wall clock is exhausted, naming the cap', () =>
+    withTestClock(
       Effect.gen(function* () {
-        yield* eng.gate; // anchors the wall-clock deadline on the first gate read
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
+
+        // The deadline anchors at engine construction: burning the whole budget before the
+        // first gate read is enough — no pre-anchor gate read needed.
         yield* TestClock.adjust(Duration.millis(60_000));
+
         const gate = yield* Effect.result(eng.gate);
 
         expect(Result.isSuccess(gate)).toBe(false);
@@ -58,14 +57,13 @@ describe('turn engine: gate', () => {
           );
         }
       }),
-    );
-  });
+    ),
+  );
 
-  it('rejects past the turn cap, counting the turns already recorded', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
+  it.effect('rejects past the turn cap, counting the turns already recorded', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
         const at = yield* now;
         yield* eng.record({ prompt: 'one', startedAt: at, outcome: Result.succeed(completed()) });
         yield* eng.record({ prompt: 'two', startedAt: at, outcome: Result.succeed(completed()) });
@@ -82,18 +80,18 @@ describe('turn engine: gate', () => {
           );
         }
       }),
-    );
-  });
+    ),
+  );
 
-  it('allows a flow that ends exactly at the turn budget', () => {
-    const engine = createTurnEngine({
-      caps: { maxTurns: 2, wallClockMs: 60_000 },
-      agent: 'pi',
-      model: 'm',
-    });
-
-    return run(engine, (eng) =>
+  it.effect('allows a flow that ends exactly at the turn budget', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({
+          caps: { maxTurns: 2, wallClockMs: 60_000 },
+          agent: 'pi',
+          model: 'm',
+        });
+
         expect(Result.isSuccess(yield* Effect.result(eng.gate))).toBe(true);
         const at = yield* now;
         yield* eng.record({ prompt: 'one', startedAt: at, outcome: Result.succeed(completed()) });
@@ -101,20 +99,19 @@ describe('turn engine: gate', () => {
         yield* eng.record({ prompt: 'two', startedAt: at, outcome: Result.succeed(completed()) });
         expect(eng.snapshot().turns).toHaveLength(2);
       }),
-    );
-  });
+    ),
+  );
 });
 
 describe('turn engine: record', () => {
-  it('builds the kernel turn record with instants from the injected clock', () => {
-    const engine = createTurnEngine({
-      caps: CAPS,
-      agent: 'pi',
-      model: 'test-model',
-    });
-
-    return run(engine, (eng) =>
+  it.effect('builds the kernel turn record with instants from the injected clock', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({
+          caps: CAPS,
+          agent: 'pi',
+          model: 'test-model',
+        });
         const startedAt = yield* now;
         yield* TestClock.adjust(Duration.millis(250));
         const recorded = yield* Effect.result(
@@ -143,28 +140,26 @@ describe('turn engine: record', () => {
         expect(toEpochMs(turn?.startedAt ?? fromEpochMs(0))).toBe(toEpochMs(startedAt));
         expect(toEpochMs(turn?.endedAt ?? fromEpochMs(0))).toBe(toEpochMs(startedAt) + 250);
       }),
-    );
-  });
+    ),
+  );
 
-  it('numbers turns in sequence across records', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
+  it.effect('numbers turns in sequence across records', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
         const at = yield* now;
         yield* eng.record({ prompt: 'one', startedAt: at, outcome: Result.succeed(completed()) });
         yield* eng.record({ prompt: 'two', startedAt: at, outcome: Result.succeed(completed()) });
 
         expect(eng.snapshot().turns.map((turn) => turn.index)).toEqual([1, 2]);
       }),
-    );
-  });
+    ),
+  );
 
-  it('records a runtime crash as a failed turn with the error as the transcript body', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
+  it.effect('records a runtime crash as a failed turn with the error as the transcript body', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
         const at = yield* now;
         const recorded = yield* Effect.result(
           eng.record({
@@ -190,46 +185,46 @@ describe('turn engine: record', () => {
         expect(file?.name).toBe('turn-1.transcript.md');
         expect(file?.body).toBe('Error: runtime exploded');
       }),
-    );
-  });
+    ),
+  );
 
-  it('reports cap-hit, but keeps the record, when a completed turn outlives the deadline', () => {
-    const engine = createTurnEngine({
-      caps: { maxTurns: 100, wallClockMs: 500 },
-      agent: 'pi',
-      model: 'm',
-    });
+  it.effect(
+    'reports cap-hit, but keeps the record, when a completed turn outlives the deadline',
+    () =>
+      withTestClock(
+        Effect.gen(function* () {
+          const eng = yield* createTurnEngine({
+            caps: { maxTurns: 100, wallClockMs: 500 },
+            agent: 'pi',
+            model: 'm',
+          });
+          const gate = yield* eng.gate;
+          yield* TestClock.adjust(Duration.millis(2_000)); // the turn runs to completion past the deadline — no mid-flight kill
+          const recorded = yield* Effect.result(
+            eng.record({
+              prompt: 'slow turn',
+              startedAt: gate.startedAt,
+              outcome: Result.succeed(completed()),
+            }),
+          );
 
-    return run(engine, (eng) =>
+          expect(Result.isSuccess(recorded)).toBe(false);
+
+          if (Result.isFailure(recorded)) {
+            const error = recorded.failure;
+            expect(error.kind).toBe('cap');
+            expect(error.kind != 'turn' && error.reason).toMatch(/exceeded by turn 1/);
+          }
+
+          expect(eng.snapshot().turns).toHaveLength(1); // the turn ran, the record stays
+        }),
+      ),
+  );
+
+  it.effect('captures the transcript exactly as the runtime returned it', () =>
+    withTestClock(
       Effect.gen(function* () {
-        const gate = yield* engine.gate;
-        yield* TestClock.adjust(Duration.millis(2_000)); // the turn runs to completion past the deadline — no mid-flight kill
-        const recorded = yield* Effect.result(
-          eng.record({
-            prompt: 'slow turn',
-            startedAt: gate.startedAt,
-            outcome: Result.succeed(completed()),
-          }),
-        );
-
-        expect(Result.isSuccess(recorded)).toBe(false);
-
-        if (Result.isFailure(recorded)) {
-          const error = recorded.failure;
-          expect(error.kind).toBe('cap');
-          expect(error.kind != 'turn' && error.reason).toMatch(/exceeded by turn 1/);
-        }
-
-        expect(eng.snapshot().turns).toHaveLength(1); // the turn ran, the record stays
-      }),
-    );
-  });
-
-  it('captures the transcript exactly as the runtime returned it', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
-      Effect.gen(function* () {
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
         const at = yield* now;
         yield* eng.record({
           prompt: 'one',
@@ -239,16 +234,15 @@ describe('turn engine: record', () => {
 
         expect(eng.snapshot().transcripts[0]?.body).toBe('## did things');
       }),
-    );
-  });
+    ),
+  );
 });
 
 describe('turn engine: transcripts', () => {
-  it('assembles one per-turn file and one session file holding every turn', () => {
-    const engine = createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
-
-    return run(engine, (eng) =>
+  it.effect('assembles one per-turn file and one session file holding every turn', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({ caps: CAPS, agent: 'pi', model: 'm' });
         const at = yield* now;
         yield* eng.record({
           prompt: 'one',
@@ -278,18 +272,17 @@ describe('turn engine: transcripts', () => {
         expect(session).toContain('## turn 2');
         expect(session).toContain('second body');
       }),
-    );
-  });
+    ),
+  );
 
-  it('marks the session transcript when a cap aborts, quoting the reason', () => {
-    const engine = createTurnEngine({
-      caps: { maxTurns: 1, wallClockMs: 60_000 },
-      agent: 'pi',
-      model: 'm',
-    });
-
-    return run(engine, (eng) =>
+  it.effect('marks the session transcript when a cap aborts, quoting the reason', () =>
+    withTestClock(
       Effect.gen(function* () {
+        const eng = yield* createTurnEngine({
+          caps: { maxTurns: 1, wallClockMs: 60_000 },
+          agent: 'pi',
+          model: 'm',
+        });
         const at = yield* now;
         yield* eng.record({
           prompt: 'the one allowed turn',
@@ -304,6 +297,6 @@ describe('turn engine: transcripts', () => {
         expect(session).toContain('## cap hit');
         expect(session).toMatch(/turn cap of 1 reached/);
       }),
-    );
-  });
+    ),
+  );
 });

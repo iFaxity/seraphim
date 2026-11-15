@@ -137,81 +137,80 @@ function appendTurn(
 
 /**
  * Creates the turn engine over one session's budget. Budget deadlines read the Effect
- * `Clock` — tests drive the wall clock with a `TestClock`.
+ * `Clock` — the wall-clock deadline anchors at engine construction (the session's start),
+ * so a flow that burns time before its first turn still spends the same budget; tests
+ * drive the clock with a `TestClock`.
  */
-export function createTurnEngine(config: {
+export const createTurnEngine = (config: {
   readonly caps: Caps;
   readonly agent: string;
   readonly model: string;
-}): TurnEngine {
-  const { caps, agent, model } = config;
+}): Effect.Effect<TurnEngine, never, Clock.Clock> =>
+  Effect.gen(function* () {
+    const { caps, agent, model } = config;
 
-  const ledger: Ledger = {
-    turns: [],
-    transcripts: [],
-    sessionTranscript: [],
-  };
-
-  // The deadline anchors to the first gate read — the session's own start, whatever the
-  // clock says then — not to engine construction.
-  let deadline: number | null = null;
-
-  function gate() {
-    return Effect.gen(function* () {
-      const nowMs = yield* Clock.currentTimeMillis;
-
-      if (deadline === null) {
-        deadline = nowMs + caps.wallClockMs;
-      }
-
-      return yield* gateCaps(ledger, caps, nowMs, deadline);
-    });
-  }
-
-  function record({ prompt, startedAt, outcome }: TurnInput) {
-    return Effect.gen(function* () {
-      const endedAt = fromEpochMs(yield* Clock.currentTimeMillis);
-      const exitState = Result.isSuccess(outcome) ? outcome.success.exitState : ('failed' as const);
-
-      appendTurn(ledger, { prompt, agent, model, exitState, startedAt }, endedAt);
-
-      const transcript = Result.isSuccess(outcome)
-        ? outcome.success.transcript
-        : String(outcome.failure);
-
-      captureTranscripts(ledger, prompt, transcript);
-
-      if (exitState != 'completed') {
-        return yield* Effect.fail(new TurnAborted('turn', exitState));
-      }
-
-      const nowMs = yield* Clock.currentTimeMillis;
-
-      // A turn that outlived the deadline still ran to completion — the runtime is not
-      // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
-      // completed (spec: exceeding wall clock is a cap hit with the retention contract).
-      if (deadline !== null && nowMs >= deadline) {
-        return yield* capAbort(
-          ledger,
-          `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${ledger.turns.length}`,
-        );
-      }
-
-      return { exitState };
-    });
-  }
-
-  function snapshot() {
-    return {
-      turns: [...ledger.turns],
-      transcripts: [
-        ...ledger.transcripts,
-        { name: 'session.transcript.md', body: ledger.sessionTranscript.join('\n') },
-      ],
+    const ledger: Ledger = {
+      turns: [],
+      transcripts: [],
+      sessionTranscript: [],
     };
-  }
 
-  // `gate` is the effect value itself (built eagerly, run lazily); `record` and `snapshot`
-  // stay methods.
-  return { gate: gate(), record, snapshot };
-}
+    // The deadline anchors to construction — the session's own start — not to the first
+    // gate read, matching the original injected-clock semantics.
+    const deadline = (yield* Clock.currentTimeMillis) + caps.wallClockMs;
+
+    function gate() {
+      return Effect.gen(function* () {
+        return yield* gateCaps(ledger, caps, yield* Clock.currentTimeMillis, deadline);
+      });
+    }
+
+    function record({ prompt, startedAt, outcome }: TurnInput) {
+      return Effect.gen(function* () {
+        const endedAt = fromEpochMs(yield* Clock.currentTimeMillis);
+        const exitState = Result.isSuccess(outcome)
+          ? outcome.success.exitState
+          : ('failed' as const);
+
+        appendTurn(ledger, { prompt, agent, model, exitState, startedAt }, endedAt);
+
+        const transcript = Result.isSuccess(outcome)
+          ? outcome.success.transcript
+          : String(outcome.failure);
+
+        captureTranscripts(ledger, prompt, transcript);
+
+        if (exitState != 'completed') {
+          return yield* Effect.fail(new TurnAborted('turn', exitState));
+        }
+
+        const nowMs = yield* Clock.currentTimeMillis;
+
+        // A turn that outlived the deadline still ran to completion — the runtime is not
+        // killed mid-flight — but the overshoot means the budget was breached: cap-hit, not
+        // completed (spec: exceeding wall clock is a cap hit with the retention contract).
+        if (nowMs >= deadline) {
+          return yield* capAbort(
+            ledger,
+            `wall-clock cap of ${caps.wallClockMs}ms exceeded by turn ${ledger.turns.length}`,
+          );
+        }
+
+        return { exitState };
+      });
+    }
+
+    function snapshot() {
+      return {
+        turns: [...ledger.turns],
+        transcripts: [
+          ...ledger.transcripts,
+          { name: 'session.transcript.md', body: ledger.sessionTranscript.join('\n') },
+        ],
+      };
+    }
+
+    // `gate` is the effect value itself (built eagerly, run lazily); `record` and `snapshot`
+    // stay methods.
+    return { gate: gate(), record, snapshot };
+  });

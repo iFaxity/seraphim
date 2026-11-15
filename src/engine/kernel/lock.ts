@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Clock, Effect, Result } from 'effect';
+import { Clock, Effect, Result, Schedule } from 'effect';
 
 import { LockHeldError } from '../../lib/errors.ts';
 import { isFsErrorCode, mkdirE, readFileE, unlinkE, writeFileE } from '../../lib/fs.ts';
@@ -67,14 +67,14 @@ const readLock = (path: string) =>
       return null;
     }
 
-    try {
-      const lock = JSON.parse(read.success) as LockFile;
+    const parsed = yield* Effect.result(Effect.try(() => JSON.parse(read.success) as LockFile));
 
-      // A pid must be a positive integer — anything else (or signal-all like -1) reads corrupt.
-      return Number.isInteger(lock.pid) && lock.pid > 0 ? lock : null;
-    } catch {
+    if (Result.isFailure(parsed)) {
       return null;
     }
+
+    // A pid must be a positive integer — anything else (or signal-all like -1) reads corrupt.
+    return Number.isInteger(parsed.success.pid) && parsed.success.pid > 0 ? parsed.success : null;
   });
 
 /** One exclusive-create attempt; unexpected (non-EEXIST) write failures crash the acquire. */
@@ -96,29 +96,30 @@ const createExclusive = (path: string, lock: LockFile) =>
   });
 
 /** The held-lock diagnostic: repo, holder pid, holding age, and the cap spent waiting. */
-function lockHeldError(repo: string, held: LockFile, maxWaitMs: number) {
-  return Effect.map(
-    Clock.currentTimeMillis,
-    (at) =>
-      new LockHeldError({
-        message:
-          `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
-          `${Math.round((at - held.at) / 1000)}s) — gave up waiting ${Math.round(maxWaitMs / 1000)}s; ` +
-          'the holding session may be killed to release it',
-      }),
+function lockHeldFailure(repo: string, held: LockFile, maxWaitMs: number) {
+  return Clock.currentTimeMillis.pipe(
+    Effect.flatMap((at) =>
+      Effect.fail(
+        new LockHeldError({
+          message:
+            `repo '${repo}' is locked by a live session (pid ${held.pid}, holding for ` +
+            `${Math.round((at - held.at) / 1000)}s) — gave up waiting ${Math.round(maxWaitMs / 1000)}s; ` +
+            'the holding session may be killed to release it',
+        }),
+      ),
+    ),
   );
 }
 
 /**
- * Takes the file lock: an exclusive create wins outright; a stale lock (dead pid, corrupt
- * content, or an orphaned own-pid file from a crashed earlier session in this process) is
- * broken and taken — the exclusive-create retry resolves the race where a concurrent breaker
- * wins the unlink. A live foreign holder is waited out up to the cap.
+ * One lock attempt until the wait cap: an exclusive create wins outright; a stale holder
+ * (dead pid, corrupt content, or an orphaned own-pid file from a crashed earlier session in
+ * this process) is broken and the create retried — the tight race against a concurrent
+ * breaker, not a wait. A live foreign holder fails the attempt; the retry schedule owns the
+ * re-polling.
  */
-const takeFileLock = (path: string, repo: string, pollMs: number, maxWaitMs: number) =>
+const acquireOnce = (path: string) =>
   Effect.gen(function* () {
-    const startedAt = yield* Clock.currentTimeMillis;
-
     while (true) {
       if (yield* createExclusive(path, { pid: process.pid, at: toEpochMs(now()) })) {
         return;
@@ -131,13 +132,24 @@ const takeFileLock = (path: string, repo: string, pollMs: number, maxWaitMs: num
         continue;
       }
 
-      if ((yield* Clock.currentTimeMillis) - startedAt >= maxWaitMs) {
-        return yield* yield* lockHeldError(repo, held, maxWaitMs);
-      }
-
-      yield* Effect.sleep(pollMs);
+      return yield* Effect.fail(held);
     }
   });
+
+/**
+ * Takes the file lock: an exclusive create wins outright; a stale lock (dead pid, corrupt
+ * content, or an orphaned own-pid file from a crashed earlier session in this process) is
+ * broken and taken — the exclusive-create retry resolves the race where a concurrent breaker
+ * wins the unlink. A live foreign holder is waited out on a spaced retry schedule bounded by
+ * the wait cap, then the acquisition fails naming the pid and holding age.
+ */
+const takeFileLock = (path: string, repo: string, pollMs: number, maxWaitMs: number) =>
+  acquireOnce(path).pipe(
+    Effect.retry(
+      Schedule.spaced(`${pollMs} millis`).pipe(Schedule.upTo({ duration: `${maxWaitMs} millis` })),
+    ),
+    Effect.catch((held: LockFile) => lockHeldFailure(repo, held, maxWaitMs)),
+  );
 
 /**
  * Runs `guarded` holding the repo's lock, releasing on every path — manual-release code can
