@@ -2,12 +2,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer, Result, Schema } from 'effect';
-import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Effect, Layer, Schema } from 'effect';
+import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
-import { type CommandServices, type ErrorOutcome } from './command.ts';
-import { runCommand } from './commands/run.ts';
-import { statusCommand } from './commands/status.ts';
 import { withRepoLock } from './lock.ts';
 import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
@@ -39,6 +37,15 @@ import {
   TrackerService,
 } from '../core/services.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+
+/**
+ * Clock policy: every test below runs under `it.effect` EXCEPT the three plain-`it` tests in
+ * `per-repo lock` (lock wait-cap and cross-process polling — `withRepoLock`'s retry schedule
+ * paces its polls with `Effect.sleep`, which a TestClock freezes, and the awaited signals ride
+ * real timers interleaved with real fs reads) and the one plain-`it` wall-clock overshoot race
+ * in `runSession` (a fake turn that must outlive a live `wallClockMs` before the kernel's
+ * check — virtual time cannot race itself). Those tests keep the live clock on purpose.
+ */
 
 /** The remote seedProject registers; tests assert the session clones exactly this URL. */
 function seedRemote(repo: string) {
@@ -155,34 +162,9 @@ function sessionLayers(overrides: FakeOverrides = {}) {
 const sessionOver = (input: SessionInput, overrides: FakeOverrides = {}) =>
   Effect.provide(runSession(input), sessionLayers(overrides));
 
-/** The engine front door over the fake stack — an Outcome back, never a rejection. The
- * composed dispatcher union degrades to `unknown` upstream (rows whose commands infer
- * `unknown` channels), so this seam re-derives the two outcomes the engine contract asserts
- * — `run` and `status` — from their own command rows. */
-type CommandOutcome<C> = C extends {
-  readonly handler: (args: readonly string[]) => Effect.Effect<infer O, never, unknown>;
-}
-  ? O
-  : never;
-
-type EngineOutcome =
-  | Exclude<CommandOutcome<typeof runCommand>, ErrorOutcome>
-  | Exclude<CommandOutcome<typeof statusCommand>, ErrorOutcome>
-  | ErrorOutcome;
-
-async function engineOutcome(
-  argv: readonly string[],
-  overrides: FakeOverrides = {},
-): Promise<EngineOutcome> {
-  const outcome = await run(
-    // The composed dispatcher union degrades to `unknown` upstream, so the effect rides
-    // widened to its declared outcome; the EngineOutcome type re-derives the safe rows.
-    engine(argv) as Effect.Effect<EngineOutcome, never, CommandServices>,
-    sessionLayers(overrides),
-  );
-
-  return outcome.success ? outcome.data : outcome.error;
-}
+/** The engine front door over the fake stack — an Outcome back, never a rejection. */
+const engineOutcome = (argv: readonly string[], overrides: FakeOverrides = {}) =>
+  run(engine(argv), sessionLayers(overrides));
 
 /** Narrowing tagged errors to their human detail without re-deriving failure prose. */
 function messageOf(error: SessionError): string {
@@ -190,14 +172,8 @@ function messageOf(error: SessionError): string {
 }
 
 /** Fails one session run out of its Exit, so the kernel's tagged error reaches the assertions. */
-async function sessionFailure(
-  input: SessionInput,
-  overrides: FakeOverrides = {},
-): Promise<SessionError> {
-  return Effect.runPromise(
-    expectTaggedFailure(sessionOver(input, overrides), 'expected runSession failure'),
-  );
-}
+const sessionFailure = (input: SessionInput, overrides: FakeOverrides = {}) =>
+  expectTaggedFailure(sessionOver(input, overrides), 'expected runSession failure');
 
 let root: string;
 let sessionsRoot: string;
@@ -213,75 +189,78 @@ afterAll(async () => {
 });
 
 describe('runSession', () => {
-  it('runs a full session over fakes: branch off default, worktree recorded, receipts written, clean exit', async () => {
-    await seedProject(root, 'demo');
-    const git = fakeGit();
-    const runtime = fakeRuntime();
+  it.effect(
+    'runs a full session over fakes: branch off default, worktree recorded, receipts written, clean exit',
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedProject(root, 'demo'));
+        const git = fakeGit();
+        const runtime = fakeRuntime();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'demo', issueNumber: 7 }, { git, runtime }),
-    );
+        const { manifest } = yield* sessionOver({ repo: 'demo', issueNumber: 7 }, { git, runtime });
 
-    // The session clones from the registered remote — never any other URL
-    expect(git.clones).toEqual([{ path: join(root, 'repos', 'demo'), url: seedRemote('demo') }]);
-    expect(git.worktrees).toHaveLength(1);
-    expect(git.worktrees[0]?.baseBranch).toBe('main');
-    expect(git.worktrees[0]?.branch).toBe(manifest.branch);
-    expect(manifest.worktreePath).toBe(git.worktrees[0]?.path);
+        // The session clones from the registered remote — never any other URL
+        expect(git.clones).toEqual([
+          { path: join(root, 'repos', 'demo'), url: seedRemote('demo') },
+        ]);
+        expect(git.worktrees).toHaveLength(1);
+        expect(git.worktrees[0]?.baseBranch).toBe('main');
+        expect(git.worktrees[0]?.branch).toBe(manifest.branch);
+        expect(manifest.worktreePath).toBe(git.worktrees[0]?.path);
 
-    // One turn dispatched into the fake runtime
-    expect(runtime.prompts).toHaveLength(1);
-    expect(runtime.prompts[0]).toContain('implement issue');
-    expect(manifest.state).toBe('completed');
+        // One turn dispatched into the fake runtime
+        expect(runtime.prompts).toHaveLength(1);
+        expect(runtime.prompts[0]).toContain('implement issue');
+        expect(manifest.state).toBe('completed');
 
-    // Receipts on disk: manifest + per-turn records, zod-valid
-    const receiptDirs = await readdir(join(sessionsRoot, 'demo'));
-    expect(receiptDirs).toHaveLength(1);
+        // Receipts on disk: manifest + per-turn records, zod-valid
+        const receiptDirs = yield* Effect.promise(() => readdir(join(sessionsRoot, 'demo')));
+        expect(receiptDirs).toHaveLength(1);
 
-    const receiptDir = join(sessionsRoot, 'demo', receiptDirs[0] ?? '');
-    const files = await readdir(receiptDir);
+        const receiptDir = join(sessionsRoot, 'demo', receiptDirs[0] ?? '');
+        const files = yield* Effect.promise(() => readdir(receiptDir));
 
-    expect(files).toContain('manifest.json');
-    expect(files).toContain('turn-1.json');
+        expect(files).toContain('manifest.json');
+        expect(files).toContain('turn-1.json');
 
-    const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
+        const raw = JSON.parse(
+          yield* Effect.promise(() => readFile(join(receiptDir, 'manifest.json'), 'utf8')),
+        ) as unknown;
 
-    expect(() => Schema.decodeUnknownSync(SessionManifestSchema)(raw)).not.toThrow();
-    expect(manifest.model).toBe('test-model');
-  });
+        expect(() => Schema.decodeUnknownSync(SessionManifestSchema)(raw)).not.toThrow();
+        expect(manifest.model).toBe('test-model');
+      }),
+  );
 
-  it('fails fast naming the register fix for an unregistered repo', async () => {
-    const error = await sessionFailure({ repo: 'ghost', issueNumber: 1 });
+  it.effect('fails fast naming the register fix for an unregistered repo', () =>
+    Effect.gen(function* () {
+      const error = yield* sessionFailure({ repo: 'ghost', issueNumber: 1 });
 
-    expect(messageOf(error)).toMatch(/unregistered project 'ghost'/);
-    expect(messageOf(error)).toMatch(/seraphim register/);
-  });
+      expect(messageOf(error)).toMatch(/unregistered project 'ghost'/);
+      expect(messageOf(error)).toMatch(/seraphim register/);
+    }),
+  );
 
-  it('fails fast for an inactive project, naming the re-register fix', async () => {
-    await seedProject(root, 'dormant');
-    // deactivateProject's Effect infers `unknown` error/requirement channels (the source's
-    // untyped reads widen them), so the sibling suites recover the result by runtime Result
-    // narrowing instead of layer-type subtraction.
-    await Effect.runPromise(
-      Effect.result(
-        deactivateProject('dormant').pipe(
-          Effect.provide(Layer.succeed(HomeService, homeLayout(root))),
-        ),
-      ) as unknown as Effect.Effect<Result.Result<void, unknown>>,
-    );
+  it.effect('fails fast for an inactive project, naming the re-register fix', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'dormant'));
+      yield* run(deactivateProject('dormant'), Layer.succeed(HomeService, homeLayout(root)));
 
-    const error = await sessionFailure({ repo: 'dormant', issueNumber: 9 });
+      const error = yield* sessionFailure({ repo: 'dormant', issueNumber: 9 });
 
-    expect(messageOf(error)).toMatch(/inactive/);
-    expect(messageOf(error)).toMatch(/seraphim register/);
-  });
+      expect(messageOf(error)).toMatch(/inactive/);
+      expect(messageOf(error)).toMatch(/seraphim register/);
+    }),
+  );
 
-  it('fails fast when a flow omits its budget — caps are required, no silent default', async () => {
-    const projectDir = await seedProject(root, 'nobudget');
+  it.effect('fails fast when a flow omits its budget — caps are required, no silent default', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'nobudget'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker' },
   run: async (ctx) => {
     await ctx.run('implement issue');
@@ -290,50 +269,60 @@ describe('runSession', () => {
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const error = await sessionFailure({ repo: 'nobudget', issueNumber: 5 });
+      const error = yield* sessionFailure({ repo: 'nobudget', issueNumber: 5 });
 
-    expect(messageOf(error)).toMatch(/caps/);
-  });
+      expect(messageOf(error)).toMatch(/caps/);
+    }),
+  );
 
-  it('fails fast with a clear error when the Dockerfile is missing', async () => {
-    await seedProject(root, 'nodocker');
-    await rm(join(root, 'projects', 'nodocker', 'Dockerfile'));
+  it.effect('fails fast with a clear error when the Dockerfile is missing', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'nodocker'));
+      yield* Effect.promise(() => rm(join(root, 'projects', 'nodocker', 'Dockerfile')));
 
-    const error = await sessionFailure({ repo: 'nodocker', issueNumber: 2 });
+      const error = yield* sessionFailure({ repo: 'nodocker', issueNumber: 2 });
 
-    expect(messageOf(error)).toMatch(/no Dockerfile for 'nodocker'/);
-  });
+      expect(messageOf(error)).toMatch(/no Dockerfile for 'nodocker'/);
+    }),
+  );
 
-  it('rejects the claude adapter as not available', async () => {
-    await seedProject(root, 'claudeflow', 'claude');
+  it.effect('rejects the claude adapter as not available', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'claudeflow', 'claude'));
 
-    const error = await sessionFailure({ repo: 'claudeflow', issueNumber: 3 });
+      const error = yield* sessionFailure({ repo: 'claudeflow', issueNumber: 3 });
 
-    expect(error instanceof UnavailableError).toBe(true);
-    expect(messageOf(error)).toBe('adapter not available: claude');
-  });
+      expect(error instanceof UnavailableError).toBe(true);
+      expect(messageOf(error)).toBe('adapter not available: claude');
+    }),
+  );
 
-  it('claims the issue on pickup before any session work', async () => {
-    await seedProject(root, 'claimed');
-    const tracker = fakeTracker();
+  it.effect('claims the issue on pickup before any session work', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'claimed'));
+      const tracker = fakeTracker();
 
-    await Effect.runPromise(sessionOver({ repo: 'claimed', issueNumber: 4 }, { tracker }));
+      yield* sessionOver({ repo: 'claimed', issueNumber: 4 }, { tracker });
 
-    if (!isFakeTracker(tracker)) {
-      throw new Error('expected the fake tracker with call recording');
-    }
+      if (!isFakeTracker(tracker)) {
+        throw new Error('expected the fake tracker with call recording');
+      }
 
-    expect(tracker.calls.claimed).toEqual(['claimed#4']);
-  });
+      expect(tracker.calls.claimed).toEqual(['claimed#4']);
+    }),
+  );
 
-  it('stops a flow that emits more turns than the cap, retaining branch and receipts', async () => {
-    const projectDir = await seedProject(root, 'turncap');
+  it.effect('stops a flow that emits more turns than the cap, retaining branch and receipts', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'turncap'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -350,35 +339,42 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const git = fakeGit();
-    const runtime = fakeRuntime();
+      const git = fakeGit();
+      const runtime = fakeRuntime();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'turncap', issueNumber: 20 }, { git, runtime }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'turncap', issueNumber: 20 },
+        { git, runtime },
+      );
 
-    expect(runtime.prompts).toHaveLength(2); // third ctx.run rejected by the kernel
-    expect(manifest.state).toBe('cap-hit');
-    expect(manifest.branch).toBe(git.worktrees[0]?.branch);
+      expect(runtime.prompts).toHaveLength(2); // third ctx.run rejected by the kernel
+      expect(manifest.state).toBe('cap-hit');
+      expect(manifest.branch).toBe(git.worktrees[0]?.branch);
 
-    const receiptDirs = await readdir(join(sessionsRoot, 'turncap'));
-    const receiptDir = join(sessionsRoot, 'turncap', receiptDirs[0] ?? '');
-    const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
-    const persisted = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
+      const receiptDirs = yield* Effect.promise(() => readdir(join(sessionsRoot, 'turncap')));
+      const receiptDir = join(sessionsRoot, 'turncap', receiptDirs[0] ?? '');
+      const raw = JSON.parse(
+        yield* Effect.promise(() => readFile(join(receiptDir, 'manifest.json'), 'utf8')),
+      ) as unknown;
+      const persisted = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
 
-    expect(persisted.caps).toEqual({ maxTurns: 2, wallClockMs: 60000 });
-    expect(persisted.capHit).toMatch(/turn cap/);
-    expect(persisted.turns).toHaveLength(2);
-  });
+      expect(persisted.caps).toEqual({ maxTurns: 2, wallClockMs: 60000 });
+      expect(persisted.capHit).toMatch(/turn cap/);
+      expect(persisted.turns).toHaveLength(2);
+    }),
+  );
 
-  it('stops a flow when the wall clock is exhausted, with the same retention contract', async () => {
-    const projectDir = await seedProject(root, 'clockcap');
+  it.effect('stops a flow when the wall clock is exhausted, with the same retention contract', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'clockcap'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -393,21 +389,26 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const git = fakeGit();
-    const runtime = fakeRuntime();
+      const git = fakeGit();
+      const runtime = fakeRuntime();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'clockcap', issueNumber: 21 }, { git, runtime }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'clockcap', issueNumber: 21 },
+        { git, runtime },
+      );
 
-    expect(runtime.prompts).toHaveLength(0); // clock exhausted before the first turn
-    expect(manifest.state).toBe('cap-hit');
-    expect(manifest.branch).toBe(git.worktrees[0]?.branch);
-    expect(manifest.turns).toHaveLength(0);
-  });
+      expect(runtime.prompts).toHaveLength(0); // clock exhausted before the first turn
+      expect(manifest.state).toBe('cap-hit');
+      expect(manifest.branch).toBe(git.worktrees[0]?.branch);
+      expect(manifest.turns).toHaveLength(0);
+    }),
+  );
 
+  // Plain `it`: the fake turn (2000ms) must outlive the wall clock (500ms) on the LIVE clock —
+  // a timing race a TestClock cannot express (it would freeze the turn's sleep; see file head).
   it('records cap-hit, not completed, when a dispatched turn outlives the wall clock', async () => {
     const projectDir = await seedProject(root, 'overshoot');
 
@@ -445,12 +446,14 @@ export default flow;
     expect(manifest.capHit).toMatch(/exceeded by turn 1/);
   });
 
-  it('records the rejected prompt as a cap-hit marker in the session transcript', async () => {
-    const projectDir = await seedProject(root, 'transcriptcap');
+  it.effect('records the rejected prompt as a cap-hit marker in the session transcript', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'transcriptcap'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -466,29 +469,33 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'transcriptcap', issueNumber: 23 }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'transcriptcap', issueNumber: 23 });
 
-    const dir = sessionDir(
-      sessionsRoot,
-      sessionRelDir('transcriptcap', 23, toEpochMs(manifest.startedAt)),
-    );
-    const session = await readFile(join(dir, 'session.transcript.md'), 'utf8');
+      const dir = sessionDir(
+        sessionsRoot,
+        sessionRelDir('transcriptcap', 23, toEpochMs(manifest.startedAt)),
+      );
+      const session = yield* Effect.promise(() =>
+        readFile(join(dir, 'session.transcript.md'), 'utf8'),
+      );
 
-    expect(session).toContain('## turn 1');
-    expect(session).toContain('## cap hit');
-    expect(session).toMatch(/turn cap of 1 reached/);
-  });
+      expect(session).toContain('## turn 1');
+      expect(session).toContain('## cap hit');
+      expect(session).toMatch(/turn cap of 1 reached/);
+    }),
+  );
 
-  it('blocks a flow that catches the abort and tries again past the turn cap', async () => {
-    const projectDir = await seedProject(root, 'bypasser');
+  it.effect('blocks a flow that catches the abort and tries again past the turn cap', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'bypasser'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -508,26 +515,28 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const runtime = fakeRuntime();
+      const runtime = fakeRuntime();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'bypasser', issueNumber: 25 }, { runtime }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'bypasser', issueNumber: 25 }, { runtime });
 
-    // Turn one dispatched; the catch's ctx.run is rejected by the gate, not dispatched.
-    expect(runtime.prompts).toHaveLength(1);
-    expect(manifest.state).toBe('cap-hit');
-    expect(manifest.capHit).toMatch(/turn cap/);
-  });
+      // Turn one dispatched; the catch's ctx.run is rejected by the gate, not dispatched.
+      expect(runtime.prompts).toHaveLength(1);
+      expect(manifest.state).toBe('cap-hit');
+      expect(manifest.capHit).toMatch(/turn cap/);
+    }),
+  );
 
-  it('records completed, not cap-hit, when the flow ends exactly at the turn budget', async () => {
-    const projectDir = await seedProject(root, 'exactbudget');
+  it.effect('records completed, not cap-hit, when the flow ends exactly at the turn budget', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'exactbudget'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -543,25 +552,30 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const runtime = fakeRuntime();
+      const runtime = fakeRuntime();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'exactbudget', issueNumber: 26 }, { runtime }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'exactbudget', issueNumber: 26 },
+        { runtime },
+      );
 
-    expect(runtime.prompts).toHaveLength(2);
-    expect(manifest.state).toBe('completed');
-    expect(manifest.capHit).toBeNull();
-  });
+      expect(runtime.prompts).toHaveLength(2);
+      expect(manifest.state).toBe('completed');
+      expect(manifest.capHit).toBeNull();
+    }),
+  );
 
-  it('saves one transcript per session containing every turn the runtime emitted', async () => {
-    const projectDir = await seedProject(root, 'transcripted');
+  it.effect('saves one transcript per session containing every turn the runtime emitted', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'transcripted'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('first prompt');
@@ -571,40 +585,46 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'transcripted', issueNumber: 22 }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'transcripted', issueNumber: 22 });
 
-    expect(manifest.state).toBe('completed');
+      expect(manifest.state).toBe('completed');
 
-    const receiptDirs = await readdir(join(sessionsRoot, 'transcripted'));
-    const receiptDir = join(sessionsRoot, 'transcripted', receiptDirs[0] ?? '');
-    const transcript = await readFile(join(receiptDir, 'session.transcript.md'), 'utf8');
+      const receiptDirs = yield* Effect.promise(() => readdir(join(sessionsRoot, 'transcripted')));
+      const receiptDir = join(sessionsRoot, 'transcripted', receiptDirs[0] ?? '');
+      const transcript = yield* Effect.promise(() =>
+        readFile(join(receiptDir, 'session.transcript.md'), 'utf8'),
+      );
 
-    expect(transcript).toContain('## turn 1');
-    expect(transcript).toContain('first prompt');
-    expect(transcript).toContain('## turn 2');
-    expect(transcript).toContain('second prompt');
-  });
+      expect(transcript).toContain('## turn 1');
+      expect(transcript).toContain('first prompt');
+      expect(transcript).toContain('## turn 2');
+      expect(transcript).toContain('second prompt');
+    }),
+  );
 
-  it('prepends the AFK no-user preamble to every prompt sent to the runtime', async () => {
-    await seedProject(root, 'preamble');
-    const runtime = fakeRuntime();
+  it.effect('prepends the AFK no-user preamble to every prompt sent to the runtime', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'preamble'));
+      const runtime = fakeRuntime();
 
-    await Effect.runPromise(sessionOver({ repo: 'preamble', issueNumber: 23 }, { runtime }));
+      yield* sessionOver({ repo: 'preamble', issueNumber: 23 }, { runtime });
 
-    expect(runtime.prompts[0]).toContain('implement issue');
-    expect(runtime.prompts[0]).toContain('no user input');
-  });
+      expect(runtime.prompts[0]).toContain('implement issue');
+      expect(runtime.prompts[0]).toContain('no user input');
+    }),
+  );
 
-  it('records a failed turn with state and diagnostics on disk, never retrying', async () => {
-    const projectDir = await seedProject(root, 'noretry');
+  it.effect('records a failed turn with state and diagnostics on disk, never retrying', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'noretry'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('turn that fails');
@@ -614,37 +634,45 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const runtime = fakeRuntime('failed');
+      const runtime = fakeRuntime('failed');
 
-    await Effect.runPromise(sessionOver({ repo: 'noretry', issueNumber: 24 }, { runtime }));
+      yield* sessionOver({ repo: 'noretry', issueNumber: 24 }, { runtime });
 
-    expect(runtime.prompts).toHaveLength(1); // no retry after the failed turn
+      expect(runtime.prompts).toHaveLength(1); // no retry after the failed turn
 
-    const receiptDirs = await readdir(join(sessionsRoot, 'noretry'));
-    const receiptDir = join(sessionsRoot, 'noretry', receiptDirs[0] ?? '');
-    const files = await readdir(receiptDir);
+      const receiptDirs = yield* Effect.promise(() => readdir(join(sessionsRoot, 'noretry')));
+      const receiptDir = join(sessionsRoot, 'noretry', receiptDirs[0] ?? '');
+      const files = yield* Effect.promise(() => readdir(receiptDir));
 
-    expect(files).toContain('manifest.json');
-    expect(files).toContain('turn-1.json');
+      expect(files).toContain('manifest.json');
+      expect(files).toContain('turn-1.json');
 
-    const raw = JSON.parse(await readFile(join(receiptDir, 'manifest.json'), 'utf8')) as unknown;
-    const persisted = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
+      const raw = JSON.parse(
+        yield* Effect.promise(() => readFile(join(receiptDir, 'manifest.json'), 'utf8')),
+      ) as unknown;
+      const persisted = Schema.decodeUnknownSync(SessionManifestSchema)(raw);
 
-    expect(persisted.state).toBe('failed');
+      expect(persisted.state).toBe('failed');
 
-    const transcript = await readFile(join(receiptDir, 'session.transcript.md'), 'utf8');
+      const transcript = yield* Effect.promise(() =>
+        readFile(join(receiptDir, 'session.transcript.md'), 'utf8'),
+      );
 
-    expect(transcript).toContain('## turn 1'); // transcript retained through failure
-  });
+      expect(transcript).toContain('## turn 1'); // transcript retained through failure
+    }),
+  );
 
-  it('stops the flow after a failed turn — later steps never run', async () => {
-    const projectDir = await seedProject(root, 'multi');
+  it.effect('stops the flow after a failed turn — later steps never run', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'multi'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('first turn fails');
@@ -654,24 +682,26 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const runtime = fakeRuntime('failed');
+      const runtime = fakeRuntime('failed');
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'multi', issueNumber: 5 }, { runtime }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'multi', issueNumber: 5 }, { runtime });
 
-    expect(runtime.prompts).toHaveLength(1); // second ctx.run never dispatched
-    expect(manifest.state).toBe('failed');
-  });
+      expect(runtime.prompts).toHaveLength(1); // second ctx.run never dispatched
+      expect(manifest.state).toBe('failed');
+    }),
+  );
 
-  it('records the PR URL when the flow opens a draft PR through ctx.tracker', async () => {
-    const projectDir = await seedProject(root, 'prflow');
+  it.effect('records the PR URL when the flow opens a draft PR through ctx.tracker', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'prflow'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('implement issue');
@@ -681,19 +711,23 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'prflow', issueNumber: 6 }));
+      const { manifest } = yield* sessionOver({ repo: 'prflow', issueNumber: 6 });
 
-    expect(manifest.prUrl).toBe('https://example.invalid/prflow/pull/99');
-  });
+      expect(manifest.prUrl).toBe('https://example.invalid/prflow/pull/99');
+    }),
+  );
 
-  it('executes gate commands through ctx.sh inside the sandbox', async () => {
-    const projectDir = await seedProject(root, 'gates');
+  it.effect('executes gate commands through ctx.sh inside the sandbox', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'gates'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     const code = await ctx.sh(['pnpm', 'lint']);
@@ -706,22 +740,28 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'gates', issueNumber: 8 }));
+      const { manifest } = yield* sessionOver({ repo: 'gates', issueNumber: 8 });
 
-    expect(manifest.state).toBe('completed');
-  });
+      expect(manifest.state).toBe('completed');
+    }),
+  );
 
-  it('stages declared skills into the worktree at the runtime project path before the flow runs', async () => {
-    await seedProject(root, 'staging');
+  it.effect(
+    'stages declared skills into the worktree at the runtime project path before the flow runs',
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedProject(root, 'staging'));
 
-    // The flow sees the staged skill through the worktree the sandbox mounts.
-    const projectDir = join(root, 'projects', 'staging');
+        // The flow sees the staged skill through the worktree the sandbox mounts.
+        const projectDir = join(root, 'projects', 'staging');
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+        yield* Effect.promise(() =>
+          writeFile(
+            join(projectDir, 'flow.ts'),
+            `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     const { readFile } = await import('node:fs/promises');
@@ -735,56 +775,58 @@ export default flow;
 
 export default flow;
 `,
-    );
+          ),
+        );
 
-    const result = await Effect.runPromise(
-      sessionOver({ repo: 'staging', issueNumber: 12 }).pipe(
-        Effect.map((ran) => {
-          // The flow itself asserts the staged SKILL.md's content through the worktree path —
-          // a completed session means the runtime-visible staging path held the skill.
-          expect(ran.manifest.state).toBe('completed');
-        }),
-      ),
-    );
+        const ran = yield* sessionOver({ repo: 'staging', issueNumber: 12 });
 
-    expect(result).toBeUndefined();
-  });
+        // The flow itself asserts the staged SKILL.md's content through the worktree path —
+        // a completed session means the runtime-visible staging path held the skill.
+        expect(ran.manifest.state).toBe('completed');
+      }),
+  );
 
-  it('fails fast on a skill the pool does not have, before any tracker claim', async () => {
-    const projectDir = await seedProject(root, 'noskill');
+  it.effect('fails fast on a skill the pool does not have, before any tracker claim', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'noskill'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['nonexistent'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {},
 };
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const tracker = fakeTracker();
-    const git = fakeGit();
-    const error = await sessionFailure({ repo: 'noskill', issueNumber: 13 }, { tracker, git });
+      const tracker = fakeTracker();
+      const git = fakeGit();
+      const error = yield* sessionFailure({ repo: 'noskill', issueNumber: 13 }, { tracker, git });
 
-    if (!isFakeTracker(tracker)) {
-      throw new Error('expected the fake tracker with call recording');
-    }
+      if (!isFakeTracker(tracker)) {
+        throw new Error('expected the fake tracker with call recording');
+      }
 
-    expect(messageOf(error)).toContain('nonexistent');
-    expect(messageOf(error)).toMatch(/pool/);
+      expect(messageOf(error)).toContain('nonexistent');
+      expect(messageOf(error)).toMatch(/pool/);
 
-    expect(tracker.calls.claimed).toEqual([]);
-    expect(git.worktrees).toEqual([]);
-  });
+      expect(tracker.calls.claimed).toEqual([]);
+      expect(git.worktrees).toEqual([]);
+    }),
+  );
 
-  it('rides gate output into the session log so a red gate is diagnosable', async () => {
-    const projectDir = await seedProject(root, 'gatelog');
+  it.effect('rides gate output into the session log so a red gate is diagnosable', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'gatelog'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.sh(['pnpm', 'lint']);
@@ -793,61 +835,67 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const base = fakeSandbox();
-    const sandbox: Sandbox = {
-      ...base,
-      exec: (input) =>
-        Effect.map(base.exec(input), (executed) => ({
-          ...executed,
-          exitCode: 1,
-          stdout: '',
-          stderr: 'oops: the lint failed',
-        })),
-    };
+      const base = fakeSandbox();
+      const sandbox: Sandbox = {
+        ...base,
+        exec: (input) =>
+          Effect.map(base.exec(input), (executed) => ({
+            ...executed,
+            exitCode: 1,
+            stdout: '',
+            stderr: 'oops: the lint failed',
+          })),
+      };
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'gatelog', issueNumber: 9 }, { sandbox }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'gatelog', issueNumber: 9 }, { sandbox });
 
-    const log = await readFile(
-      join(
-        sessionDir(sessionsRoot, sessionRelDir('gatelog', 9, toEpochMs(manifest.startedAt))),
-        'flow.log',
-      ),
-      'utf8',
-    );
+      const log = yield* Effect.promise(() =>
+        readFile(
+          join(
+            sessionDir(sessionsRoot, sessionRelDir('gatelog', 9, toEpochMs(manifest.startedAt))),
+            'flow.log',
+          ),
+          'utf8',
+        ),
+      );
 
-    expect(log).toContain('pnpm lint');
-    expect(log).toContain('exit 1');
-    expect(log).toContain('the lint failed');
-  });
+      expect(log).toContain('pnpm lint');
+      expect(log).toContain('exit 1');
+      expect(log).toContain('the lint failed');
+    }),
+  );
 });
 
 describe('engine contract: run then status', () => {
-  it('lists the session just executed', async () => {
-    await seedProject(root, 'contract');
+  it.effect('lists the session just executed', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'contract'));
 
-    const ran = await engineOutcome(['run', 'contract', '11']);
+      const ran = yield* engineOutcome(['run', 'contract', '11']);
 
-    expect(ran.kind).toBe('session-ran');
+      expect(ran.kind).toBe('session-ran');
 
-    const listed = await engineOutcome(['status', '--json']);
+      const listed = yield* engineOutcome(['status', '--json']);
 
-    if (listed.kind == 'status') {
-      expect(listed.sessions).toHaveLength(1);
-      expect(listed.sessions[0]?.repo).toBe('contract');
-      expect(listed.sessions[0]?.issueNumber).toBe(11);
-    }
-  });
+      if (listed.kind == 'status') {
+        expect(listed.sessions).toHaveLength(1);
+        expect(listed.sessions[0]?.repo).toBe('contract');
+        expect(listed.sessions[0]?.issueNumber).toBe(11);
+      }
+    }),
+  );
 
-  it('surfaces cap-hit diagnostics through status', async () => {
-    const projectDir = await seedProject(root, 'capstatus');
+  it.effect('surfaces cap-hit diagnostics through status', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'capstatus'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -863,50 +911,56 @@ describe('engine contract: run then status', () => {
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    await engineOutcome(['run', 'capstatus', '15']);
+      yield* engineOutcome(['run', 'capstatus', '15']);
 
-    const listed = await engineOutcome(['status', '--json']);
+      const listed = yield* engineOutcome(['status', '--json']);
 
-    if (listed.kind == 'status') {
-      expect(listed.sessions[0]?.state).toBe('cap-hit');
-      expect(listed.sessions[0]?.capHit).toMatch(/turn cap/);
-    }
-  });
+      if (listed.kind == 'status') {
+        expect(listed.sessions[0]?.state).toBe('cap-hit');
+        expect(listed.sessions[0]?.capHit).toMatch(/turn cap/);
+      }
+    }),
+  );
 
-  it('reports a malformed receipt manifest as a failure, not a throw', async () => {
-    const corrupt = join(sessionsRoot, 'corrupt', '1-bad');
+  it.effect('reports a malformed receipt manifest as a failure, not a throw', () =>
+    Effect.gen(function* () {
+      const corrupt = join(sessionsRoot, 'corrupt', '1-bad');
 
-    await mkdir(corrupt, { recursive: true });
-    await writeFile(join(corrupt, 'manifest.json'), '{not json');
+      yield* Effect.promise(() => mkdir(corrupt, { recursive: true }));
+      yield* Effect.promise(() => writeFile(join(corrupt, 'manifest.json'), '{not json'));
 
-    const listed = await engineOutcome(['status', '--json']);
+      const listed = yield* engineOutcome(['status', '--json']);
 
-    expect(listed.kind).toBe('status'); // corrupt dir skipped, no rejection
-  });
+      expect(listed.kind).toBe('status'); // corrupt dir skipped, no rejection
+    }),
+  );
 });
 
 describe('receipt regressions', () => {
-  it('preserves cap-hit as the terminal state, not failed', async () => {
-    await seedProject(root, 'capflow');
-    const runtime = fakeRuntime('cap-hit');
+  it.effect('preserves cap-hit as the terminal state, not failed', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'capflow'));
+      const runtime = fakeRuntime('cap-hit');
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'capflow', issueNumber: 12 }, { runtime }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'capflow', issueNumber: 12 }, { runtime });
 
-    expect(manifest.state).toBe('cap-hit');
-    expect(manifest.turns).toHaveLength(1);
-    expect(manifest.turns[0]?.exitState).toBe('cap-hit');
-  });
+      expect(manifest.state).toBe('cap-hit');
+      expect(manifest.turns).toHaveLength(1);
+      expect(manifest.turns[0]?.exitState).toBe('cap-hit');
+    }),
+  );
 
-  it('writes flow.log and turn transcripts alongside the schema files', async () => {
-    const projectDir = await seedProject(root, 'logged');
+  it.effect('writes flow.log and turn transcripts alongside the schema files', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'logged'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     ctx.log('cloned repository');
@@ -917,30 +971,36 @@ describe('receipt regressions', () => {
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'logged', issueNumber: 13 }));
+      const { manifest } = yield* sessionOver({ repo: 'logged', issueNumber: 13 });
 
-    expect(manifest.state).toBe('completed');
+      expect(manifest.state).toBe('completed');
 
-    const receiptDirs = await readdir(join(sessionsRoot, 'logged'));
-    const receiptDir = join(sessionsRoot, 'logged', receiptDirs[0] ?? '');
+      const receiptDirs = yield* Effect.promise(() => readdir(join(sessionsRoot, 'logged')));
+      const receiptDir = join(sessionsRoot, 'logged', receiptDirs[0] ?? '');
 
-    const log = await readFile(join(receiptDir, 'flow.log'), 'utf8');
+      const log = yield* Effect.promise(() => readFile(join(receiptDir, 'flow.log'), 'utf8'));
 
-    expect(log).toBe('cloned repository\ndispatched turn 1\n');
+      expect(log).toBe('cloned repository\ndispatched turn 1\n');
 
-    const transcript = await readFile(join(receiptDir, 'turn-1.transcript.md'), 'utf8');
+      const transcript = yield* Effect.promise(() =>
+        readFile(join(receiptDir, 'turn-1.transcript.md'), 'utf8'),
+      );
 
-    expect(transcript).toContain('implement issue');
-  });
+      expect(transcript).toContain('implement issue');
+    }),
+  );
 
-  it('surfaces the last log line through status', async () => {
-    const projectDir = await seedProject(root, 'contractlog');
+  it.effect('surfaces the last log line through status', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'contractlog'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     ctx.log('cloned repository');
@@ -951,19 +1011,23 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    await engineOutcome(['run', 'contractlog', '14']);
+      yield* engineOutcome(['run', 'contractlog', '14']);
 
-    const listed = await engineOutcome(['status', '--json']);
+      const listed = yield* engineOutcome(['status', '--json']);
 
-    if (listed.kind == 'status') {
-      expect(listed.sessions[0]?.lastLog).toBe('dispatched turn 1');
-    }
-  });
+      if (listed.kind == 'status') {
+        expect(listed.sessions[0]?.lastLog).toBe('dispatched turn 1');
+      }
+    }),
+  );
 });
 
 describe('per-repo lock', () => {
+  // Plain `it`: the overlap window is a real 25ms setTimeout — the lock queue is internal and
+  // no deterministic hook exists at this seam (see file head for the live-clock policy).
   it('serializes image build across two concurrent runs on one repo; worktrees stay parallel', async () => {
     await seedProject(root, 'demo');
     const git = fakeGit();
@@ -1017,6 +1081,9 @@ describe('per-repo lock', () => {
     expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
   });
 
+  // Plain `it`: the wait cap polls the kernel's Effect Clock (`Effect.sleep` cadence) — a
+  // TestClock would freeze the retry schedule and hang the test; the live clock is required
+  // (see file head).
   it('fails naming pid and holding age once the lock wait cap is spent on a live holder', async () => {
     // A live holder means another live process: a real child, killed once the test ends.
     const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
@@ -1055,6 +1122,9 @@ describe('per-repo lock', () => {
     }
   });
 
+  // Plain `it`: the holder's unlink lands on a real timer while the waiter polls on the live
+  // Effect Clock (`Effect.sleep` cadence, frozen by a TestClock); the two must share one
+  // timeline (see file head).
   it('hands a cross-process waiter the lock once the holder releases', async () => {
     // A live holder means another live process: a real child, killed once the test ends.
     const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
@@ -1088,97 +1158,112 @@ describe('per-repo lock', () => {
     }
   });
 
-  it('breaks and takes a stale lock left by a dead session', async () => {
-    await seedProject(root, 'demo');
-    const git = fakeGit();
-    const lockPath = await writeRepoLock(root, 'demo', { pid: deadPid(), at: toEpochMs(now()) });
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'demo', issueNumber: 7 }, { git }),
-    );
+  it.effect('breaks and takes a stale lock left by a dead session', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'demo'));
+      const git = fakeGit();
+      const lockPath = yield* Effect.promise(() =>
+        writeRepoLock(root, 'demo', { pid: deadPid(), at: toEpochMs(now()) }),
+      );
+      const { manifest } = yield* sessionOver({ repo: 'demo', issueNumber: 7 }, { git });
 
-    expect(manifest.state).toBe('completed');
-    expect(git.worktrees).toHaveLength(1);
+      expect(manifest.state).toBe('completed');
+      expect(git.worktrees).toHaveLength(1);
 
-    // Taken by this run, released cleanly on completion
-    expect(await fileExists(lockPath)).toBe(false);
-  });
+      // Taken by this run, released cleanly on completion
+      expect(yield* Effect.promise(() => fileExists(lockPath))).toBe(false);
+    }),
+  );
 
-  it('releases the lock when the tracker read or claim fails after acquisition', async () => {
-    await seedProject(root, 'demo');
-    const tracker = fakeTracker();
-    const broken: Tracker = {
-      ...tracker,
-      getIssue: () => Effect.fail(new UnavailableError({})),
-    };
-    const git = fakeGit();
+  it.effect('releases the lock when the tracker read or claim fails after acquisition', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'demo'));
+      const tracker = fakeTracker();
+      const broken: Tracker = {
+        ...tracker,
+        getIssue: () => Effect.fail(new UnavailableError({})),
+      };
+      const git = fakeGit();
 
-    const error = await sessionFailure({ repo: 'demo', issueNumber: 7 }, { tracker: broken, git });
+      const error = yield* sessionFailure(
+        { repo: 'demo', issueNumber: 7 },
+        { tracker: broken, git },
+      );
 
-    expect(error instanceof UnavailableError).toBe(true);
-    expect(git.clones).toEqual([]);
+      expect(error instanceof UnavailableError).toBe(true);
+      expect(git.clones).toEqual([]);
 
-    // A failed session must not wedge the repo: the next session acquires and runs.
-    const following = await Effect.runPromise(
-      sessionOver({ repo: 'demo', issueNumber: 7 }, { tracker, git }),
-    );
+      // A failed session must not wedge the repo: the next session acquires and runs.
+      const following = yield* sessionOver({ repo: 'demo', issueNumber: 7 }, { tracker, git });
 
-    expect(following.manifest.state).toBe('completed');
-    expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
-  });
+      expect(following.manifest.state).toBe('completed');
+      expect(yield* Effect.promise(() => fileExists(join(root, 'locks', 'demo.lock')))).toBe(false);
+    }),
+  );
 
-  it('treats a corrupt lock file as stale — a crash mid-write cannot wedge the repo', async () => {
-    await seedProject(root, 'demo');
+  it.effect('treats a corrupt lock file as stale — a crash mid-write cannot wedge the repo', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'demo'));
 
-    await writeRepoLock(root, 'demo', { pid: 12.5, at: toEpochMs(now()) });
+      yield* Effect.promise(() => writeRepoLock(root, 'demo', { pid: 12.5, at: toEpochMs(now()) }));
 
-    const { manifest } = await Effect.runPromise(sessionOver({ repo: 'demo', issueNumber: 7 }));
+      const { manifest } = yield* sessionOver({ repo: 'demo', issueNumber: 7 });
 
-    expect(manifest.state).toBe('completed');
-    expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
-  });
+      expect(manifest.state).toBe('completed');
+      expect(yield* Effect.promise(() => fileExists(join(root, 'locks', 'demo.lock')))).toBe(false);
+    }),
+  );
 });
 
 describe('runSession notifications', () => {
-  it('pages failed when the runtime turn fails', async () => {
-    await seedProject(root, 'notifyfail');
-    const runtime = fakeRuntime('failed');
-    const notifier = fakeNotifier();
+  it.effect('pages failed when the runtime turn fails', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'notifyfail'));
+      const runtime = fakeRuntime('failed');
+      const notifier = fakeNotifier();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'notifyfail', issueNumber: 9 }, { runtime, notifier }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'notifyfail', issueNumber: 9 },
+        { runtime, notifier },
+      );
 
-    expect(manifest.state).toBe('failed');
-    expect(notifier.events).toHaveLength(1);
-    expect(notifier.events[0]).toMatchObject({
-      repo: 'notifyfail',
-      issueNumber: 9,
-      event: 'failed',
-      target: null,
-    });
-    expect(notifier.events[0]?.summary).toContain('notifyfail#9');
-  });
+      expect(manifest.state).toBe('failed');
+      expect(notifier.events).toHaveLength(1);
+      expect(notifier.events[0]).toMatchObject({
+        repo: 'notifyfail',
+        issueNumber: 9,
+        event: 'failed',
+        target: null,
+      });
+      expect(notifier.events[0]?.summary).toContain('notifyfail#9');
+    }),
+  );
 
-  it('pages cap-hit when the turn budget is breached', async () => {
-    await seedProject(root, 'notifycap');
-    const runtime = fakeRuntime('cap-hit');
-    const notifier = fakeNotifier();
+  it.effect('pages cap-hit when the turn budget is breached', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'notifycap'));
+      const runtime = fakeRuntime('cap-hit');
+      const notifier = fakeNotifier();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'notifycap', issueNumber: 12 }, { runtime, notifier }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'notifycap', issueNumber: 12 },
+        { runtime, notifier },
+      );
 
-    expect(manifest.state).toBe('cap-hit');
-    expect(notifier.events).toHaveLength(1);
-    expect(notifier.events[0]?.event).toBe('cap-hit');
-  });
+      expect(manifest.state).toBe('cap-hit');
+      expect(notifier.events).toHaveLength(1);
+      expect(notifier.events[0]?.event).toBe('cap-hit');
+    }),
+  );
 
-  it('pages pr-opened when the flow opens a draft PR, once per PR', async () => {
-    const projectDir = await seedProject(root, 'notifypr');
+  it.effect('pages pr-opened when the flow opens a draft PR, once per PR', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'notifypr'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: { agent: 'pi', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
   run: async (ctx) => {
     await ctx.run('implement issue');
@@ -1188,83 +1273,94 @@ describe('runSession notifications', () => {
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const notifier = fakeNotifier();
+      const notifier = fakeNotifier();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'notifypr', issueNumber: 6 }, { notifier }),
-    );
+      const { manifest } = yield* sessionOver({ repo: 'notifypr', issueNumber: 6 }, { notifier });
 
-    expect(manifest.prUrl).toBe('https://example.invalid/notifypr/pull/99');
+      expect(manifest.prUrl).toBe('https://example.invalid/notifypr/pull/99');
 
-    expect(notifier.events).toHaveLength(1);
-    expect(notifier.events[0]).toMatchObject({
-      repo: 'notifypr',
-      issueNumber: 6,
-      event: 'pr-opened',
-      target: null,
-    });
-    expect(notifier.events[0]?.summary).toContain('https://example.invalid/notifypr/pull/99');
-  });
+      expect(notifier.events).toHaveLength(1);
+      expect(notifier.events[0]).toMatchObject({
+        repo: 'notifypr',
+        issueNumber: 6,
+        event: 'pr-opened',
+        target: null,
+      });
+      expect(notifier.events[0]?.summary).toContain('https://example.invalid/notifypr/pull/99');
+    }),
+  );
 
-  it('stays silent on a completed session with no PR', async () => {
-    await seedProject(root, 'notifyquiet');
-    const notifier = fakeNotifier();
+  it.effect('stays silent on a completed session with no PR', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'notifyquiet'));
+      const notifier = fakeNotifier();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'notifyquiet', issueNumber: 3 }, { notifier }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'notifyquiet', issueNumber: 3 },
+        { notifier },
+      );
 
-    expect(manifest.state).toBe('completed');
-    expect(notifier.events).toEqual([]);
-  });
+      expect(manifest.state).toBe('completed');
+      expect(notifier.events).toEqual([]);
+    }),
+  );
 
-  it('rides the per-project notify target override on every page', async () => {
-    const projectDir = await seedProject(root, 'notifytarget');
+  it.effect('rides the per-project notify target override on every page', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'notifytarget'));
 
-    await writeFile(
-      join(projectDir, 'project.json'),
-      JSON.stringify({
-        repo: 'notifytarget',
-        remote: seedRemote('notifytarget'),
-        state: 'active',
-        notify: { target: 'https://ntfy.invalid/acme/notifytarget' },
-      }),
-    );
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'project.json'),
+          JSON.stringify({
+            repo: 'notifytarget',
+            remote: seedRemote('notifytarget'),
+            state: 'active',
+            notify: { target: 'https://ntfy.invalid/acme/notifytarget' },
+          }),
+        ),
+      );
 
-    const runtime = fakeRuntime('failed');
-    const notifier = fakeNotifier();
+      const runtime = fakeRuntime('failed');
+      const notifier = fakeNotifier();
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'notifytarget', issueNumber: 5 }, { runtime, notifier }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'notifytarget', issueNumber: 5 },
+        { runtime, notifier },
+      );
 
-    expect(manifest.state).toBe('failed');
-    expect(notifier.events).toHaveLength(1);
-    expect(notifier.events[0]?.target).toBe('https://ntfy.invalid/acme/notifytarget');
-  });
+      expect(manifest.state).toBe('failed');
+      expect(notifier.events).toHaveLength(1);
+      expect(notifier.events[0]?.target).toBe('https://ntfy.invalid/acme/notifytarget');
+    }),
+  );
 
-  it('logs a failed delivery instead of failing the session', async () => {
-    await seedProject(root, 'notifydown');
-    const runtime = fakeRuntime('failed');
-    const notifier: Notifier = {
-      notify: () => Effect.fail(new UnavailableError({ cause: new Error('webhook unreachable') })),
-    };
+  it.effect('logs a failed delivery instead of failing the session', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => seedProject(root, 'notifydown'));
+      const runtime = fakeRuntime('failed');
+      const notifier: Notifier = {
+        notify: () =>
+          Effect.fail(new UnavailableError({ cause: new Error('webhook unreachable') })),
+      };
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'notifydown', issueNumber: 7 }, { runtime, notifier }),
-    );
+      const { manifest } = yield* sessionOver(
+        { repo: 'notifydown', issueNumber: 7 },
+        { runtime, notifier },
+      );
 
-    expect(manifest.state).toBe('failed');
+      expect(manifest.state).toBe('failed');
 
-    const receiptDirs = await readdir(join(sessionsRoot, 'notifydown'));
-    const flowLog = await readFile(
-      join(sessionsRoot, 'notifydown', receiptDirs[0] ?? '', 'flow.log'),
-      'utf8',
-    );
+      const receiptDirs = yield* Effect.promise(() => readdir(join(sessionsRoot, 'notifydown')));
+      const flowLog = yield* Effect.promise(() =>
+        readFile(join(sessionsRoot, 'notifydown', receiptDirs[0] ?? '', 'flow.log'), 'utf8'),
+      );
 
-    expect(flowLog).toContain('notify failed');
-    expect(flowLog).toContain('webhook unreachable');
-  });
+      expect(flowLog).toContain('notify failed');
+      expect(flowLog).toContain('webhook unreachable');
+    }),
+  );
 });
