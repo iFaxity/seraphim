@@ -1,52 +1,70 @@
-import { describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Effect, Layer } from 'effect';
+import { describe, expect } from 'vite-plus/test';
 
-import { type ErrorOutcome } from './command.ts';
-import { type CommandHelpOutcome, type HelpOutcome } from './commands/help.ts';
+import { type CommandServices } from './command.ts';
 import { commandList, getCommand } from './dispatcher.ts';
 
-import { runWithStack as run } from '../../../test/run.ts';
+import { FakeGit } from '../../../test/fakes/git.ts';
+import { FakeNotifier } from '../../../test/fakes/notifier.ts';
+import { FakeRuntime } from '../../../test/fakes/runtime.ts';
+import { FakeSandbox } from '../../../test/fakes/sandbox.ts';
+import { FakeTracker } from '../../../test/fakes/tracker.ts';
+import { run } from '../../../test/run.ts';
+
+const commandStack = Layer.mergeAll(
+  FakeTracker.layer(),
+  FakeSandbox.layer(),
+  FakeRuntime.layer(),
+  FakeGit.layer(),
+  FakeNotifier.layer(),
+) as Layer.Layer<CommandServices>;
 
 describe('command dispatcher', () => {
-  it('lists every command in the help table — the dispatcher is the only command list', async () => {
-    const help = getCommand('help');
+  it.effect('lists every command in the help table — the dispatcher is the only command list', () =>
+    Effect.gen(function* () {
+      const help = getCommand('help');
 
-    expect(help, 'help must be a dispatcher row').toBeDefined();
+      expect(help, 'help must be a dispatcher row').toBeDefined();
 
-    if (!help) {
-      return;
-    }
+      if (!help) {
+        return;
+      }
 
-    const outcome = await run<HelpOutcome>(help.handler([]) as never);
+      const outcome = yield* run(help.handler([]) as never, commandStack); // getCommand's row union makes handler a union of Effects TS won't collapse
 
-    expect(outcome).toMatchObject({
-      kind: 'help',
-      entries: commandList().map(({ usage, summary }) => ({ usage, summary })),
-    });
-  });
-
-  it('answers help for exactly the listed commands, so membership cannot drift', async () => {
-    const help = getCommand('help');
-
-    expect(help, 'help must be a dispatcher row').toBeDefined();
-
-    if (!help) {
-      return;
-    }
-
-    for (const { name, summary, usage } of commandList()) {
-      const perCommand = await run<CommandHelpOutcome>(help.handler([name]) as never);
-
-      expect(perCommand, `'help ${name}' must answer with the row`).toMatchObject({
-        kind: 'command-help',
-        summary,
-        usage,
+      expect(outcome).toMatchObject({
+        kind: 'help',
+        entries: commandList().map(({ usage, summary }) => ({ usage, summary })),
       });
+    }),
+  );
 
-      const nearMiss = await run<ErrorOutcome>(help.handler([`${name}-typo`]) as never);
+  it.effect('answers help for exactly the listed commands, so membership cannot drift', () =>
+    Effect.gen(function* () {
+      const help = getCommand('help');
 
-      expect(nearMiss, `'help ${name}-typo' must fail as unknown`).toMatchObject({
-        kind: 'error',
-      });
-    }
-  });
+      expect(help, 'help must be a dispatcher row').toBeDefined();
+
+      if (!help) {
+        return;
+      }
+
+      for (const { name, summary, usage } of commandList()) {
+        const perCommand = yield* run(help.handler([name]) as never, commandStack);
+
+        expect(perCommand, `'help ${name}' must answer with the row`).toMatchObject({
+          kind: 'command-help',
+          summary,
+          usage,
+        });
+
+        const nearMiss = yield* run(help.handler([`${name}-typo`]) as never, commandStack);
+
+        expect(nearMiss, `'help ${name}-typo' must fail as unknown`).toMatchObject({
+          kind: 'error',
+        });
+      }
+    }),
+  );
 });

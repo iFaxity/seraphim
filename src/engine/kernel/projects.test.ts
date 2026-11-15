@@ -1,7 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer } from 'effect';
-import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Cause, Effect, Exit, Layer } from 'effect';
+import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { type CommandServices } from './command.ts';
 import { loadFlow } from './flow.ts';
@@ -13,6 +14,7 @@ import {
   registerProject,
 } from './projects.ts';
 
+import { expectTaggedFailure } from '../../../test/exit.ts';
 import { FakeGit, fakeGit } from '../../../test/fakes/git.ts';
 import { FakeNotifier } from '../../../test/fakes/notifier.ts';
 import { FakeRuntime } from '../../../test/fakes/runtime.ts';
@@ -47,328 +49,316 @@ function projectLayer(git: Git) {
 }
 
 describe('registerProject', () => {
-  it('creates the central directory: record, flow template, Dockerfile and env slots', async () => {
-    const git = fakeGit();
+  it.effect('creates the central directory: record, flow template, Dockerfile and env slots', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    const result = await run(registerProject(REMOTE), projectLayer(git));
+      const result = yield* run(registerProject(REMOTE), projectLayer(git));
 
-    expect(result.success).toBe(true);
+      expect(result.record).toEqual({
+        repo: 'widgets',
+        remote: REMOTE,
+        state: 'active',
+        notify: null,
+      });
+      expect(result.reactivated).toBe(false);
+      expect(result.artifacts).toEqual([
+        'projects/widgets/flow.ts',
+        'projects/widgets/Dockerfile',
+        'projects/widgets/.env',
+      ]);
 
-    if (!result.success) {
-      return;
-    }
+      const files = yield* Effect.promise(() => readdir(join(root, 'projects', 'widgets')));
 
-    expect(result.data.record).toEqual({
-      repo: 'widgets',
-      remote: REMOTE,
-      state: 'active',
-      notify: null,
-    });
-    expect(result.data.reactivated).toBe(false);
-    expect(result.data.artifacts).toEqual([
-      'projects/widgets/flow.ts',
-      'projects/widgets/Dockerfile',
-      'projects/widgets/.env',
-    ]);
+      expect(files).toEqual(
+        expect.arrayContaining(['project.json', 'flow.ts', 'Dockerfile', '.env']),
+      );
 
-    const files = await readdir(join(root, 'projects', 'widgets'));
+      const stored = ProjectRecordSchema.parse(
+        JSON.parse(
+          yield* Effect.promise(() =>
+            readFile(join(root, 'projects', 'widgets', 'project.json'), 'utf8'),
+          ),
+        ),
+      );
 
-    expect(files).toEqual(
-      expect.arrayContaining(['project.json', 'flow.ts', 'Dockerfile', '.env']),
-    );
+      expect(stored).toEqual(result.record);
+    }),
+  );
 
-    const stored = ProjectRecordSchema.parse(
-      JSON.parse(await readFile(join(root, 'projects', 'widgets', 'project.json'), 'utf8')),
-    );
+  it.effect('seeds the home .gitignore for kernel state, keeping an owner-curated one intact', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    expect(stored).toEqual(result.data.record);
-  });
+      yield* run(registerProject(REMOTE, 'widgets'), projectLayer(git));
+      expect(yield* Effect.promise(() => readFile(join(root, '.gitignore'), 'utf8'))).toEqual(
+        expect.stringContaining('.env\nsessions/\nrepos/\nworktrees/\nlocks/'),
+      );
 
-  it('seeds the home .gitignore for kernel state, keeping an owner-curated one intact', async () => {
-    const git = fakeGit();
+      // Owner content is never clobbered by a re-register.
+      yield* Effect.promise(() => writeFile(join(root, '.gitignore'), 'sessions/\n'));
+      yield* run(registerProject(REMOTE, 'other'), projectLayer(git));
+      expect(yield* Effect.promise(() => readFile(join(root, '.gitignore'), 'utf8'))).toBe(
+        'sessions/\n',
+      );
+    }),
+  );
 
-    await run(registerProject(REMOTE, 'widgets'), projectLayer(git));
-    expect(await readFile(join(root, '.gitignore'), 'utf8')).toEqual(
-      expect.stringContaining('.env\nsessions/\nrepos/\nworktrees/\nlocks/'),
-    );
+  it.effect('seeds a flow template that loads with no imports or engine tree present', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    // Owner content is never clobbered by a re-register.
-    await writeFile(join(root, '.gitignore'), 'sessions/\n');
-    await run(registerProject(REMOTE, 'other'), projectLayer(git));
-    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('sessions/\n');
-  });
+      yield* run(registerProject(REMOTE), projectLayer(git));
 
-  it('seeds a flow template that loads with no imports or engine tree present', async () => {
-    const git = fakeGit();
+      const flow = yield* run(loadFlow(root, 'widgets'), Layer.empty);
 
-    await run(registerProject(REMOTE), projectLayer(git));
+      expect(flow.config.agent).toBe('pi');
+      expect(typeof flow.run).toBe('function');
+    }),
+  );
 
-    const flow = await run(loadFlow(root, 'widgets'), Layer.empty);
+  it.effect('accepts an explicit project name', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    expect(flow.success).toBe(true);
+      const result = yield* run(registerProject(REMOTE, 'gadgets'), projectLayer(git));
 
-    if (flow.success) {
-      expect(flow.data.config.agent).toBe('pi');
-      expect(typeof flow.data.run).toBe('function');
-    }
-  });
+      expect(result.record.repo).toBe('gadgets');
+    }),
+  );
 
-  it('accepts an explicit project name', async () => {
-    const git = fakeGit();
+  it.effect('derives the name from scp-like remotes', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    const result = await run(registerProject(REMOTE, 'gadgets'), projectLayer(git));
+      const result = yield* run(
+        registerProject('git@example.invalid:acme/pipes.git'),
+        projectLayer(git),
+      );
 
-    expect(result.success).toBe(true);
+      expect(result.record.repo).toBe('pipes');
+    }),
+  );
 
-    if (result.success) {
-      expect(result.data.record.repo).toBe('gadgets');
-    }
-  });
+  it.effect('fails fast when the remote is unreachable and seeds nothing', () =>
+    Effect.gen(function* () {
+      const broken = {
+        ...fakeGit(),
+        probeRemote: () => Effect.fail(new GitError({ message: 'ls-remote exited 128' })),
+      };
 
-  it('derives the name from scp-like remotes', async () => {
-    const git = fakeGit();
+      const error = yield* expectTaggedFailure(run(registerProject(REMOTE), projectLayer(broken)));
 
-    const result = await run(
-      registerProject('git@example.invalid:acme/pipes.git'),
-      projectLayer(git),
-    );
+      expect(error.message).toMatch(/remote not reachable '.*widgets\.git'/);
 
-    expect(result.success).toBe(true);
+      const exit = yield* Effect.exit(Effect.promise(() => readdir(join(root, 'projects'))));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain('ENOENT');
+      }
+    }),
+  );
 
-    if (result.success) {
-      expect(result.data.record.repo).toBe('pipes');
-    }
-  });
+  it.effect('fails fast on duplicate registration', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      yield* run(registerProject(REMOTE), projectLayer(git));
 
-  it('fails fast when the remote is unreachable and seeds nothing', async () => {
-    const broken = {
-      ...fakeGit(),
-      probeRemote: () => Effect.fail(new GitError({ message: 'ls-remote exited 128' })),
-    };
+      const error = yield* expectTaggedFailure(run(registerProject(REMOTE), projectLayer(git)));
 
-    const result = await run(registerProject(REMOTE), projectLayer(broken));
+      expect(error.message).toMatch(/already registered/);
+    }),
+  );
 
-    expect(result.success).toBe(false);
+  it.effect('reactivates an inactive project and stores the new remote', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      yield* run(registerProject(REMOTE), projectLayer(git));
+      yield* run(deactivateProject('widgets'), projectLayer(git));
+      const newer = 'https://example.invalid/acme/widgets-fork.git';
+      const result = yield* run(registerProject(newer, 'widgets'), projectLayer(git));
 
-    if (!result.success) {
-      expect(result.error.message).toMatch(/remote not reachable '.*widgets\.git'/);
-    }
+      expect(result.reactivated).toBe(true);
+      expect(result.record.remote).toBe(newer);
+    }),
+  );
 
-    await expect(readdir(join(root, 'projects'))).rejects.toMatchObject({ code: 'ENOENT' });
-  });
+  it.effect('fails fast when it cannot derive a project name', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-  it('fails fast on duplicate registration', async () => {
-    const git = fakeGit();
-    await run(registerProject(REMOTE), projectLayer(git));
+      const error = yield* expectTaggedFailure(
+        run(registerProject('https://example.invalid/'), projectLayer(git)),
+      );
 
-    const again = await run(registerProject(REMOTE), projectLayer(git));
+      expect(error.message).toMatch(/cannot derive a project name/);
+    }),
+  );
 
-    expect(again.success).toBe(false);
+  it.effect('rejects unsafe project names', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    if (!again.success) {
-      expect(again.error.message).toMatch(/already registered/);
-    }
-  });
+      const error = yield* expectTaggedFailure(
+        run(registerProject(REMOTE, '../escape'), projectLayer(git)),
+      );
 
-  it('reactivates an inactive project and stores the new remote', async () => {
-    const git = fakeGit();
-    await run(registerProject(REMOTE), projectLayer(git));
-    await run(deactivateProject('widgets'), projectLayer(git));
-    const newer = 'https://example.invalid/acme/widgets-fork.git';
-    const result = await run(registerProject(newer, 'widgets'), projectLayer(git));
+      expect(error.message).toMatch(/invalid project name/);
+    }),
+  );
 
-    expect(result.success).toBe(true);
+  it.effect('never overwrites an owner-edited flow file', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      const projectDir = join(root, 'projects', 'widgets');
 
-    if (result.success) {
-      expect(result.data.reactivated).toBe(true);
-      expect(result.data.record.remote).toBe(newer);
-    }
-  });
+      yield* Effect.promise(() => mkdir(projectDir, { recursive: true }));
+      yield* Effect.promise(() => writeFile(join(projectDir, 'flow.ts'), 'export default null;\n'));
 
-  it('fails fast when it cannot derive a project name', async () => {
-    const git = fakeGit();
+      yield* run(registerProject(REMOTE), projectLayer(git));
 
-    const result = await run(registerProject('https://example.invalid/'), projectLayer(git));
+      const flow = yield* Effect.promise(() => readFile(join(projectDir, 'flow.ts'), 'utf8'));
 
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/cannot derive a project name/);
-    }
-  });
-
-  it('rejects unsafe project names', async () => {
-    const git = fakeGit();
-
-    const result = await run(registerProject(REMOTE, '../escape'), projectLayer(git));
-
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/invalid project name/);
-    }
-  });
-
-  it('never overwrites an owner-edited flow file', async () => {
-    const git = fakeGit();
-    const projectDir = join(root, 'projects', 'widgets');
-
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(join(projectDir, 'flow.ts'), 'export default null;\n');
-
-    const result = await run(registerProject(REMOTE), projectLayer(git));
-
-    expect(result.success).toBe(true);
-
-    const flow = await readFile(join(projectDir, 'flow.ts'), 'utf8');
-
-    expect(flow).toBe('export default null;\n');
-  });
+      expect(flow).toBe('export default null;\n');
+    }),
+  );
 });
 
 describe('loadProject', () => {
-  it('fails fast naming the fix for an unregistered repo', async () => {
-    const read = await run(loadProject('ghost'), homeLayer());
+  it.effect('fails fast naming the fix for an unregistered repo', () =>
+    Effect.gen(function* () {
+      const error = yield* expectTaggedFailure(run(loadProject('ghost'), homeLayer()));
 
-    expect(read.success).toBe(false);
-
-    if (!read.success) {
-      expect(read.error.message).toMatch(
+      expect(error.message).toMatch(
         /unregistered project 'ghost': run 'seraphim register <git-url>' to register it/,
       );
-    }
-  });
+    }),
+  );
 
-  it('reports a corrupt record as a failure, not a throw', async () => {
-    const dir = join(root, 'projects', 'broken');
+  it.effect('reports a corrupt record as a failure, not a throw', () =>
+    Effect.gen(function* () {
+      const dir = join(root, 'projects', 'broken');
 
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'project.json'), '{not json');
+      yield* Effect.promise(() => mkdir(dir, { recursive: true }));
+      yield* Effect.promise(() => writeFile(join(dir, 'project.json'), '{not json'));
 
-    const read = await run(loadProject('broken'), homeLayer());
+      const error = yield* expectTaggedFailure(run(loadProject('broken'), homeLayer()));
 
-    expect(read.success).toBe(false);
-
-    if (!read.success) {
-      expect(read.error.message).toMatch(/invalid project record/);
-    }
-  });
+      expect(error.message).toMatch(/invalid project record/);
+    }),
+  );
 });
 
 describe('project notify override', () => {
-  it('parses a legacy record without a notify field as the null default', async () => {
-    const dir = join(root, 'projects', 'legacy');
+  it.effect('parses a legacy record without a notify field as the null default', () =>
+    Effect.gen(function* () {
+      const dir = join(root, 'projects', 'legacy');
 
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'project.json'),
-      JSON.stringify({ repo: 'legacy', remote: REMOTE, state: 'active' }),
-    );
+      yield* Effect.promise(() => mkdir(dir, { recursive: true }));
+      yield* Effect.promise(() =>
+        writeFile(
+          join(dir, 'project.json'),
+          JSON.stringify({ repo: 'legacy', remote: REMOTE, state: 'active' }),
+        ),
+      );
 
-    const read = await run(loadProject('legacy'), homeLayer());
+      const read = yield* run(loadProject('legacy'), homeLayer());
 
-    expect(read.success).toBe(true);
+      expect(read.notify).toBeNull();
+    }),
+  );
 
-    if (read.success) {
-      expect(read.data.notify).toBeNull();
-    }
-  });
+  it.effect('round-trips a per-project notify target override', () =>
+    Effect.gen(function* () {
+      const dir = join(root, 'projects', 'override');
 
-  it('round-trips a per-project notify target override', async () => {
-    const dir = join(root, 'projects', 'override');
+      yield* Effect.promise(() => mkdir(dir, { recursive: true }));
+      yield* Effect.promise(() =>
+        writeFile(
+          join(dir, 'project.json'),
+          JSON.stringify({
+            repo: 'override',
+            remote: REMOTE,
+            state: 'active',
+            notify: { target: 'https://ntfy.invalid/acme/override' },
+          }),
+        ),
+      );
 
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'project.json'),
-      JSON.stringify({
-        repo: 'override',
-        remote: REMOTE,
-        state: 'active',
-        notify: { target: 'https://ntfy.invalid/acme/override' },
-      }),
-    );
+      const read = yield* run(loadProject('override'), homeLayer());
 
-    const read = await run(loadProject('override'), homeLayer());
-
-    expect(read.success).toBe(true);
-
-    if (read.success) {
-      expect(read.data.notify?.target).toBe('https://ntfy.invalid/acme/override');
-    }
-  });
+      expect(read.notify?.target).toBe('https://ntfy.invalid/acme/override');
+    }),
+  );
 });
 
 describe('deactivateProject', () => {
-  it('marks the project inactive without deleting anything', async () => {
-    const git = fakeGit();
-    await run(registerProject(REMOTE), projectLayer(git));
+  it.effect('marks the project inactive without deleting anything', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      yield* run(registerProject(REMOTE), projectLayer(git));
 
-    const result = await run(deactivateProject('widgets'), projectLayer(git));
+      yield* run(deactivateProject('widgets'), projectLayer(git));
 
-    expect(result.success).toBe(true);
+      const files = yield* Effect.promise(() => readdir(join(root, 'projects', 'widgets')));
 
-    const files = await readdir(join(root, 'projects', 'widgets'));
+      expect(files).toContain('flow.ts');
 
-    expect(files).toContain('flow.ts');
+      const read = yield* run(loadProject('widgets'), homeLayer());
 
-    const read = await run(loadProject('widgets'), homeLayer());
+      expect(read.state).toBe('inactive');
+    }),
+  );
 
-    expect(read.success).toBe(true);
+  it.effect('fails fast for an unregistered repo', () =>
+    Effect.gen(function* () {
+      const error = yield* expectTaggedFailure(run(deactivateProject('ghost'), homeLayer()));
 
-    if (read.success) {
-      expect(read.data.state).toBe('inactive');
-    }
-  });
+      expect(error.message).toMatch(/unregistered project 'ghost'/);
+    }),
+  );
 
-  it('fails fast for an unregistered repo', async () => {
-    const result = await run(deactivateProject('ghost'), homeLayer());
+  it.effect('fails fast when already inactive', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      yield* run(registerProject(REMOTE), projectLayer(git));
+      yield* run(deactivateProject('widgets'), projectLayer(git));
 
-    expect(result.success).toBe(false);
+      const error = yield* expectTaggedFailure(
+        run(deactivateProject('widgets'), projectLayer(git)),
+      );
 
-    if (!result.success) {
-      expect(result.error.message).toMatch(/unregistered project 'ghost'/);
-    }
-  });
-
-  it('fails fast when already inactive', async () => {
-    const git = fakeGit();
-    await run(registerProject(REMOTE), projectLayer(git));
-    await run(deactivateProject('widgets'), projectLayer(git));
-
-    const result = await run(deactivateProject('widgets'), projectLayer(git));
-
-    expect(result.success).toBe(false);
-
-    if (!result.success) {
-      expect(result.error.message).toMatch(/already inactive/);
-    }
-  });
+      expect(error.message).toMatch(/already inactive/);
+    }),
+  );
 });
 
 describe('listProjects', () => {
-  it('lists registered projects sorted by repo, skipping corrupt records', async () => {
-    const git = fakeGit();
+  it.effect('lists registered projects sorted by repo, skipping corrupt records', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
 
-    await run(registerProject(REMOTE), projectLayer(git));
-    await run(registerProject('https://example.invalid/acme/apples.git'), projectLayer(git));
-    await mkdir(join(root, 'projects', 'broken'), { recursive: true });
-    await writeFile(join(root, 'projects', 'broken', 'project.json'), '{not json');
+      yield* run(registerProject(REMOTE), projectLayer(git));
+      yield* run(registerProject('https://example.invalid/acme/apples.git'), projectLayer(git));
+      yield* Effect.promise(() => mkdir(join(root, 'projects', 'broken'), { recursive: true }));
+      yield* Effect.promise(() =>
+        writeFile(join(root, 'projects', 'broken', 'project.json'), '{not json'),
+      );
 
-    const listed = await run(listProjects(), homeLayer());
+      const listed = yield* run(listProjects(), homeLayer());
 
-    expect(listed.success).toBe(true);
+      expect(listed.projects.map((p) => p.repo)).toEqual(['apples', 'widgets']);
+      expect(listed.skipped).toBe(1);
+    }),
+  );
 
-    if (listed.success) {
-      expect(listed.data.projects.map((p) => p.repo)).toEqual(['apples', 'widgets']);
-      expect(listed.data.skipped).toBe(1);
-    }
-  });
+  it.effect('lists no projects on a fresh home', () =>
+    Effect.gen(function* () {
+      const listed = yield* run(listProjects(), homeLayer());
 
-  it('lists no projects on a fresh home', async () => {
-    const listed = await run(listProjects(), homeLayer());
-
-    expect(listed).toEqual({ success: true, data: { projects: [], skipped: 0 } });
-  });
+      expect(listed).toEqual({ projects: [], skipped: 0 });
+    }),
+  );
 });
 
 describe('engine contract: register, list, deactivate', () => {
@@ -382,41 +372,39 @@ describe('engine contract: register, list, deactivate', () => {
       homeLayer(),
     ) as Layer.Layer<CommandServices>;
 
-  it('registers and lists through the engine', async () => {
-    const registered = await run(engine(['register', REMOTE]), commandLayer());
+  it.effect('registers and lists through the engine', () =>
+    Effect.gen(function* () {
+      const registered = yield* run(engine(['register', REMOTE]), commandLayer());
 
-    expect(registered.success).toBe(true);
+      if (registered.kind == 'registered') {
+        expect(registered.repo).toBe('widgets');
+        expect(registered.reactivated).toBe(false);
+      }
 
-    if (registered.success && registered.data.kind == 'registered') {
-      expect(registered.data.repo).toBe('widgets');
-      expect(registered.data.reactivated).toBe(false);
-    }
+      const listed = yield* run(engine(['list', '--json']), commandLayer());
 
-    const listed = await run(engine(['list', '--json']), commandLayer());
+      if (listed.kind == 'projects') {
+        expect(listed.projects.map((p) => p.repo)).toEqual(['widgets']);
+        expect(listed.json).toBe(true);
+      }
+    }),
+  );
 
-    expect(listed.success).toBe(true);
+  it.effect('validates register and deactivate arguments', () =>
+    Effect.gen(function* () {
+      const noUrl = yield* run(engine(['register']), commandLayer());
+      const tooMany = yield* run(engine(['register', REMOTE, 'a', 'b']), commandLayer());
 
-    if (listed.success && listed.data.kind == 'projects') {
-      expect(listed.data.projects.map((p) => p.repo)).toEqual(['widgets']);
-      expect(listed.data.json).toBe(true);
-    }
-  });
+      expect(noUrl.kind == 'error' && noUrl.message).toBe(
+        'expected usage: register <git-url> [name]',
+      );
+      expect(tooMany.kind == 'error' && tooMany.message).toBe(
+        'expected usage: register <git-url> [name]',
+      );
 
-  it('validates register and deactivate arguments', async () => {
-    const noUrl = await run(engine(['register']), commandLayer());
-    const tooMany = await run(engine(['register', REMOTE, 'a', 'b']), commandLayer());
+      const noRepo = yield* run(engine(['deactivate']), commandLayer());
 
-    expect(noUrl.success && noUrl.data.kind == 'error' && noUrl.data.message).toBe(
-      'expected usage: register <git-url> [name]',
-    );
-    expect(tooMany.success && tooMany.data.kind == 'error' && tooMany.data.message).toBe(
-      'expected usage: register <git-url> [name]',
-    );
-
-    const noRepo = await run(engine(['deactivate']), commandLayer());
-
-    expect(noRepo.success && noRepo.data.kind == 'error' && noRepo.data.message).toBe(
-      'expected usage: deactivate <repo>',
-    );
-  });
+      expect(noRepo.kind == 'error' && noRepo.message).toBe('expected usage: deactivate <repo>');
+    }),
+  );
 });

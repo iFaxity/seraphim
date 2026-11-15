@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer } from 'effect';
-import { afterAll, describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Cause, Effect, Exit, Layer } from 'effect';
+import { afterAll, describe, expect } from 'vite-plus/test';
 
 import { engine } from './engine/core/engine.ts';
 import { HomeService, homeLayout } from './engine/core/env.ts';
 import { type CommandServices } from './engine/kernel/command.ts';
-import { registerProject, type ProjectRecord } from './engine/kernel/projects.ts';
+import { registerProject } from './engine/kernel/projects.ts';
 import { DockerRunnerService, type DockerRunner } from './engine/sandboxes/docker-sandbox.ts';
 import { main } from './main.ts';
 
@@ -16,6 +17,7 @@ import { FakeNotifier } from '../test/fakes/notifier.ts';
 import { FakeRuntime } from '../test/fakes/runtime.ts';
 import { FakeSandbox } from '../test/fakes/sandbox.ts';
 import { FakeTracker } from '../test/fakes/tracker.ts';
+import { run } from '../test/run.ts';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 /**
@@ -55,91 +57,112 @@ function stashRoot(prefix: string): Promise<string> {
 }
 
 describe('engine', () => {
-  it('parses empty argv as the top-level help view', async () => {
-    const layer = testLayer(await stashRoot('seraphim-help-'));
-    const outcome = await Effect.runPromise(engine([]).pipe(Effect.provide(layer)));
+  it.effect('parses empty argv as the top-level help view', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const outcome = yield* run(engine([]), layer);
 
-    expect(outcome).toMatchObject({ kind: 'help' });
-  });
+      expect(outcome).toMatchObject({ kind: 'help' });
+    }),
+  );
 
-  it('rejects unknown commands as a failure result', async () => {
-    const layer = testLayer(await stashRoot('seraphim-help-'));
-    const outcome = await Effect.runPromise(engine(['frobnicate']).pipe(Effect.provide(layer)));
+  it.effect('rejects unknown commands as a failure result', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const outcome = yield* run(engine(['frobnicate']), layer);
 
-    expect(outcome).toMatchObject({ kind: 'error', message: /unknown command 'frobnicate'/ });
-  });
+      expect(outcome).toMatchObject({ kind: 'error', message: /unknown command 'frobnicate'/ });
+    }),
+  );
 
-  it('rejects unknown options as a failure result, not a throw', async () => {
-    const layer = testLayer(await stashRoot('seraphim-help-'));
-    const outcome = await Effect.runPromise(engine(['--verbose']).pipe(Effect.provide(layer)));
+  it.effect('rejects unknown options as a failure result, not a throw', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const outcome = yield* run(engine(['--verbose']), layer);
 
-    expect(outcome).toMatchObject({ kind: 'error', message: /unrecognized option '--verbose'/ });
-  });
+      expect(outcome).toMatchObject({ kind: 'error', message: /unrecognized option '--verbose'/ });
+    }),
+  );
 
-  it('reports unimplemented commands as an outcome, not prose', async () => {
-    const layer = testLayer(await stashRoot('seraphim-help-'));
-    const outcome = await Effect.runPromise(engine(['tick']).pipe(Effect.provide(layer)));
+  it.effect('reports unimplemented commands as an outcome, not prose', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const outcome = yield* run(engine(['tick']), layer);
 
-    expect(outcome).toEqual({ kind: 'unimplemented', command: 'tick' });
-  });
+      expect(outcome).toEqual({ kind: 'unimplemented', command: 'tick' });
+    }),
+  );
 
-  it('reports prune without an engine home as an error naming the fix', async () => {
-    // The kernel's error outcome for a missing engine home is gone — the home rides the
-    // Layer now — so the same case is HomeService unresolved from the context.
-    const homeless = Layer.mergeAll(
-      FakeTracker.layer(),
-      FakeSandbox.layer(),
-      FakeGit.layer(),
-      FakeNotifier.layer(),
-      FakeRuntime.layer(),
-    ) as Layer.Layer<CommandServices>;
-    const outcome = await Effect.runPromise(engine(['prune']).pipe(Effect.provide(homeless))).then(
-      () => {
-        throw new Error('prune without an engine home must fail');
-      },
-      (cause: unknown) => String(cause),
-    );
+  it.effect('reports prune without an engine home as an error naming the fix', () =>
+    Effect.gen(function* () {
+      // The kernel's error outcome for a missing engine home is gone — the home rides the
+      // Layer now — so the same case is HomeService unresolved from the context.
+      const homeless = Layer.mergeAll(
+        FakeTracker.layer(),
+        FakeSandbox.layer(),
+        FakeGit.layer(),
+        FakeNotifier.layer(),
+        FakeRuntime.layer(),
+      ) as Layer.Layer<CommandServices>;
+      const exit = yield* Effect.exit(run(engine(['prune']), homeless));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain('seraphim/core/Home');
+      }
+    }),
+  );
 
-    expect(outcome).toContain('seraphim/core/Home');
-  });
+  it.effect('validates run arguments and reports the error outcome', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const outcome = yield* run(engine(['run']), layer);
 
-  it('validates run arguments and reports the error outcome', async () => {
-    const layer = testLayer(await stashRoot('seraphim-help-'));
-    const outcome = await Effect.runPromise(engine(['run']).pipe(Effect.provide(layer)));
-
-    expect(outcome).toEqual({
-      kind: 'error',
-      message: 'expected usage: run <repo> <issue#>',
-    });
-  });
+      expect(outcome).toEqual({
+        kind: 'error',
+        message: 'expected usage: run <repo> <issue#>',
+      });
+    }),
+  );
 });
 
 describe('cli rendering', () => {
-  it('renders the command table for empty argv', async () => {
-    const out = await main([], testLayer(await stashRoot('seraphim-help-')));
+  it.effect('renders the command table for empty argv', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const out = yield* Effect.promise(() => main([], layer));
 
-    ['run', 'status', 'prune', 'tick', 'help'].forEach((name) => {
-      expect(out).toContain(name);
-    });
-  });
+      ['run', 'status', 'prune', 'tick', 'help'].forEach((name) => {
+        expect(out).toContain(name);
+      });
+    }),
+  );
 
-  it('renders usage for a specific command', async () => {
-    expect(await main(['help', 'run'], testLayer(await stashRoot('seraphim-help-')))).toMatch(
-      /run <repo> <issue#>/,
-    );
-  });
+  it.effect('renders usage for a specific command', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      expect(yield* Effect.promise(() => main(['help', 'run'], layer))).toMatch(
+        /run <repo> <issue#>/,
+      );
+    }),
+  );
 
-  it('renders unknown-command errors once', async () => {
-    expect(await main(['frobnicate'], testLayer(await stashRoot('seraphim-help-')))).toMatch(
-      /^error: unknown command 'frobnicate'$/,
-    );
-  });
+  it.effect('renders unknown-command errors once', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      expect(yield* Effect.promise(() => main(['frobnicate'], layer))).toMatch(
+        /^error: unknown command 'frobnicate'$/,
+      );
+    }),
+  );
 
-  it('renders one clean error line for unrecognized options', async () => {
-    expect(await main(['--verbose'], testLayer(await stashRoot('seraphim-help-')))).toMatch(
-      /^error: unrecognized option '--verbose'$/,
-    );
-  });
+  it.effect('renders one clean error line for unrecognized options', () =>
+    Effect.gen(function* () {
+      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      expect(yield* Effect.promise(() => main(['--verbose'], layer))).toMatch(
+        /^error: unrecognized option '--verbose'$/,
+      );
+    }),
+  );
 });
 
 describe('status listing', () => {
@@ -152,55 +175,63 @@ describe('status listing', () => {
     }
   });
 
-  it('renders one line per session from the receipts directory', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-status-'));
-    layer = testLayer(root, { sessionsRoot: join(root, 'sessions') });
-    const repo = 'demo';
-    const dir = join(root, 'sessions', repo, '7-1727414400000');
+  it.effect('renders one line per session from the receipts directory', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-status-')));
+      layer = testLayer(root, { sessionsRoot: join(root, 'sessions') });
+      const repo = 'demo';
+      const dir = join(root, 'sessions', repo, '7-1727414400000');
 
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'manifest.json'),
-      JSON.stringify({
-        repo,
-        issueNumber: 7,
-        flow: 'flow.ts',
-        agent: 'pi',
-        model: 'test-model',
-        state: 'completed',
-        branch: 'seraphim/demo/7',
-        worktreePath: '/tmp/wt',
-        startedAt: 1727414400000,
-        endedAt: 1727414460000,
-        prUrl: null,
-        capHit: null,
-        caps: { maxTurns: 10, wallClockMs: 1800000 },
-        turns: [],
-      }),
-    );
+      yield* Effect.promise(() => mkdir(dir, { recursive: true }));
+      yield* Effect.promise(() =>
+        writeFile(
+          join(dir, 'manifest.json'),
+          JSON.stringify({
+            repo,
+            issueNumber: 7,
+            flow: 'flow.ts',
+            agent: 'pi',
+            model: 'test-model',
+            state: 'completed',
+            branch: 'seraphim/demo/7',
+            worktreePath: '/tmp/wt',
+            startedAt: 1727414400000,
+            endedAt: 1727414460000,
+            prUrl: null,
+            capHit: null,
+            caps: { maxTurns: 10, wallClockMs: 1800000 },
+            turns: [],
+          }),
+        ),
+      );
 
-    const out = await main(['status'], layer);
+      const out = yield* Effect.promise(() => main(['status'], layer));
 
-    expect(out).toContain('demo#7');
-    expect(out).toContain('completed');
-    expect(out).toContain('/tmp/wt');
+      expect(out).toContain('demo#7');
+      expect(out).toContain('completed');
+      expect(out).toContain('/tmp/wt');
 
-    const json = await main(['status', '--json'], layer);
-    const parsed = JSON.parse(json) as { sessions: { repo: string; state: string }[] };
+      const json = yield* Effect.promise(() => main(['status', '--json'], layer));
+      const parsed = JSON.parse(json) as { sessions: { repo: string; state: string }[] };
 
-    expect(parsed.sessions).toHaveLength(1);
-    expect(parsed.sessions[0]?.repo).toBe('demo');
-  });
+      expect(parsed.sessions).toHaveLength(1);
+      expect(parsed.sessions[0]?.repo).toBe('demo');
+    }),
+  );
 
-  it('lists no sessions when the receipts root is missing', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-missing-'));
-    const json = await main(
-      ['status', '--json'],
-      testLayer(root, { sessionsRoot: join(root, 'missing', randomUUID()) }),
-    );
+  it.effect('lists no sessions when the receipts root is missing', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-missing-')));
+      const json = yield* Effect.promise(() =>
+        main(
+          ['status', '--json'],
+          testLayer(root, { sessionsRoot: join(root, 'missing', randomUUID()) }),
+        ),
+      );
 
-    expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });
-  });
+      expect(JSON.parse(json)).toMatchObject({ kind: 'status', sessions: [] });
+    }),
+  );
 });
 
 describe('projects listing', () => {
@@ -218,40 +249,41 @@ describe('projects listing', () => {
     return testLayer(root);
   }
 
-  it('renders an empty project list', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-list-'));
-    layer = envFor();
+  it.effect('renders an empty project list', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
+      layer = envFor();
 
-    expect(await main(['list'], layer)).toBe('no projects');
-  });
+      expect(yield* Effect.promise(() => main(['list'], layer))).toBe('no projects');
+    }),
+  );
 
-  it('renders registered projects with state and remote', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-list-'));
-    layer = envFor();
+  it.effect('renders registered projects with state and remote', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
+      layer = envFor();
 
-    const registered = await Effect.runPromise(
-      registerProject(REMOTE).pipe(
-        Effect.map((registered) => registered.record),
-        Effect.provide(layer),
-      ) as Effect.Effect<ProjectRecord>,
-    );
+      const registered = yield* run(registerProject(REMOTE), layer);
 
-    expect(registered).toBeTruthy();
+      expect(registered.record).toBeTruthy();
 
-    const result = await main(['list'], layer);
+      const result = yield* Effect.promise(() => main(['list'], layer));
 
-    expect(result).toContain('acme/widgets');
-    expect(result).toContain('active');
-    expect(result).toContain(REMOTE);
-  });
+      expect(result).toContain('acme/widgets');
+      expect(result).toContain('active');
+      expect(result).toContain(REMOTE);
+    }),
+  );
 
-  it('renders json output for the projects outcome', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-list-'));
+  it.effect('renders json output for the projects outcome', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
 
-    const result = await main(['list', '--json'], envFor());
+      const result = yield* Effect.promise(() => main(['list', '--json'], envFor()));
 
-    expect(JSON.parse(result)).toMatchObject({ kind: 'projects', projects: [] });
-  });
+      expect(JSON.parse(result)).toMatchObject({ kind: 'projects', projects: [] });
+    }),
+  );
 });
 
 describe('prune rendering', () => {
@@ -295,68 +327,88 @@ describe('prune rendering', () => {
     return dir;
   }
 
-  it('renders an empty prune plan as nothing eligible', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
-    layer = envFor();
+  it.effect('renders an empty prune plan as nothing eligible', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      layer = envFor();
 
-    expect(await main(['prune'], layer)).toBe('nothing eligible for cleanup');
-  });
+      expect(yield* Effect.promise(() => main(['prune'], layer))).toBe(
+        'nothing eligible for cleanup',
+      );
+    }),
+  );
 
-  it('renders the plan and refuses deletion without a TTY confirmation', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
-    layer = envFor();
-    const dir = await seedCompletedSession();
+  it.effect('renders the plan and refuses deletion without a TTY confirmation', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      layer = envFor();
+      const dir = yield* Effect.promise(() => seedCompletedSession());
 
-    const result = await main(['prune'], layer);
+      const result = yield* Effect.promise(() => main(['prune'], layer));
 
-    expect(result).toContain('└─ #1 —');
-    expect(result).toContain('nothing deleted: rerun with --confirm');
-    // The non-interactive listing must not have deleted the receipt.
-    expect(await readFile(join(dir, 'manifest.json'), 'utf8')).toContain('"completed"');
-  });
+      expect(result).toContain('└─ #1 —');
+      expect(result).toContain('nothing deleted: rerun with --confirm');
+      // The non-interactive listing must not have deleted the receipt.
+      expect(yield* Effect.promise(() => readFile(join(dir, 'manifest.json'), 'utf8'))).toContain(
+        '"completed"',
+      );
+    }),
+  );
 
-  it('deletes with --confirm and renders the removal summary', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
-    layer = envFor();
-    const dir = await seedCompletedSession();
+  it.effect('deletes with --confirm and renders the removal summary', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      layer = envFor();
+      const dir = yield* Effect.promise(() => seedCompletedSession());
 
-    const result = await main(['prune', '--confirm'], layer);
+      const result = yield* Effect.promise(() => main(['prune', '--confirm'], layer));
 
-    expect(result).toContain('prune removed');
-    await expect(readFile(join(dir, 'manifest.json'), 'utf8')).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
-  });
+      expect(result).toContain('prune removed');
+      const exit = yield* Effect.exit(
+        Effect.promise(() => readFile(join(dir, 'manifest.json'), 'utf8')),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain('ENOENT');
+      }
+    }),
+  );
 
-  it('groups stale images under their project in the tree', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
-    const docker: DockerRunner = {
-      run: (args) =>
-        Effect.succeed(
-          args[0] == 'images'
-            ? {
-                exitCode: 0,
-                stdout: ['seraphim/live:aaa', 'seraphim/live:bbb', 'seraphim/cache:ccc'].join('\n'),
-                stderr: '',
-              }
-            : { exitCode: 0, stdout: args.join(' '), stderr: '' },
-        ),
-    };
-    layer = testLayer(root, { docker, sessionsRoot: join(root, 'sessions') });
+  it.effect('groups stale images under their project in the tree', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      const docker: DockerRunner = {
+        run: (args) =>
+          Effect.succeed(
+            args[0] == 'images'
+              ? {
+                  exitCode: 0,
+                  stdout: ['seraphim/live:aaa', 'seraphim/live:bbb', 'seraphim/cache:ccc'].join(
+                    '\n',
+                  ),
+                  stderr: '',
+                }
+              : { exitCode: 0, stdout: args.join(' '), stderr: '' },
+          ),
+      };
+      layer = testLayer(root, { docker, sessionsRoot: join(root, 'sessions') });
 
-    const result = await main(['prune'], layer);
+      const result = yield* Effect.promise(() => main(['prune'], layer));
 
-    expect(result).toContain('(unclaimed images)');
-    expect(result).toContain('stale images — reclaimable cache ×3 tag(s)');
-    expect(result).not.toContain('aaa');
-  });
+      expect(result).toContain('(unclaimed images)');
+      expect(result).toContain('stale images — reclaimable cache ×3 tag(s)');
+      expect(result).not.toContain('aaa');
+    }),
+  );
 
-  it('rejects invalid prune flags with a clean error', async () => {
-    root = await mkdtemp(join(tmpdir(), 'seraphim-prune-'));
-    layer = envFor();
+  it.effect('rejects invalid prune flags with a clean error', () =>
+    Effect.gen(function* () {
+      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      layer = envFor();
 
-    expect(await main(['prune', '--wat'], layer)).toBe(
-      "error: invalid prune arguments: Unknown option '--wat'",
-    );
-  });
+      expect(yield* Effect.promise(() => main(['prune', '--wat'], layer))).toBe(
+        "error: invalid prune arguments: Unknown option '--wat'",
+      );
+    }),
+  );
 });

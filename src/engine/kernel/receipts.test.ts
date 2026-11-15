@@ -1,9 +1,12 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Effect } from 'effect';
+import { describe, expect } from 'vite-plus/test';
 
 import { MANIFEST_FILE, type Session, type Turn, writeReceipt } from './receipts.ts';
 
+import { expectTaggedFailure } from '../../../test/exit.ts';
 import { run } from '../../../test/run.ts';
 import { fromEpochMs } from '../../lib/time.ts';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
@@ -44,15 +47,14 @@ async function tempRoot() {
   return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 describe('writeReceipt', () => {
-  it('writes the manifest with epoch-ms timestamps and turns as disk JSON', async () => {
-    const { root, cleanup } = await tempRoot();
-    try {
-      const result = await run(
-        writeReceipt(root, 'seraphim/37-1000', session(), [turn(1)], [], []),
-      );
-      expect(result.success).toBe(true);
+  it.effect('writes the manifest with epoch-ms timestamps and turns as disk JSON', () =>
+    Effect.gen(function* () {
+      const { root, cleanup } = yield* Effect.promise(() => tempRoot());
+      yield* run(writeReceipt(root, 'seraphim/37-1000', session(), [turn(1)], [], []));
       const manifest = JSON.parse(
-        await readFile(join(root, 'seraphim/37-1000', MANIFEST_FILE), 'utf8'),
+        yield* Effect.promise(() =>
+          readFile(join(root, 'seraphim/37-1000', MANIFEST_FILE), 'utf8'),
+        ),
       );
       expect(manifest.startedAt).toBe(1_000);
       expect(manifest.endedAt).toBe(2_000);
@@ -67,15 +69,14 @@ describe('writeReceipt', () => {
           endedAt: 2_000,
         },
       ]);
-    } finally {
-      await cleanup();
-    }
-  });
-  it('writes turn records, transcripts, and flow.log only when logs exist', async () => {
-    const { root, cleanup } = await tempRoot();
-    try {
+      yield* Effect.promise(() => cleanup());
+    }),
+  );
+  it.effect('writes turn records, transcripts, and flow.log only when logs exist', () =>
+    Effect.gen(function* () {
+      const { root, cleanup } = yield* Effect.promise(() => tempRoot());
       const dir = 'seraphim/37-1000';
-      await run(
+      yield* run(
         writeReceipt(
           root,
           dir,
@@ -85,7 +86,7 @@ describe('writeReceipt', () => {
           [{ name: 'session.transcript.md', body: '# session' }],
         ),
       );
-      const files = (await readdir(join(root, dir))).sort();
+      const files = (yield* Effect.promise(() => readdir(join(root, dir)))).sort();
       expect(files).toEqual([
         'flow.log',
         'manifest.json',
@@ -93,28 +94,30 @@ describe('writeReceipt', () => {
         'turn-1.json',
         'turn-2.json',
       ]);
-      expect(await readFile(join(root, dir, 'flow.log'), 'utf8')).toBe('gate: echo → exit 0\n');
-      expect(await readFile(join(root, dir, 'session.transcript.md'), 'utf8')).toBe('# session\n');
+      expect(yield* Effect.promise(() => readFile(join(root, dir, 'flow.log'), 'utf8'))).toBe(
+        'gate: echo → exit 0\n',
+      );
+      expect(
+        yield* Effect.promise(() => readFile(join(root, dir, 'session.transcript.md'), 'utf8')),
+      ).toBe('# session\n');
       const noLogs = 'seraphim/38-2000';
-      await run(writeReceipt(root, noLogs, session({ issueNumber: 38 }), [turn(1)], [], []));
-      expect(await readdir(join(root, noLogs))).not.toContain('flow.log');
-    } finally {
-      await cleanup();
-    }
-  });
-  it('fails without writing when the disk shape would not validate', async () => {
-    const { root, cleanup } = await tempRoot();
-    try {
+      yield* run(writeReceipt(root, noLogs, session({ issueNumber: 38 }), [turn(1)], [], []));
+      expect(yield* Effect.promise(() => readdir(join(root, noLogs)))).not.toContain('flow.log');
+      yield* Effect.promise(() => cleanup());
+    }),
+  );
+  it.effect('fails without writing when the disk shape would not validate', () =>
+    Effect.gen(function* () {
+      const { root, cleanup } = yield* Effect.promise(() => tempRoot());
       const bad = session({ agent: '' });
-      const result = await run(writeReceipt(root, 'seraphim/37-1000', bad, [turn(1)], [], []));
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toBeInstanceOf(Error);
-        expect(result.error.message).toContain('session manifest invalid');
-      }
-      expect(await readdir(root)).toEqual([]);
-    } finally {
-      await cleanup();
-    }
-  });
+      const error = yield* expectTaggedFailure(
+        run(writeReceipt(root, 'seraphim/37-1000', bad, [turn(1)], [], [])),
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain('session manifest invalid');
+      const entries = yield* Effect.promise(() => readdir(root));
+      expect(entries).toEqual([]);
+      yield* Effect.promise(() => cleanup());
+    }),
+  );
 });
