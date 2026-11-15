@@ -33,7 +33,7 @@ export type TrackerError = AuthError | RateLimitError | UnavailableError;
 
 /**
  * The kernel's tagged failure vocabulary — every failure a kernel module can surface across
- * its seams. The kernel's derived unions (command's `KernelError`, session's `SessionError`
+ * its seams. The kernel's derived unions (command's `KernelFailure`, session's `SessionError`
  * and `RunnableFlowError`) all come from this one enumeration: a new class is added here
  * exactly once and flows to every consumer.
  */

@@ -22,9 +22,6 @@ import { type DockerRunnerService } from '../sandboxes/docker-sandbox.ts';
  */
 export type ErrorOutcome = { readonly kind: 'error'; readonly message: string };
 
-/** The tagged kernel failures a command's execute can hit, translated once to an error outcome. */
-export type KernelError = KernelFailure;
-
 /** The service stack every command's execute runs against (the composition root builds it). */
 export type CommandServices =
   | TrackerService
@@ -104,14 +101,14 @@ export function strictFlags(
 /** Reduced from the executor's error type to the dispatcher's outcome union. */
 export type OutcomeOf<E> = E extends (
   parsed: never,
-) => Effect.Effect<infer O, KernelError, CommandServices>
+) => Effect.Effect<infer O, KernelFailure, CommandServices>
   ? O
   : never;
 
 export function command<
   Name extends string,
   P,
-  E extends (parsed: P) => Effect.Effect<unknown, KernelError, CommandServices>,
+  E extends (parsed: P) => Effect.Effect<unknown, KernelFailure, CommandServices>,
 >(def: {
   readonly name: Name;
   readonly summary: string;

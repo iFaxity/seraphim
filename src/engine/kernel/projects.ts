@@ -2,7 +2,15 @@ import { Effect, Result } from 'effect';
 import { z } from 'zod';
 
 import { describeError, ProjectError } from '../../lib/errors.ts';
-import { isFsErrorCode, mkdirE, readDirE, readFileE, renameE, writeFileE } from '../../lib/fs.ts';
+import {
+  isFsErrorCode,
+  isMissing,
+  mkdirE,
+  readDirE,
+  readFileE,
+  renameE,
+  writeFileE,
+} from '../../lib/fs.ts';
 import { HomeService } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
 
@@ -199,11 +207,6 @@ const seedSlots = (dir: string, repo: string) =>
     );
   });
 
-/** The absent-file case of isFsErrorCode: everything else (corrupt record, bad dir) keeps its error. */
-function isMissing(error: unknown) {
-  return isFsErrorCode(error, 'ENOENT');
-}
-
 /** Reads and schema-checks one `project.json`. Invalid shape is a ProjectError; never throws. */
 const readRecord = (dir: string): Effect.Effect<Result.Result<ProjectRecord, Error>> =>
   Effect.gen(function* () {
@@ -215,16 +218,19 @@ const readRecord = (dir: string): Effect.Effect<Result.Result<ProjectRecord, Err
       return Result.fail(read.failure);
     }
 
-    let json: unknown;
-    try {
-      json = JSON.parse(read.success) as unknown;
-    } catch (error) {
-      return Result.fail(
-        new ProjectError({ message: `invalid project record in ${dir}: ${String(error)}` }),
-      );
+    const json = yield* Effect.result(
+      Effect.try({
+        try: () => JSON.parse(read.success) as unknown,
+        catch: (error) =>
+          new ProjectError({ message: `invalid project record in ${dir}: ${String(error)}` }),
+      }),
+    );
+
+    if (Result.isFailure(json)) {
+      return Result.fail(json.failure);
     }
 
-    const parsed = ProjectRecordSchema.safeParse(json);
+    const parsed = ProjectRecordSchema.safeParse(json.success);
 
     return parsed.success
       ? Result.succeed(parsed.data)
@@ -368,6 +374,8 @@ export const listProjects = () =>
       });
     }
 
+    // Explicit rejection mode: each element is an infallible `Result`, so the fan-out's
+    // default fail-fast never fires — every read completes and corrupt records are skipped.
     const listed = yield* Effect.all(
       dirs.success
         .filter((entry) => entry.isDirectory())

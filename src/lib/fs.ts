@@ -56,6 +56,15 @@ export type CopyOptions = {
 // `false` or a failed read per the helper, never a throw, and the error channel is the
 // caller's to map onto its contract's taxonomy.
 
+/** Converts one fs effect's raw error channel into a tagged kernel failure. */
+export const fsTagged =
+  <E>(make: (failure: Error) => E) =>
+  <A>(effect: Effect.Effect<A, Error, never>): Effect.Effect<A, E, never> =>
+    effect.pipe(Effect.catch((failure: Error) => Effect.fail(make(failure))));
+
+/** The absent-file case of isFsErrorCode: everything else (corrupt record, bad dir) keeps its error. */
+export const isMissing = (error: unknown) => isFsErrorCode(error, 'ENOENT');
+
 /** Reads one UTF-8 text file; an absent or unreadable file fails, never throws. */
 export function readFileE(path: string | URL): Effect.Effect<string, Error> {
   return Effect.tryPromise({ try: () => readFile(path, 'utf8'), catch: (error) => error as Error });
