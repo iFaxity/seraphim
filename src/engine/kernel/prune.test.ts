@@ -1,7 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer, Option } from 'effect';
-import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { it } from '@effect/vitest';
+import { Cause, Effect, Exit, Layer, Option } from 'effect';
+import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
 import { planPrune, runPrune } from './prune.ts';
@@ -103,229 +104,220 @@ function dockerListing(tags: readonly string[]): DockerRunner {
 }
 
 describe('planPrune', () => {
-  it('lists completed sessions as eligible; failed and cap-hit sessions are never eligible', async () => {
-    const done = await seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' });
-    await seedSession({ repo: 'demo', issueNumber: 2, state: 'failed' });
-    await seedSession({ repo: 'demo', issueNumber: 3, state: 'cap-hit' });
+  it.effect(
+    'lists completed sessions as eligible; failed and cap-hit sessions are never eligible',
+    () =>
+      Effect.gen(function* () {
+        const done = yield* Effect.promise(() =>
+          seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' }),
+        );
+        yield* Effect.promise(() => seedSession({ repo: 'demo', issueNumber: 2, state: 'failed' }));
+        yield* Effect.promise(() =>
+          seedSession({ repo: 'demo', issueNumber: 3, state: 'cap-hit' }),
+        );
 
-    const planned = await run(planPrune, pruneLayer(fakeGit()));
+        const planned = yield* run(planPrune, pruneLayer(fakeGit()));
 
-    expect(planned.success).toBe(true);
+        expect(planned.sessions).toEqual([
+          {
+            repo: 'demo',
+            issueNumber: 1,
+            dir: done.dir,
+            worktreePath: done.worktreePath,
+            branch: done.branch,
+          },
+        ]);
+        expect(planned.orphanWorktrees).toEqual([]);
+      }),
+  );
 
-    if (planned.success) {
-      expect(planned.data.sessions).toEqual([
-        {
-          repo: 'demo',
-          issueNumber: 1,
-          dir: done.dir,
-          worktreePath: done.worktreePath,
-          branch: done.branch,
-        },
-      ]);
-      expect(planned.data.orphanWorktrees).toEqual([]);
-    }
-  });
+  it.effect(
+    'lists worktree directories referenced by no manifest as orphans, keeping retained ones',
+    () =>
+      Effect.gen(function* () {
+        const failedWorktree = yield* Effect.promise(() => seedWorktree('demo', '2-failed'));
+        yield* Effect.promise(() =>
+          seedSession({
+            repo: 'demo',
+            issueNumber: 2,
+            state: 'failed',
+            worktreePath: failedWorktree,
+          }),
+        );
+        const orphan = yield* Effect.promise(() => seedWorktree('demo', '999-orphan'));
 
-  it('lists worktree directories referenced by no manifest as orphans, keeping retained ones', async () => {
-    const failedWorktree = await seedWorktree('demo', '2-failed');
-    await seedSession({
-      repo: 'demo',
-      issueNumber: 2,
-      state: 'failed',
-      worktreePath: failedWorktree,
-    });
-    const orphan = await seedWorktree('demo', '999-orphan');
+        const planned = yield* run(planPrune, pruneLayer(fakeGit()));
 
-    const planned = await run(planPrune, pruneLayer(fakeGit()));
+        expect(planned.orphanWorktrees).toEqual([orphan]);
+      }),
+  );
 
-    expect(planned.success).toBe(true);
+  it.effect(
+    'marks seraphim images stale when no project content-hash names them, keeping current ones',
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => mkdir(join(root, 'projects', 'demo'), { recursive: true }));
+        yield* Effect.promise(() =>
+          writeFile(join(root, 'projects', 'demo', 'Dockerfile'), 'FROM node:26\n'),
+        );
+        yield* run(
+          registerProject('https://example.invalid/acme/demo.git', 'demo'),
+          pruneLayer(fakeGit()),
+        );
 
-    if (planned.success) {
-      expect(planned.data.orphanWorktrees).toEqual([orphan]);
-    }
-  });
+        const planned = yield* run(
+          planPrune,
+          pruneLayer(
+            fakeGit(),
+            dockerListing(['seraphim/demo:deadbeef', 'seraphim/gone:00112233']),
+          ),
+        );
 
-  it('marks seraphim images stale when no project content-hash names them, keeping current ones', async () => {
-    await mkdir(join(root, 'projects', 'demo'), { recursive: true });
-    await writeFile(join(root, 'projects', 'demo', 'Dockerfile'), 'FROM node:26\n');
-    await run(
-      registerProject('https://example.invalid/acme/demo.git', 'demo'),
-      pruneLayer(fakeGit()),
-    );
+        // The registered project has no lockfiles, so its current hash never matches a made-up
+        // tag: both tags are unreferenced by a current hash and both are listed with a reason.
+        expect(planned.images.map((image) => image.tag)).toEqual([
+          'seraphim/demo:deadbeef',
+          'seraphim/gone:00112233',
+        ]);
+        expect(planned.images.every((image) => image.reason !== '')).toBe(true);
+      }),
+  );
 
-    const planned = await run(
-      planPrune,
-      pruneLayer(fakeGit(), dockerListing(['seraphim/demo:deadbeef', 'seraphim/gone:00112233'])),
-    );
+  it.effect('keeps the current content-hash image out of the plan', () =>
+    Effect.gen(function* () {
+      const projectDir = join(root, 'projects', 'demo');
+      yield* Effect.promise(() => mkdir(projectDir, { recursive: true }));
+      yield* Effect.promise(() => writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n'));
+      yield* run(
+        registerProject('https://example.invalid/acme/demo.git', 'demo'),
+        pruneLayer(fakeGit()),
+      );
 
-    expect(planned.success).toBe(true);
+      const someTag = yield* imageTagFor(projectDir);
 
-    if (planned.success) {
-      // The registered project has no lockfiles, so its current hash never matches a made-up
-      // tag: both tags are unreferenced by a current hash and both are listed with a reason.
-      expect(planned.data.images.map((image) => image.tag)).toEqual([
-        'seraphim/demo:deadbeef',
-        'seraphim/gone:00112233',
-      ]);
-      expect(planned.data.images.every((image) => image.reason !== '')).toBe(true);
-    }
-  });
+      if (Option.isNone(someTag)) {
+        throw new Error('expected a tag for the seeded project');
+      }
 
-  it('keeps the current content-hash image out of the plan', async () => {
-    const projectDir = join(root, 'projects', 'demo');
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n');
-    await run(
-      registerProject('https://example.invalid/acme/demo.git', 'demo'),
-      pruneLayer(fakeGit()),
-    );
+      const tag = someTag.value;
+      const planned = yield* run(planPrune, pruneLayer(fakeGit(), dockerListing([tag])));
 
-    const someTag = await Effect.runPromise(imageTagFor(projectDir));
+      expect(planned.images).toEqual([]);
+    }),
+  );
 
-    if (!Option.isSome(someTag)) {
-      throw new Error('expected a tag for the seeded project');
-    }
+  it.effect('skips image pruning when no docker runner is configured', () =>
+    Effect.gen(function* () {
+      const planned = yield* run(planPrune, pruneLayer(fakeGit()));
 
-    const tag = someTag.value;
-    const planned = await run(planPrune, pruneLayer(fakeGit(), dockerListing([tag])));
-
-    expect(planned.success).toBe(true);
-
-    if (planned.success) {
-      expect(planned.data.images).toEqual([]);
-    }
-  });
-
-  it('skips image pruning when no docker runner is configured', async () => {
-    const planned = await run(planPrune, pruneLayer(fakeGit()));
-
-    expect(planned.success).toBe(true);
-
-    if (planned.success) {
-      expect(planned.data.images).toEqual([]);
-    }
-  });
+      expect(planned.images).toEqual([]);
+    }),
+  );
 });
 
 describe('runPrune', () => {
-  it('deletes only confirmed items: worktree, branch, receipt directory', async () => {
-    const git = fakeGit();
-    const session = await seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' });
-    await mkdir(session.worktreePath, { recursive: true });
+  it.effect('deletes only confirmed items: worktree, branch, receipt directory', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      const session = yield* Effect.promise(() =>
+        seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' }),
+      );
+      yield* Effect.promise(() => mkdir(session.worktreePath, { recursive: true }));
 
-    const planned = await run(planPrune, pruneLayer(git));
-    const done = await run(
-      runPrune(
-        planned.success
-          ? planned.data
-          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
-      ),
-      pruneLayer(git),
-    );
+      const planned = yield* run(planPrune, pruneLayer(git));
+      const done = yield* run(runPrune(planned), pruneLayer(git));
 
-    expect(done.success).toBe(true);
-    expect(git.removedWorktrees).toEqual([session.worktreePath]);
-    expect(git.removedBranches).toEqual([session.branch]);
-    await expect(readdir(session.dir)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(git.removedWorktrees).toEqual([session.worktreePath]);
+      expect(git.removedBranches).toEqual([session.branch]);
+      const exit = yield* Effect.exit(Effect.promise(() => readdir(session.dir)));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain('ENOENT');
+      }
 
-    if (done.success) {
-      expect(done.data.failed).toEqual([]);
-    }
-  });
+      expect(done.failed).toEqual([]);
+    }),
+  );
 
-  it('removes orphan worktrees and untags stale images', async () => {
-    const orphan = await seedWorktree('demo', '999-orphan');
-    const docker = dockerListing(['seraphim/gone:00112233']);
-    const planned = await run(planPrune, pruneLayer(fakeGit(), docker));
-    const done = await run(
-      runPrune(
-        planned.success
-          ? planned.data
-          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
-      ),
-      pruneLayer(fakeGit(), docker),
-    );
+  it.effect('removes orphan worktrees and untags stale images', () =>
+    Effect.gen(function* () {
+      const orphan = yield* Effect.promise(() => seedWorktree('demo', '999-orphan'));
+      const docker = dockerListing(['seraphim/gone:00112233']);
+      const planned = yield* run(planPrune, pruneLayer(fakeGit(), docker));
+      yield* run(runPrune(planned), pruneLayer(fakeGit(), docker));
 
-    expect(done.success).toBe(true);
-    await expect(readFile(join(orphan, 'marker.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
-  });
+      const exit = yield* Effect.exit(Effect.promise(() => readFile(join(orphan, 'marker.txt'))));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain('ENOENT');
+      }
+    }),
+  );
 
-  it('collects per-item failures instead of aborting the sweep', async () => {
-    const git = fakeGit();
-    // One session whose worktree removal fails, one that cleans up fine.
-    const stuck = await seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' });
-    const clean = await seedSession({ repo: 'demo', issueNumber: 2, state: 'completed' });
+  it.effect('collects per-item failures instead of aborting the sweep', () =>
+    Effect.gen(function* () {
+      const git = fakeGit();
+      // One session whose worktree removal fails, one that cleans up fine.
+      const stuck = yield* Effect.promise(() =>
+        seedSession({ repo: 'demo', issueNumber: 1, state: 'completed' }),
+      );
+      const clean = yield* Effect.promise(() =>
+        seedSession({ repo: 'demo', issueNumber: 2, state: 'completed' }),
+      );
 
-    const stuckGit: FakeGit = {
-      ...git,
-      removeWorktree: (input: { readonly path: string }) =>
-        input.path === stuck.worktreePath
-          ? Effect.fail(new GitError({ message: 'worktree removal failed: device busy' }))
-          : Effect.void,
-    };
+      const stuckGit: FakeGit = {
+        ...git,
+        removeWorktree: (input: { readonly path: string }) =>
+          input.path === stuck.worktreePath
+            ? Effect.fail(new GitError({ message: 'worktree removal failed: device busy' }))
+            : Effect.void,
+      };
 
-    const planned = await run(planPrune, pruneLayer(stuckGit));
-    const done = await run(
-      runPrune(
-        planned.success
-          ? planned.data
-          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
-      ),
-      pruneLayer(stuckGit),
-    );
+      const planned = yield* run(planPrune, pruneLayer(stuckGit));
+      const done = yield* run(runPrune(planned), pruneLayer(stuckGit));
 
-    expect(done.success).toBe(true);
-
-    if (done.success) {
-      expect(done.data.failed.some((detail) => detail.includes('device busy'))).toBe(true);
+      expect(done.failed.some((detail) => detail.includes('device busy'))).toBe(true);
       expect(git.removedBranches).toContain(clean.branch);
-      await expect(readdir(clean.dir)).rejects.toMatchObject({ code: 'ENOENT' });
-    }
-  });
+      const exit = yield* Effect.exit(Effect.promise(() => readdir(clean.dir)));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain('ENOENT');
+      }
+    }),
+  );
 });
 
 describe('runPrune image failures', () => {
-  it('collects a failed untag as a per-item failure instead of aborting', async () => {
-    const docker: DockerRunner = {
-      run: (args) =>
-        Effect.succeed(
-          args[0] == 'images'
-            ? { exitCode: 0, stdout: 'seraphim/gone:00112233', stderr: '' }
-            : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
-        ),
-    };
-    const planned = await run(planPrune, pruneLayer(fakeGit(), docker));
-    const done = await run(
-      runPrune(
-        planned.success
-          ? planned.data
-          : { sessions: [], orphanWorktrees: [], images: [], skipped: 0 },
-      ),
-      pruneLayer(fakeGit(), docker),
-    );
+  it.effect('collects a failed untag as a per-item failure instead of aborting', () =>
+    Effect.gen(function* () {
+      const docker: DockerRunner = {
+        run: (args) =>
+          Effect.succeed(
+            args[0] == 'images'
+              ? { exitCode: 0, stdout: 'seraphim/gone:00112233', stderr: '' }
+              : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
+          ),
+      };
+      const planned = yield* run(planPrune, pruneLayer(fakeGit(), docker));
+      const done = yield* run(runPrune(planned), pruneLayer(fakeGit(), docker));
 
-    expect(done.success).toBe(true);
+      expect(done.failed).toEqual(['seraphim/gone:00112233: Error: image not known']);
+    }),
+  );
 
-    if (done.success) {
-      expect(done.data.failed).toEqual(['seraphim/gone:00112233: Error: image not known']);
-    }
-  });
+  it.effect('prunes nothing when docker listing itself fails', () =>
+    Effect.gen(function* () {
+      const docker: DockerRunner = {
+        run: () =>
+          Effect.succeed({
+            exitCode: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }),
+      };
+      const planned = yield* run(planPrune, pruneLayer(fakeGit(), docker));
 
-  it('prunes nothing when docker listing itself fails', async () => {
-    const docker: DockerRunner = {
-      run: () =>
-        Effect.succeed({
-          exitCode: 1,
-          stdout: '',
-          stderr: 'Cannot connect to the Docker daemon',
-        }),
-    };
-    const planned = await run(planPrune, pruneLayer(fakeGit(), docker));
-
-    expect(planned.success).toBe(true);
-
-    if (planned.success) {
-      expect(planned.data.images).toEqual([]);
-    }
-  });
+      expect(planned.images).toEqual([]);
+    }),
+  );
 });
