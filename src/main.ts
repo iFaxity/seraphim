@@ -9,7 +9,7 @@ import { apiLayer, GithubToken } from './engine/forges/github-api.ts';
 import { trackerLayer } from './engine/forges/github-tracker.ts';
 import { type CommandServices } from './engine/kernel/command.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
-import { loadKernelConfig } from './engine/kernel/config.ts';
+import { loadKernelConfig, type NotifyChannel } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
 import { gitCliLayer, gitLayer } from './engine/kernel/git.ts';
 import { poolRoot } from './engine/kernel/skills.ts';
@@ -66,48 +66,77 @@ export async function main(argv: readonly string[], layer?: Layer.Layer<CommandS
  */
 const TURN_WALL_CLOCK_MS = 30 * 60_000;
 
-async function composeEngineLayer() {
+/** The home-derived base inputs the composition root reads before any Layer is built. */
+type HomeDeps = {
+  readonly home: string;
+  readonly projectsRoot: string;
+  readonly token: string;
+};
+
+/** Resolves the seraphim home, its projects root, and the forge token from the `.env`. */
+function homeDeps(): HomeDeps {
   const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
-  const projectsRoot = join(home, 'projects');
-  const token = readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '';
-  const config = await loadKernelConfig(home);
 
-  if (!config.success) {
-    return config;
-  }
+  return {
+    home,
+    projectsRoot: join(home, 'projects'),
+    token: readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '',
+  };
+}
 
-  // Base deps: the forge token rides the `.env` read; one channel, configured once in the
-  // global kernel config — no channel configured is a silent notifier (pages go nowhere).
-  const baseLayer = Layer.mergeAll(
+/**
+ * Base deps: the forge token rides the `.env` read; one channel, configured once in the
+ * global kernel config — no channel configured is a silent notifier (pages go nowhere).
+ */
+function baseDepsLayer(deps: HomeDeps, notify: NotifyChannel | null) {
+  return Layer.mergeAll(
     apiLayer,
-    Layer.succeed(GithubToken, token),
+    Layer.succeed(GithubToken, deps.token),
     dockerCliLayer,
     gitCliLayer,
-    Layer.succeed(NotifyChannelService, config.data.notify ?? null),
+    Layer.succeed(NotifyChannelService, notify),
   );
+}
 
+/** The adapter stack: tracker, git, notifier, and the sandbox-backed pi runtime. */
+function adaptersLayer<RIn>(baseLayer: Layer.Layer<never, never, RIn>, projectsRoot: string) {
   const withRuntime = Layer.provideMerge(
     runtimeLayer(TURN_WALL_CLOCK_MS),
     dockerSandboxLayer(projectsRoot),
   );
   // provideMerge keeps the dependency services (DockerRunner among them — prune's plan needs
   // the runner itself, not only what sandbox built on top of it).
-  const adapters = Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
+  return Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
     Layer.provideMerge(baseLayer),
   );
+}
 
-  return success(
-    Layer.mergeAll(
-      adapters,
-      Layer.succeed(
-        HomeService,
-        homeLayout(home, {
-          poolRoot: resolvePoolRoot(home),
-          sessionsRoot: join(home, 'sessions'),
-        }),
-      ),
-    ) as Layer.Layer<CommandServices>,
+/** The engine's full service stack: adapters plus the HomeService layout. */
+function engineLayer<RIn>(adapters: Layer.Layer<never, never, RIn>, home: string) {
+  return Layer.mergeAll(
+    adapters,
+    Layer.succeed(
+      HomeService,
+      homeLayout(home, {
+        poolRoot: resolvePoolRoot(home),
+        sessionsRoot: join(home, 'sessions'),
+      }),
+    ),
   );
+}
+
+async function composeEngineLayer() {
+  const deps = homeDeps();
+  const config = await loadKernelConfig(deps.home);
+
+  if (!config.success) {
+    return config;
+  }
+
+  const baseLayer = baseDepsLayer(deps, config.data.notify);
+  const adapters = adaptersLayer(baseLayer, deps.projectsRoot);
+
+  return success(engineLayer(adapters, deps.home) as Layer.Layer<CommandServices>);
 }
 
 /**

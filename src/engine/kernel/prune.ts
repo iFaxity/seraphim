@@ -5,7 +5,7 @@ import { Effect, Result } from 'effect';
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 
-import { describeError, ReceiptReadError } from '../../lib/errors.ts';
+import { describeError, ProjectError, ReceiptReadError } from '../../lib/errors.ts';
 import { isFsErrorCode, readDirE, rmE } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
 import { HomeService, type Home } from '../core/env.ts';
@@ -64,6 +64,14 @@ export type PruneDone = {
 /** The kernel modules plan and run the sweep over: git mechanics, layout, optional docker. */
 export type PruneServices = GitService | HomeService | DockerRunnerService;
 
+/** The (layout, git, failure-collector) bundle every prune step shares. */
+type PruneContext = {
+  readonly home: Home;
+  readonly git: Git;
+  /** Per-item failures collected in place, never fatal. */
+  readonly failed: string[];
+};
+
 /**
  * Lists everything eligible for cleanup. Eligibility: a completed session (failed and
  * cap-hit sessions keep branch, logs, transcript for human takeover); its worktree, branch,
@@ -73,8 +81,8 @@ export type PruneServices = GitService | HomeService | DockerRunnerService;
  * absent from the context yields an empty image list — image pruning is optional;
  * worktree/session prune is not.
  */
-export const planPrune: Effect.Effect<PrunePlan, ReceiptReadError, PruneServices> = Effect.gen(
-  function* () {
+export const planPrune: Effect.Effect<PrunePlan, ProjectError | ReceiptReadError, PruneServices> =
+  Effect.gen(function* () {
     const home = yield* HomeService;
     const docker = yield* Effect.serviceOption(DockerRunnerService);
 
@@ -113,14 +121,14 @@ export const planPrune: Effect.Effect<PrunePlan, ReceiptReadError, PruneServices
       images,
       skipped: listed.skipped,
     };
-  },
-);
+  });
 
 /** Removes one session's worktree, branch, and receipt directory. Failures collect, never
  * fatal — one stuck worktree must not block the rest of the cleanup. */
-const pruneSession = (home: Home, git: Git, session: PruneSession, failed: string[]) =>
+const pruneSession = (ctx: PruneContext, session: PruneSession) =>
   Effect.gen(function* () {
-    const repoPath = join(home.home, 'repos', session.repo);
+    const { git, failed } = ctx;
+    const repoPath = join(ctx.home.home, 'repos', session.repo);
 
     const removed = yield* Effect.result(
       git.removeWorktree({ repoPath, path: session.worktreePath }),
@@ -144,10 +152,11 @@ const pruneSession = (home: Home, git: Git, session: PruneSession, failed: strin
 /** Deletes one orphan worktree directory. Through git, not rm alone: an orphan directory may
  * still be a registered worktree, and git owns prunable `.git/worktrees` metadata — the
  * kernel replaces that layer entirely. */
-const pruneOrphan = (home: Home, git: Git, path: string, failed: string[]) =>
+const pruneOrphan = (ctx: PruneContext, path: string) =>
   Effect.gen(function* () {
-    const repo = path.slice(home.worktreesRoot.length + 1).split('/')[0] ?? '';
-    const repoPath = join(home.home, 'repos', repo);
+    const { git, failed } = ctx;
+    const repo = path.slice(ctx.home.worktreesRoot.length + 1).split('/')[0] ?? '';
+    const repoPath = join(ctx.home.home, 'repos', repo);
 
     const removed = yield* Effect.result(git.removeWorktree({ repoPath, path }));
     if (Result.isFailure(removed)) {
@@ -183,13 +192,14 @@ export const runPrune = (plan: PrunePlan): Effect.Effect<PruneDone, never, Prune
     const home = yield* HomeService;
     const git = yield* GitService;
     const failed: string[] = [];
+    const ctx: PruneContext = { home, git, failed };
 
     for (const session of plan.sessions) {
-      yield* pruneSession(home, git, session, failed);
+      yield* pruneSession(ctx, session);
     }
 
     for (const path of plan.orphanWorktrees) {
-      yield* pruneOrphan(home, git, path, failed);
+      yield* pruneOrphan(ctx, path);
     }
 
     const docker = yield* Effect.serviceOption(DockerRunnerService);
@@ -216,7 +226,7 @@ const readRepoOrphans = (
         return [];
       }
 
-      return yield* new ReceiptReadError({
+      return yield* new ProjectError({
         message: `unreadable worktree repo ${repoRoot}: ${String(dirs.failure)}`,
       });
     }
@@ -241,7 +251,7 @@ const listOrphanWorktrees = (worktreesRoot: string, isOrphan: (path: string) => 
         return [];
       }
 
-      return yield* new ReceiptReadError({
+      return yield* new ProjectError({
         message: `unreadable worktrees root ${worktreesRoot}: ${String(repos.failure)}`,
       });
     }

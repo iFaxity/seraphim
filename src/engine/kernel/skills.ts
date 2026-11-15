@@ -2,7 +2,7 @@ import { basename, join } from 'node:path';
 import { Effect, Result } from 'effect';
 
 import { SkillPoolError } from '../../lib/errors.ts';
-import { cpE, fileExistsE, isFsErrorCode, mkdirE, readDirE } from '../../lib/fs.ts';
+import { cpE, fileExistsE, isMissing, mkdirE, readDirE } from '../../lib/fs.ts';
 
 /**
  * The curated skill pool (stories 14–16): one directory per skill, one `SKILL.md`
@@ -41,10 +41,6 @@ const poolSkills = (root: string) =>
       message: `unreadable skill pool ${root}: ${String(read.failure)}`,
     });
   });
-
-function isMissing(error: unknown) {
-  return isFsErrorCode(error, 'ENOENT');
-}
 
 /** All pool skills, name order. The pool root itself is optional — an empty pool is valid. */
 export const listPoolSkills = (root: string): Effect.Effect<PoolSkill[], SkillPoolError> =>
