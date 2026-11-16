@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { Argument } from 'effect/cli';
+import { Argument, Param } from 'effect/cli';
 
 import { toEpochMs } from '../../../lib/time.ts';
 import { command, parsePositionals } from '../command.ts';
@@ -13,7 +13,12 @@ export const runCommand = command({
   usage: 'run <repo> <issue#>',
   parse: parsePositionals({
     repo: Argument.String('repo'),
-    issueNumber: Argument.Int('issue-number'),
+    issueNumber: Argument.Int('issue-number').pipe(
+      Param.filter(
+        (n) => n > 0,
+        (n) => `expected usage: run <repo> <issue#>, got ${n}`,
+      ),
+    ),
   }),
   execute: ({ repo, issueNumber }: { repo: string; issueNumber: number }) =>
     Effect.map(runSession({ repo, issueNumber }), (result) => {

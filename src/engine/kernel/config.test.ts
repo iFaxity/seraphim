@@ -43,6 +43,15 @@ describe('loadKernelConfig', () => {
     expect(config.crashStaleMs).toBe(5 * 60_000);
   });
 
+  it('fills defaults for absent keys in a partial config file', async () => {
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, 'config.json'), JSON.stringify({ notify: null }));
+
+    const config = await Effect.runPromise(loadKernelConfig(home));
+
+    expect(config).toEqual({ notify: null, crashStaleMs: 30 * 60_000 });
+  });
+
   it('fails fast naming the file for a schema-invalid config', async () => {
     await mkdir(home, { recursive: true });
     await writeFile(
