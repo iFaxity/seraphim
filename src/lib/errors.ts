@@ -65,6 +65,19 @@ export class SkillPoolError extends Data.TaggedError('SkillPoolError')<{
   message: string;
 }> {}
 
+/**
+ * One CLI invocation failing to parse (unknown command, stray flag, bad positional shape).
+ * The kernel's parse layer fails with this — the CLI edge is the only place it becomes prose.
+ */
+export class CommandParseError extends Data.TaggedError('CommandParseError')<{
+  message: string;
+}> {}
+
+/** The global kernel config is unreadable or schema-invalid; `message` names the fix. */
+export class KernelConfigError extends Data.TaggedError('KernelConfigError')<{
+  message: string;
+}> {}
+
 /** A session-receipt listing walk failing on the sessions tree itself (not per-record skips). */
 export class ReceiptReadError extends Data.TaggedError('ReceiptReadError')<{
   message: string;

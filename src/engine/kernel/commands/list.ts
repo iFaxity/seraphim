@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
+import { Flag } from 'effect/cli';
 
-import { command, strictFlags } from '../command.ts';
+import { command, parseFlags } from '../command.ts';
 import { listProjects } from '../projects.ts';
 
 // Outcome: `projects` — the registered projects, with JSON rendering decided at the edge.
@@ -8,8 +9,8 @@ export const listCommand = command({
   name: 'list',
   summary: 'list registered projects',
   usage: 'list [--json]',
-  parse: strictFlags('list', { json: { type: 'boolean', default: false } }),
-  execute: (values) =>
+  parse: parseFlags({ json: Flag.Boolean('json').pipe(Flag.withDefault(false)) }),
+  execute: (values: { json: boolean }) =>
     Effect.map(listProjects(), (listed) => ({
       kind: 'projects' as const,
       projects: listed.projects,

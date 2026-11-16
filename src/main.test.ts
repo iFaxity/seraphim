@@ -119,7 +119,7 @@ describe('engine', () => {
 
       expect(outcome).toEqual({
         kind: 'error',
-        message: 'expected usage: run <repo> <issue#>',
+        message: 'Missing required argument: repo',
       });
     }),
   );
@@ -407,7 +407,7 @@ describe('prune rendering', () => {
       layer = envFor();
 
       expect(yield* Effect.promise(() => main(['prune', '--wat'], layer))).toBe(
-        "error: invalid prune arguments: Unknown option '--wat'",
+        "error: unrecognized option '--wat'",
       );
     }),
   );

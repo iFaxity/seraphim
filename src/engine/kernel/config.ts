@@ -1,12 +1,12 @@
-import { z } from 'zod';
+import { Effect, Result, Schema } from 'effect';
 
-import { isFsErrorCode, tryReadFile } from '../../lib/fs.ts';
-import { failure, success, tryCatch } from '../../lib/result.ts';
+import { KernelConfigError } from '../../lib/errors.ts';
+import { isMissing, readFileE } from '../../lib/fs.ts';
 
 /**
- * The global kernel config: one zod-validated record at `<home>/config.json`, read once at
- * the composition root. One channel, configured once — no per-project ceremony by default; a
- * nullable per-project override lives on the project record, not here.
+ * The global kernel config: one schema-validated record at `<home>/config.json`, read once
+ * at the composition root. One channel, configured once — no per-project ceremony by
+ * default; a nullable per-project override lives on the project record, not here.
  */
 
 /** The crash-detection staleness threshold default: 30 minutes. */
@@ -18,48 +18,74 @@ export type NotifyChannel = {
   readonly token: string;
 };
 
-const KernelConfigSchema = z.object({
+const UrlStringSchema = Schema.String.check(
+  Schema.makeFilter((value: string) => /^https?:\/\/\S+$/.test(value)),
+);
+
+const ChannelSchema = Schema.Struct({
+  url: UrlStringSchema,
+  token: Schema.NonEmptyString,
+});
+
+const KernelConfigSchema = Schema.Struct({
   /**
    * The notify channel: the webhook target URL (e.g. an ntfy topic) and its bearer token.
    * Null/unset means the kernel composes a silent notifier — no channel, no pages.
    */
-  notify: z
-    .object({
-      url: z.string().url(),
-      token: z.string().min(1),
-    })
-    .nullable()
-    .default(null),
+  notify: Schema.NullOr(ChannelSchema),
   /** Sessions un-refreshed longer than this are crash candidates for the crash sweep. */
-  crashStaleMs: z.number().int().positive().default(CRASH_STALE_MS_DEFAULT),
+  crashStaleMs: Schema.Int.check(Schema.isGreaterThan(0)),
 });
+
+export type KernelConfig = Schema.Schema.Type<typeof KernelConfigSchema>;
+
+/** The defaults for an absent config file: no notify channel, 30-minute staleness. */
+const defaultConfig: KernelConfig = { notify: null, crashStaleMs: CRASH_STALE_MS_DEFAULT };
 
 /**
  * Loads the global kernel config from `<home>/config.json`. An absent file is the defaults
- * (no notify channel, 30-minute staleness); a corrupt or schema-invalid file is a failure
- * Result naming the fix — the operator configured something, so fail fast instead of guessing.
+ * (no notify channel, 30-minute staleness); a corrupt or schema-invalid file fails with
+ * `KernelConfigError` naming the fix — the operator configured something, so fail fast
+ * instead of guessing.
  */
-export async function loadKernelConfig(home: string) {
-  const path = `${home}/config.json`;
-  const read = await tryReadFile(path);
+export const loadKernelConfig = (home: string): Effect.Effect<KernelConfig, KernelConfigError> =>
+  Effect.gen(function* () {
+    const path = `${home}/config.json`;
+    const read = yield* Effect.result(readFileE(path));
 
-  if (read.success) {
-    const json = await tryCatch(Promise.resolve().then(() => JSON.parse(read.data) as unknown));
-
-    if (!json.success) {
-      return failure(new Error(`kernel config corrupt at '${path}': ${json.error}`));
+    if (Result.isFailure(read)) {
+      return isMissing(read.failure)
+        ? defaultConfig
+        : yield* new KernelConfigError({
+            message: `kernel config unreadable at '${path}': ${String(read.failure)}`,
+          });
     }
 
-    const parsed = KernelConfigSchema.safeParse(json.data);
+    const body = yield* Effect.result(
+      Effect.try({
+        try: () => JSON.parse(read.success) as unknown,
+        catch: () => new KernelConfigError({ message: `kernel config corrupt at '${path}'` }),
+      }),
+    );
 
-    return parsed.success
-      ? success(parsed.data)
-      : failure(new Error(`invalid kernel config at '${path}': ${parsed.error.message}`));
-  }
+    if (Result.isFailure(body)) {
+      return yield* body.failure;
+    }
 
-  if (isFsErrorCode(read.error, 'ENOENT')) {
-    return success(KernelConfigSchema.parse({}));
-  }
+    const decoded = yield* Effect.result(
+      Effect.try({
+        try: () => Schema.decodeUnknownSync(KernelConfigSchema)(body.success),
+        catch: (error) =>
+          new KernelConfigError({
+            message: `invalid kernel config at '${path}': ${describeFailure(error)}`,
+          }),
+      }),
+    );
 
-  return failure(new Error(`kernel config unreadable at '${path}': ${String(read.error)}`));
+    return Result.isFailure(decoded) ? yield* decoded.failure : decoded.success;
+  });
+
+/** Renders a JSON-parse or Schema failure as one operator-facing line. */
+function describeFailure(error: unknown): string {
+  return error instanceof Error ? error.message.replaceAll('\n', ' ') : String(error);
 }

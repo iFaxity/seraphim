@@ -1,8 +1,8 @@
-import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
-import { Clock, Effect } from 'effect';
+import { Clock, Effect, FileSystem, Layer, Path, Result, Stdio, Terminal } from 'effect';
+import { CliError, type Flag, type Param } from 'effect/cli';
+import { ChildProcessSpawner } from 'effect/process';
 
-import { describeError } from '../../lib/errors.ts';
-import { failure, success, tryCatch, type Result } from '../../lib/result.ts';
+import { describeError, CommandParseError } from '../../lib/errors.ts';
 import { type KernelFailure } from '../core/contracts.ts';
 import { type HomeService } from '../core/env.ts';
 import {
@@ -56,82 +56,203 @@ export type AnyCommand = {
   readonly handler: (args: readonly string[]) => Effect.Effect<unknown, never, CommandServices>;
 };
 
-/** The values map a strict `parseArgs` pass yields: one last-wins scalar or array per option. */
-export type FlagValues = {
-  readonly [option: string]: string | boolean | readonly (string | boolean)[] | null;
+/**
+ * The `effect/cli` Environment the parameter parsers type-require. The engine's parameter
+ * vocabulary is booleans and plain strings — no file params, prompts, or process spawning —
+ * so no service here is ever exercised; the layer exists to close the type, in one place.
+ * If a command ever adopts a file/prompt parameter, the real service belongs at the
+ * composition root instead.
+ */
+const paramEnvironment = Layer.mergeAll(
+  Path.layer,
+  FileSystem.layerNoop({}),
+  Stdio.layerTest({}),
+  Layer.succeed(
+    Terminal.Terminal,
+    Terminal.make({
+      columns: Effect.succeed(80),
+      rows: Effect.succeed(24),
+      size: Effect.die('unused'),
+      readInput: Effect.die('unused'),
+      readLine: Effect.die('unused'),
+      display: () => Effect.void,
+    }),
+  ),
+  Layer.succeed(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.make(() => Effect.die('unused')),
+  ),
+);
+
+/** The raw argv split: positional values plus one last-wins value list per `--flag`. */
+type LexedArgs = {
+  readonly flags: Record<string, readonly string[]>;
+  readonly positionals: readonly string[];
 };
 
 /**
- * A strict `parseArgs` pass over a command's flags — no positionals, unknown flags fail.
- * Absent flags normalize to `null` (`parseArgs` yields `undefined`; the standard forbids it
- * in data). The `invalid <name> arguments: …` prefix is shared boilerplate, absorbed here.
+ * Splits raw argv the way the `effect/cli` framework's lexer does for the option shapes the
+ * engine declares: `--flag`, `--flag=value` (long form only), and `--` forcing the tail into
+ * positionals. Values consumed from the next token (`--flag value`) are not supported — the
+ * engine's flags are booleans, where a trailing token is always a positional.
  */
-export function strictFlags(
-  name: string,
-  options: ParseArgsOptionsConfig,
-): (args: readonly string[]) => Result<FlagValues> {
-  return (args) => {
-    const parsed = tryCatch(() =>
-      parseArgs({ args: [...args], options, allowPositionals: false, strict: true }),
-    );
+function lexArgs(argv: readonly string[]): LexedArgs {
+  const endIndex = argv.indexOf('--');
+  const tokens = endIndex === -1 ? argv : argv.slice(0, endIndex);
+  const trailing = endIndex === -1 ? [] : argv.slice(endIndex + 1);
 
-    if (!parsed.success) {
-      return failure(new Error(`invalid ${name} arguments: ${parsed.error.message}`));
+  const flags: Record<string, string[]> = {};
+  const positionals: string[] = [];
+
+  for (const arg of tokens) {
+    const flag = lexFlag(arg);
+
+    if (flag === null) {
+      positionals.push(arg);
+    } else {
+      (flags[flag.name] ??= []).push(flag.value);
     }
+  }
 
-    const raw = parsed.data.values as { readonly [option: string]: unknown };
-    const values: { [option: string]: FlagValues[string] } = {};
+  positionals.push(...trailing);
 
-    for (const [option, value] of Object.entries(raw)) {
-      values[option] = value === undefined ? null : (value as FlagValues[string]);
-    }
+  return { flags, positionals };
+}
 
-    return success(values);
-  };
+/** A `--flag` token reduced to its name and value (`true` when bare); null when positional. */
+function lexFlag(arg: string): { name: string; value: string } | null {
+  if (!arg.startsWith('--') || arg === '--') {
+    return null;
+  }
+
+  const equalIndex = arg.indexOf('=');
+  const name = equalIndex === -1 ? arg.slice(2) : arg.slice(2, equalIndex);
+
+  if (name === '') {
+    return null;
+  }
+
+  return { name, value: equalIndex === -1 ? 'true' : arg.slice(equalIndex + 1) };
+}
+
+/** The parsed values map a strict flag pass yields: one value per declared option. */
+export type ParsedFlags<D extends Record<string, Flag.Flag<unknown>>> = {
+  readonly [K in keyof D]: D[K] extends Param.Param<typeof Param.flagKind, infer A> ? A : never;
+};
+
+/**
+ * A strict flag pass over raw argv with `effect/cli` `Flag` definitions, keyed by the names
+ * the execute body reads: unknown flags fail, defaults apply, `--no-<name>` negates a
+ * boolean. Validation failures and defaults are the library's (`CliError` taxonomy), wrapped
+ * once into the engine's `CommandParseError`.
+ */
+export function parseFlags<const D extends Record<string, Flag.Flag<unknown>>>(
+  defs: D,
+): (args: readonly string[]) => Effect.Effect<ParsedFlags<D>, CommandParseError> {
+  return (args) =>
+    Effect.gen(function* () {
+      const lexed = lexArgs(args);
+
+      for (const name of Object.keys(lexed.flags)) {
+        const known = name in defs || (name.startsWith('no-') && name.slice(3) in defs);
+
+        if (!known) {
+          return yield* new CommandParseError({ message: `unrecognized option '--${name}'` });
+        }
+      }
+
+      const values: Record<string, unknown> = {};
+
+      for (const [name, param] of Object.entries(defs)) {
+        const parsed = yield* Effect.result(
+          param.parse({ arguments: [], flags: lexed.flags }).pipe(Effect.provide(paramEnvironment)),
+        );
+
+        if (Result.isFailure(parsed)) {
+          return yield* new CommandParseError({ message: parsed.failure.message });
+        }
+
+        values[name] = parsed.success[1];
+      }
+
+      return values as ParsedFlags<D>;
+    });
+}
+
+/** The parsed values record a strict positional pass yields, keyed per definition. */
+export type ParsedPositionals<
+  D extends Record<string, Param.Param<typeof Param.argumentKind, unknown>>,
+> = {
+  readonly [K in keyof D]: D[K] extends Param.Param<typeof Param.argumentKind, infer A> ? A : never;
+};
+
+/**
+ * A strict positional pass with `effect/cli` `Argument` definitions, keyed by the names the
+ * execute body reads: missing arguments and invalid values fail with the library's taxonomy,
+ * leftovers fail as unexpected arguments.
+ */
+export function parsePositionals<
+  const D extends Record<string, Param.Param<typeof Param.argumentKind, unknown>>,
+>(defs: D): (args: readonly string[]) => Effect.Effect<ParsedPositionals<D>, CommandParseError> {
+  return (args) =>
+    Effect.gen(function* () {
+      const lexed = lexArgs(args);
+      const values: Record<string, unknown> = {};
+      let rest = lexed.positionals;
+
+      for (const [name, def] of Object.entries(defs)) {
+        const parsed = yield* Effect.result(
+          def.parse({ arguments: rest, flags: {} }).pipe(Effect.provide(paramEnvironment)),
+        );
+
+        if (Result.isFailure(parsed)) {
+          return yield* new CommandParseError({ message: parsed.failure.message });
+        }
+
+        rest = parsed.success[0];
+        values[name] = parsed.success[1];
+      }
+
+      if (rest.length > 0) {
+        return yield* new CommandParseError({
+          message: new CliError.UnexpectedArgument({ arguments: [...rest] }).message,
+        });
+      }
+
+      return values as ParsedPositionals<D>;
+    });
 }
 
 /**
- * The shared command scaffold: parse arguments once, then run the execute body as an Effect
- * over the engine's services — the kernel's tagged failures are translated to the error
- * outcome exactly once, here (the policy the composition root inherits), never per-site.
- * The execute function's type is captured whole (rather than inferring an outcome parameter
- * from it) so a multi-shape execute — several success variants — keeps its full union in
- * the derived dispatcher.
+ * The shared command scaffold: parse arguments once as an Effect (failures are the
+ * `CommandParseError` typed failure), then run the execute body as an Effect over the
+ * engine's services — the kernel's tagged failures are translated to the error outcome
+ * exactly once, here (the policy the composition root inherits), never per-site. `P` is
+ * the command's parsed shape (the execute body annotates it; parse must produce it); `O`
+ * is the execute's outcome union, kept whole — a multi-shape execute (several success
+ * variants) keeps its full union in the derived dispatcher.
  */
-/** Reduced from the executor's error type to the dispatcher's outcome union. */
-export type OutcomeOf<E> = E extends (
-  parsed: never,
-) => Effect.Effect<infer O, KernelFailure, CommandServices>
-  ? O
-  : never;
-
-export function command<
-  Name extends string,
-  P,
-  E extends (parsed: P) => Effect.Effect<unknown, KernelFailure, CommandServices>,
->(def: {
+export function command<P, Name extends string, O>(def: {
   readonly name: Name;
   readonly summary: string;
   readonly usage: string;
-  readonly parse: (args: readonly string[]) => Result<P>;
-  readonly execute: E;
-}): Command<Name, OutcomeOf<E>> {
+  readonly parse: (args: readonly string[]) => Effect.Effect<P, CommandParseError>;
+  readonly execute: (parsed: P) => Effect.Effect<O, KernelFailure, CommandServices>;
+}): Command<Name, O> {
   const { name, summary, usage, parse, execute } = def;
 
   return {
     name,
     summary,
     usage,
-    handler: (args): Effect.Effect<OutcomeOf<E> | ErrorOutcome, never, CommandServices> => {
-      const parsed = parse(args);
-
-      if (!parsed.success) {
-        return Effect.succeed({ kind: 'error', message: parsed.error.message });
-      }
-
-      return execute(parsed.data).pipe(
-        Effect.mapError((error) => ({ kind: 'error' as const, message: describeError(error) })),
-      ) as Effect.Effect<OutcomeOf<E> | ErrorOutcome, never, CommandServices>;
-    },
+    handler: (args): Effect.Effect<O | ErrorOutcome, never, CommandServices> =>
+      Effect.matchEffect(parse(args), {
+        onFailure: (error: CommandParseError) =>
+          Effect.succeed({ kind: 'error' as const, message: error.message }),
+        onSuccess: (parsed) =>
+          execute(parsed).pipe(
+            Effect.mapError((error) => ({ kind: 'error' as const, message: describeError(error) })),
+          ),
+      }) as Effect.Effect<O | ErrorOutcome, never, CommandServices>,
   };
 }

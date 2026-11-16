@@ -1,8 +1,6 @@
 import { existsSync, readFileSync, type Dirent, type Stats } from 'node:fs';
 import { Effect } from 'effect';
 
-import { failure, success, tryCatch, type Result } from './result.ts';
-
 import {
   cp,
   mkdir,
@@ -17,25 +15,12 @@ import {
 
 /** True when the path exists and is a regular file; missing or other node kinds read false. */
 export async function fileExists(path: string) {
-  const statResult = await tryCatch(stat(path));
-
-  if (!statResult.success) {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
     return false;
   }
-
-  return statResult.data.isFile();
 }
-
-/** Reads one UTF-8 text file as a Result — an absent or unreadable file fails, never throws. */
-export async function tryReadFile(path: string | URL) {
-  return await tryCatch(readFile(path, 'utf8'));
-}
-
-/** Lists one directory's entries with types as a Result — an absent or unreadable
- * directory fails, never throws. */
-
-/** Removes one file or directory tree as a Result — `recursive` + `force` prunes a whole
- * tree by default; pass flags to restrict it. */
 
 export type WriteFileOptions = {
   path: string | URL;
@@ -43,18 +28,14 @@ export type WriteFileOptions = {
   flag?: string;
 };
 
-/** Writes one text file as a Result — `wx` first (never clobber an owner's copy) unless
- * the caller passes a different flag. */
-
 export type CopyOptions = {
   path: string | URL;
   to: string | URL;
 };
 
 // — Effect-side fs primitives —
-// Same semantics as the `try*` helpers above, for modules composed in Effect: absence is a
-// `false` or a failed read per the helper, never a throw, and the error channel is the
-// caller's to map onto its contract's taxonomy.
+// Absence is a `false` or a failed read per the helper, never a throw, and the error channel
+// is the caller's to map onto its contract's taxonomy.
 
 /** Converts one fs effect's raw error channel into a tagged kernel failure. */
 export const fsTagged =
@@ -173,13 +154,13 @@ export function fileExistsSync(path: string) {
   return existsSync(path);
 }
 
-/** Reads one UTF-8 text file synchronously as a Result — for the startup path that cannot
- * await, an unreadable file fails naming the error instead of throwing. */
-export function tryReadFileSync(path: string): Result<string, Error> {
+/** Reads one UTF-8 text file synchronously; null when missing or unreadable — the
+ * optional-config read (the caller decides what absence means). */
+export function readTextFileSync(path: string): string | null {
   try {
-    return success(readFileSync(path, 'utf8'));
-  } catch (error) {
-    return failure(error instanceof Error ? error : new Error(String(error)));
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
   }
 }
 

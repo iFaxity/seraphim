@@ -1,5 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Effect, Result } from 'effect';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import { loadKernelConfig } from './config.ts';
@@ -18,14 +19,10 @@ afterEach(async () => {
 
 describe('loadKernelConfig', () => {
   it('defaults to no notify channel and a 30-minute crash staleness threshold', async () => {
-    const read = await loadKernelConfig(home);
+    const config = await Effect.runPromise(loadKernelConfig(home));
 
-    expect(read.success).toBe(true);
-
-    if (read.success) {
-      expect(read.data.notify).toBeNull();
-      expect(read.data.crashStaleMs).toBe(30 * 60_000);
-    }
+    expect(config.notify).toBeNull();
+    expect(config.crashStaleMs).toBe(30 * 60_000);
   });
 
   it('reads the notify channel and staleness threshold from config.json', async () => {
@@ -37,17 +34,13 @@ describe('loadKernelConfig', () => {
       }),
     );
 
-    const read = await loadKernelConfig(home);
+    const config = await Effect.runPromise(loadKernelConfig(home));
 
-    expect(read.success).toBe(true);
-
-    if (read.success) {
-      expect(read.data.notify).toEqual({
-        url: 'https://ntfy.invalid/seraphim',
-        token: 'tk_secret',
-      });
-      expect(read.data.crashStaleMs).toBe(5 * 60_000);
-    }
+    expect(config.notify).toEqual({
+      url: 'https://ntfy.invalid/seraphim',
+      token: 'tk_secret',
+    });
+    expect(config.crashStaleMs).toBe(5 * 60_000);
   });
 
   it('fails fast naming the file for a schema-invalid config', async () => {
@@ -57,12 +50,12 @@ describe('loadKernelConfig', () => {
       JSON.stringify({ notify: { url: 'not a url', token: 'tk' } }),
     );
 
-    const read = await loadKernelConfig(home);
+    const failure = await Effect.runPromise(Effect.result(loadKernelConfig(home)));
 
-    expect(read.success).toBe(false);
+    expect(Result.isFailure(failure)).toBe(true);
 
-    if (!read.success) {
-      expect(read.error.message).toMatch(/invalid kernel config/);
+    if (Result.isFailure(failure)) {
+      expect(failure.failure.message).toMatch(/invalid kernel config/);
     }
   });
 
@@ -70,12 +63,12 @@ describe('loadKernelConfig', () => {
     await mkdir(home, { recursive: true });
     await writeFile(join(home, 'config.json'), '{not json');
 
-    const read = await loadKernelConfig(home);
+    const failure = await Effect.runPromise(Effect.result(loadKernelConfig(home)));
 
-    expect(read.success).toBe(false);
+    expect(Result.isFailure(failure)).toBe(true);
 
-    if (!read.success) {
-      expect(read.error.message).toMatch(/corrupt/);
+    if (Result.isFailure(failure)) {
+      expect(failure.failure.message).toMatch(/corrupt/);
     }
   });
 });

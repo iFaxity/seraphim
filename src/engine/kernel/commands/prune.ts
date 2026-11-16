@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
+import { Flag } from 'effect/cli';
 
-import { command, strictFlags } from '../command.ts';
+import { command, parseFlags } from '../command.ts';
 import { planPrune, runPrune } from '../prune.ts';
 
 // Outcomes: `prune-plan` before confirmation — the computed plan, nothing deleted yet —
@@ -9,11 +10,11 @@ export const pruneCommand = command({
   name: 'prune',
   summary: 'confirm-then-delete worktrees and sessions',
   usage: 'prune [--json] [--confirm]',
-  parse: strictFlags('prune', {
-    json: { type: 'boolean', default: false },
-    confirm: { type: 'boolean', default: false },
+  parse: parseFlags({
+    json: Flag.Boolean('json').pipe(Flag.withDefault(false)),
+    confirm: Flag.Boolean('confirm').pipe(Flag.withDefault(false)),
   }),
-  execute: (values) =>
+  execute: (values: { json: boolean; confirm: boolean }) =>
     Effect.gen(function* () {
       // Deletion runs over a freshly computed plan: the operator confirmed the listing, and
       // the executor re-derives eligibility so nothing deleted in between is touched twice.
