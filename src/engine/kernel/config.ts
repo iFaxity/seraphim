@@ -32,12 +32,16 @@ const KernelConfigSchema = Schema.Struct({
    * The notify channel: the webhook target URL (e.g. an ntfy topic) and its bearer token.
    * Null/unset means the kernel composes a silent notifier — no channel, no pages.
    */
-  notify: Schema.NullOr(ChannelSchema),
+  notify: Schema.optionalKey(Schema.NullOr(ChannelSchema)),
   /** Sessions un-refreshed longer than this are crash candidates for the crash sweep. */
-  crashStaleMs: Schema.Int.check(Schema.isGreaterThan(0)),
+  crashStaleMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 
-export type KernelConfig = Schema.Schema.Type<typeof KernelConfigSchema>;
+/** The loaded kernel config, with the defaults applied for absent keys. */
+export type KernelConfig = {
+  readonly notify: NotifyChannel | null;
+  readonly crashStaleMs: number;
+};
 
 /** The defaults for an absent config file: no notify channel, 30-minute staleness. */
 const defaultConfig: KernelConfig = { notify: null, crashStaleMs: CRASH_STALE_MS_DEFAULT };
@@ -82,7 +86,16 @@ export const loadKernelConfig = (home: string): Effect.Effect<KernelConfig, Kern
       }),
     );
 
-    return Result.isFailure(decoded) ? yield* decoded.failure : decoded.success;
+    if (Result.isFailure(decoded)) {
+      return yield* decoded.failure;
+    }
+
+    // Absent keys take the defaults the absent file would have — a partial file is not an
+    // invalid one (the pre-Schema zod contract behaved this way, and operators rely on it).
+    return {
+      notify: decoded.success.notify ?? null,
+      crashStaleMs: decoded.success.crashStaleMs ?? CRASH_STALE_MS_DEFAULT,
+    };
   });
 
 /** Renders a JSON-parse or Schema failure as one operator-facing line. */

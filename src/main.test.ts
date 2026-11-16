@@ -115,11 +115,22 @@ describe('engine', () => {
   it.effect('validates run arguments and reports the error outcome', () =>
     Effect.gen(function* () {
       const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      const outcome = yield* run(engine(['run']), layer);
+      const missingRepo = yield* run(engine(['run']), layer);
+      const negativeIssue = yield* run(engine(['run', 'x/y', '-5']), layer);
+      const strayFlag = yield* run(engine(['run', 'x/y', '7', '--wat']), layer);
 
-      expect(outcome).toEqual({
+      expect(missingRepo).toEqual({
         kind: 'error',
         message: 'Missing required argument: repo',
+      });
+      expect(negativeIssue).toEqual({
+        kind: 'error',
+        message:
+          'Invalid value for argument <issue-number>: "-5". Expected: expected usage: run <repo> <issue#>, got -5',
+      });
+      expect(strayFlag).toEqual({
+        kind: 'error',
+        message: "unrecognized option '--wat'",
       });
     }),
   );

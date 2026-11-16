@@ -541,7 +541,7 @@ function abort(stateRef: Ref.Ref<SessionStateFields>, aborted: TurnAborted) {
   return Ref.modify(
     stateRef,
     (fields) => [new TurnAbortedError(aborted.exitState), transitionState(fields, event)] as const,
-  ).pipe(Effect.flatMap((error) => Effect.fail(error)));
+  ).pipe(Effect.flatMap(Effect.fail));
 }
 
 /**

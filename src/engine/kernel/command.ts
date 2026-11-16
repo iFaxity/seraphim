@@ -135,9 +135,23 @@ function lexFlag(arg: string): { name: string; value: string } | null {
   return { name, value: equalIndex === -1 ? 'true' : arg.slice(equalIndex + 1) };
 }
 
+/** The first lexed flag no declaration covers (including `--no-<name>` negations), or null. */
+function unknownFlag(
+  flags: Record<string, readonly string[]>,
+  defs: Record<string, unknown>,
+): string | null {
+  for (const name of Object.keys(flags)) {
+    if (!(name in defs) && !(name.startsWith('no-') && name.slice(3) in defs)) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
 /** The parsed values map a strict flag pass yields: one value per declared option. */
-export type ParsedFlags<D extends Record<string, Flag.Flag<unknown>>> = {
-  readonly [K in keyof D]: D[K] extends Param.Param<typeof Param.flagKind, infer A> ? A : never;
+export type ParsedValues<D, Kind extends Param.ParamKind> = {
+  readonly [K in keyof D]: D[K] extends Param.Param<Kind, infer A> ? A : never;
 };
 
 /**
@@ -148,17 +162,17 @@ export type ParsedFlags<D extends Record<string, Flag.Flag<unknown>>> = {
  */
 export function parseFlags<const D extends Record<string, Flag.Flag<unknown>>>(
   defs: D,
-): (args: readonly string[]) => Effect.Effect<ParsedFlags<D>, CommandParseError> {
+): (
+  args: readonly string[],
+) => Effect.Effect<ParsedValues<D, typeof Param.flagKind>, CommandParseError> {
   return (args) =>
     Effect.gen(function* () {
       const lexed = lexArgs(args);
 
-      for (const name of Object.keys(lexed.flags)) {
-        const known = name in defs || (name.startsWith('no-') && name.slice(3) in defs);
+      const unknown = unknownFlag(lexed.flags, defs);
 
-        if (!known) {
-          return yield* new CommandParseError({ message: `unrecognized option '--${name}'` });
-        }
+      if (unknown !== null) {
+        return yield* new CommandParseError({ message: `unrecognized option '--${unknown}'` });
       }
 
       const values: Record<string, unknown> = {};
@@ -175,30 +189,33 @@ export function parseFlags<const D extends Record<string, Flag.Flag<unknown>>>(
         values[name] = parsed.success[1];
       }
 
-      return values as ParsedFlags<D>;
+      return values as ParsedValues<D, typeof Param.flagKind>;
     });
 }
-
-/** The parsed values record a strict positional pass yields, keyed per definition. */
-export type ParsedPositionals<
-  D extends Record<string, Param.Param<typeof Param.argumentKind, unknown>>,
-> = {
-  readonly [K in keyof D]: D[K] extends Param.Param<typeof Param.argumentKind, infer A> ? A : never;
-};
 
 /**
  * A strict positional pass with `effect/cli` `Argument` definitions, keyed by the names the
  * execute body reads: missing arguments and invalid values fail with the library's taxonomy,
- * leftovers fail as unexpected arguments.
+ * unknown flags and leftovers fail as unexpected input.
  */
 export function parsePositionals<
   const D extends Record<string, Param.Param<typeof Param.argumentKind, unknown>>,
->(defs: D): (args: readonly string[]) => Effect.Effect<ParsedPositionals<D>, CommandParseError> {
+>(
+  defs: D,
+): (
+  args: readonly string[],
+) => Effect.Effect<ParsedValues<D, typeof Param.argumentKind>, CommandParseError> {
   return (args) =>
     Effect.gen(function* () {
       const lexed = lexArgs(args);
       const values: Record<string, unknown> = {};
       let rest = lexed.positionals;
+
+      const unknown = unknownFlag(lexed.flags, defs);
+
+      if (unknown !== null) {
+        return yield* new CommandParseError({ message: `unrecognized option '--${unknown}'` });
+      }
 
       for (const [name, def] of Object.entries(defs)) {
         const parsed = yield* Effect.result(
@@ -219,7 +236,7 @@ export function parsePositionals<
         });
       }
 
-      return values as ParsedPositionals<D>;
+      return values as ParsedValues<D, typeof Param.argumentKind>;
     });
 }
 
