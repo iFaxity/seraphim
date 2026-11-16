@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Layer, ManagedRuntime } from 'effect';
+import { Effect, Layer, ManagedRuntime, Result } from 'effect';
 
 import { engine } from './engine/core/engine.ts';
 import { HomeService, homeLayout } from './engine/core/env.ts';
@@ -17,9 +17,8 @@ import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.
 import { runtimeLayer } from './engine/runtimes/pi.ts';
 import { dockerCliLayer, dockerSandboxLayer } from './engine/sandboxes/docker-sandbox.ts';
 import { readEnvFile } from './lib/env-file.ts';
-import { describeError } from './lib/errors.ts';
+import { describeError, KernelConfigError } from './lib/errors.ts';
 import { fileExistsSync } from './lib/fs.ts';
-import { success, type Result } from './lib/result.ts';
 
 /**
  * CLI boundary: the only place engine outcomes become stdout prose. Rendering lives here so
@@ -30,13 +29,13 @@ import { success, type Result } from './lib/result.ts';
  */
 export async function main(argv: readonly string[], layer?: Layer.Layer<CommandServices>) {
   if (layer == null) {
-    const composed = await composeEngineLayer();
+    const composed = await Effect.runPromise(Effect.result(composeEngineLayer));
 
-    if (!composed.success) {
-      return `error: ${composed.error.message}`;
+    if (Result.isFailure(composed)) {
+      return `error: ${describeError(composed.failure)}`;
     }
 
-    layer = composed.data;
+    layer = composed.success;
   }
 
   const managed = ManagedRuntime.make(layer);
@@ -125,19 +124,17 @@ function engineLayer<RIn>(adapters: Layer.Layer<never, never, RIn>, home: string
   );
 }
 
-async function composeEngineLayer() {
+const composeEngineLayer: Effect.Effect<
+  Layer.Layer<CommandServices>,
+  KernelConfigError
+> = Effect.gen(function* () {
   const deps = homeDeps();
-  const config = await loadKernelConfig(deps.home);
-
-  if (!config.success) {
-    return config;
-  }
-
-  const baseLayer = baseDepsLayer(deps, config.data.notify);
+  const config = yield* loadKernelConfig(deps.home);
+  const baseLayer = baseDepsLayer(deps, config.notify);
   const adapters = adaptersLayer(baseLayer, deps.projectsRoot);
 
-  return success(engineLayer(adapters, deps.home) as Layer.Layer<CommandServices>);
-}
+  return engineLayer(adapters, deps.home) as Layer.Layer<CommandServices>;
+});
 
 /**
  * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
@@ -159,7 +156,7 @@ type OutcomeRenderer = {
   [K in Outcome['kind']]: (
     out: Extract<Outcome, { kind: K }>,
     run: RunNext,
-  ) => Result<string> | Promise<Result<string>>;
+  ) => string | Promise<string>;
 };
 
 /**
@@ -170,18 +167,15 @@ const RENDER: OutcomeRenderer = {
   'help': (out) => {
     const lines = out.entries.map((e) => `  ${e.usage.padEnd(24)} ${e.summary}`);
 
-    return success([`usage: seraphim ${out.usage}`, '', ...lines].join('\n'));
+    return [`usage: seraphim ${out.usage}`, '', ...lines].join('\n');
   },
-  'command-help': (out) => success(`usage: seraphim ${out.usage}\n\n  ${out.summary}`),
-  'unimplemented': () => success('not implemented yet'),
+  'command-help': (out) => `usage: seraphim ${out.usage}\n\n  ${out.summary}`,
+  'unimplemented': () => 'not implemented yet',
   'session-ran': (out) =>
-    success(`session ${out.repo}#${out.issueNumber} ${out.state} — receipts: ${out.receiptDir}`),
+    `session ${out.repo}#${out.issueNumber} ${out.state} — receipts: ${out.receiptDir}`,
   'registered': (out) =>
-    success(
-      `${out.reactivated ? 'reactivated' : 'registered'} ${out.repo} — ${out.remote}\n${out.artifacts.length > 0 ? `seeded: ${out.artifacts.join(', ')}` : 'existing project assets kept'}`,
-    ),
-  'deactivated': (out) =>
-    success(`deactivated ${out.repo} — sessions will refuse it until re-registered`),
+    `${out.reactivated ? 'reactivated' : 'registered'} ${out.repo} — ${out.remote}\n${out.artifacts.length > 0 ? `seeded: ${out.artifacts.join(', ')}` : 'existing project assets kept'}`,
+  'deactivated': (out) => `deactivated ${out.repo} — sessions will refuse it until re-registered`,
   'prune-plan': (out, run) => renderPrunePlan(out, run),
   'prune-done': (out) => {
     const count =
@@ -200,25 +194,19 @@ const RENDER: OutcomeRenderer = {
       ...out.failed.map((detail) => `failed: ${detail}`),
     ];
 
-    return success(
-      `prune removed ${count} item(s)\n${lines.join('\n')}${out.failed.length > 0 ? `\n${out.failed.length} failure(s) — the rest completed` : ''}`,
-    );
+    return `prune removed ${count} item(s)\n${lines.join('\n')}${out.failed.length > 0 ? `\n${out.failed.length} failure(s) — the rest completed` : ''}`;
   },
   'projects': (out) => renderProjects(out),
   'status': (out) => renderStatus(out),
-  'error': (out) => success(`error: ${out.message}`),
+  'error': (out) => `error: ${out.message}`,
 };
 
 async function render(out: Outcome, run: RunNext): Promise<string> {
   // The discriminant lookup cannot correlate the union member for TS; the cast local
   // restores the (out.kind == renderer key) pairing the mapped type guarantees.
-  const renderer = RENDER[out.kind] as (
-    out: Outcome,
-    run: RunNext,
-  ) => Result<string> | Promise<Result<string>>;
-  const rendered = await renderer(out, run);
+  const renderer = RENDER[out.kind] as (out: Outcome, run: RunNext) => string | Promise<string>;
 
-  return rendered.success ? rendered.data : `error: ${rendered.error.message}`;
+  return await renderer(out, run);
 }
 
 /**
@@ -228,64 +216,64 @@ async function render(out: Outcome, run: RunNext): Promise<string> {
 async function renderPrunePlan(
   out: Extract<Outcome, { kind: 'prune-plan' }>,
   run: RunNext,
-): Promise<Result<string>> {
+): Promise<string> {
   if (out.json) {
-    return success(JSON.stringify(out.plan, null, 2));
+    return JSON.stringify(out.plan, null, 2);
   }
 
   const lines = prunePlanLines(out.plan);
 
   if (lines.length === 0) {
-    return success('nothing eligible for cleanup');
+    return 'nothing eligible for cleanup';
   }
 
   const tree = `prune plan — per project, nothing deleted until you confirm:\n\n${lines.join('\n\n')}`;
 
   if (!process.stdin.isTTY) {
-    return success(`${tree}\n\nnothing deleted: rerun with --confirm to delete these`);
+    return `${tree}\n\nnothing deleted: rerun with --confirm to delete these`;
   }
 
   process.stdout.write(`${tree}\n\ndelete all of the above? [y/N] `);
   const answer = await readLine();
 
   if (answer.trim().toLowerCase() !== 'y') {
-    return success('aborted: nothing deleted');
+    return 'aborted: nothing deleted';
   }
 
   const confirmed = await run(['prune', '--confirm']);
 
-  return success(await render(confirmed, run));
+  return await render(confirmed, run);
 }
 
 function renderProjects(out: Extract<Outcome, { kind: 'projects' }>) {
   if (out.json) {
-    return success(JSON.stringify(out, null, 2));
+    return JSON.stringify(out, null, 2);
   }
 
   if (out.projects.length === 0) {
-    return success(out.skipped ? `no projects (${out.skipped} unreadable skipped)` : 'no projects');
+    return out.skipped ? `no projects (${out.skipped} unreadable skipped)` : 'no projects';
   }
 
   const rows = out.projects.map((p) => `  ${p.repo}  ${p.state}  ${p.remote}`);
   const skipped = out.skipped ? `\n${out.skipped} unreadable project records skipped` : '';
 
-  return success(`projects:\n${rows.join('\n')}${skipped}`);
+  return `projects:\n${rows.join('\n')}${skipped}`;
 }
 
 function renderStatus(out: Extract<Outcome, { kind: 'status' }>) {
   if (out.json) {
-    return success(JSON.stringify(out, null, 2));
+    return JSON.stringify(out, null, 2);
   }
 
   if (out.sessions.length === 0) {
-    return success(out.skipped ? `no sessions (${out.skipped} unreadable skipped)` : 'no sessions');
+    return out.skipped ? `no sessions (${out.skipped} unreadable skipped)` : 'no sessions';
   }
 
   const lines = out.sessions.map(renderSessionLine);
   const worktrees = out.sessions.map((s) => `${s.repo}#${s.issueNumber}: ${s.worktreePath}`);
   const skipped = out.skipped ? `\n${out.skipped} unreadable receipt directories skipped` : '';
 
-  return success(`${lines.join('\n')}\nworktrees:\n${worktrees.join('\n')}${skipped}`);
+  return `${lines.join('\n')}\nworktrees:\n${worktrees.join('\n')}${skipped}`;
 }
 
 /**

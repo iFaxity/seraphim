@@ -1,8 +1,9 @@
 import { Effect } from 'effect';
+import { Flag } from 'effect/cli';
 
 import { toEpochMs } from '../../../lib/time.ts';
 import { HomeService } from '../../core/env.ts';
-import { command, strictFlags } from '../command.ts';
+import { command, parseFlags } from '../command.ts';
 import { listSessions, type SessionListing, type SessionState } from '../receipts.ts';
 
 /** One listed session, as `status` reports it (the manifest row, presentation-free). */
@@ -47,8 +48,8 @@ export const statusCommand = command({
   name: 'status',
   summary: 'list sessions and worktrees',
   usage: 'status [--json]',
-  parse: strictFlags('status', { json: { type: 'boolean', default: false } }),
-  execute: (values) =>
+  parse: parseFlags({ json: Flag.Boolean('json').pipe(Flag.withDefault(false)) }),
+  execute: (values: { json: boolean }) =>
     Effect.gen(function* () {
       const home = yield* HomeService;
       const listed = yield* listSessions(home.sessionsRoot);

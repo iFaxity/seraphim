@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Clock, Context, Effect, Result } from 'effect';
+import { Clock, Context, Effect, Ref, Result } from 'effect';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -84,6 +84,56 @@ type RunnableFlow = {
 type SessionDraft = { -readonly [K in keyof Session]: Session[K] };
 
 /**
+ * The mid-run mutable trio of the manifest — the only fields a running session transitions.
+ * They live in one `Ref` so ctx closures and finalization never mutate a shared struct from
+ * concurrent fibers; every change is a total transition (see {@link transitionState}).
+ */
+type SessionStateFields = Pick<Session, 'state' | 'capHit' | 'prUrl'>;
+
+/**
+ * The events a session's state responds to. `turn-aborted` is discriminated so a cap breach
+ * always carries its reason — the type alone makes "cap-hit with no reason" unrepresentable.
+ */
+type StateEvent =
+  | { readonly kind: 'pr-opened'; readonly url: string }
+  | { readonly kind: 'turn-aborted'; readonly exitState: 'cap-hit'; readonly reason: string }
+  | { readonly kind: 'turn-aborted'; readonly exitState: 'failed' }
+  | { readonly kind: 'flow-completed' }
+  | { readonly kind: 'flow-failed' };
+
+/**
+ * The one implementation of the terminal-state invariants (issue #74 freeze-point contract):
+ * a terminal state (`completed` | `failed` | `cap-hit`) is sticky, a cap breach moves only
+ * to `cap-hit` and always records its reason, and `capHit` is non-null exactly when the
+ * state is `cap-hit`. Mutation order across ctx closures and finalization cannot violate
+ * these — every path funnels through this total function.
+ */
+function transitionState(fields: SessionStateFields, event: StateEvent): SessionStateFields {
+  switch (event.kind) {
+    case 'pr-opened': {
+      // A PR URL is not a terminal transition: a flow may open (or re-open) a draft PR after
+      // a failed turn — the receipt keeps the latest URL.
+      return { ...fields, prUrl: event.url };
+    }
+    case 'turn-aborted': {
+      if (fields.state !== 'running') {
+        return fields;
+      }
+
+      return event.exitState === 'cap-hit'
+        ? { ...fields, state: 'cap-hit', capHit: event.reason }
+        : { ...fields, state: 'failed' };
+    }
+    case 'flow-completed': {
+      return fields.state === 'running' ? { ...fields, state: 'completed' } : fields;
+    }
+    case 'flow-failed': {
+      return fields.state === 'running' ? { ...fields, state: 'failed' } : fields;
+    }
+  }
+}
+
+/**
  * The mutable session state the receipt is built from. Adapter services are NOT part of it:
  * they ride the session's Effect context (resolved per call site), so this struct is only
  * the state one run owns — never the deleted environment-object funnel reborn.
@@ -94,6 +144,8 @@ type SessionRun = {
   readonly worktreePath: string;
   readonly model: string;
   readonly manifest: SessionDraft;
+  /** The authoritative mid-run state trio — ctx closures and finalization transition it. */
+  readonly stateRef: Ref.Ref<SessionStateFields>;
   readonly turnsEngine: TurnEngine;
   readonly logs: string[];
   /** The claimed issue's title: every operator page names it. */
@@ -209,10 +261,15 @@ export const runSession = (
     });
     const logs: string[] = [];
 
-    // Drafted now for the ctx callbacks to mutate; the manifest schema is checked once, at
-    // write time below, so the validated shape is the one actually persisted — not an
-    // empty-turns snapshot.
+    // Drafted now for the ctx callbacks to transition; the manifest schema is checked once,
+    // at write time below, so the validated shape is the one actually persisted — not an
+    // empty-turns snapshot. The mutable trio lives in the Ref, never the draft object.
     const manifest = createSessionManifest(input, flow, { startedAt, branch, worktreePath });
+    const stateRef = yield* Ref.make<SessionStateFields>({
+      state: 'running',
+      capHit: null,
+      prUrl: null,
+    });
 
     const run: SessionRun = {
       home,
@@ -220,6 +277,7 @@ export const runSession = (
       worktreePath,
       model: flow.config.model,
       manifest,
+      stateRef,
       turnsEngine,
       logs,
       issueTitle: issue.title,
@@ -380,16 +438,17 @@ const notifyOperator = (run: SessionRun, notifier: Notifier, event: NotifyEvent,
 /**
  * Builds the flow-facing `SessionContext` over the session's adapters and turn ledger:
  * logging, gate commands, draft-PR opening, branch pushing, and turn dispatch. The ctx
- * closures mutate the manifest (the receipt) and the session log; `ctx.run` gates and
- * records every turn through the turn engine. The session's captured context bridges the
- * flow's promises back into the session's service stack.
+ * closures transition the session's state `Ref` (never a shared mutable struct) and push to
+ * the session log; `ctx.run` gates and records every turn through the turn engine. The
+ * session's captured context bridges the flow's promises back into the session's service
+ * stack — the flow-invocation edge is the only place a run function appears.
  */
 function createFlowContext(
   run: SessionRun,
   identity: { readonly issue: Issue; readonly branch: string; readonly repoPath: string },
   context: Context.Context<SessionServices>,
 ): SessionContext {
-  const { input, worktreePath, manifest } = run;
+  const { input, worktreePath, stateRef } = run;
   const { issue, branch, repoPath } = identity;
 
   // Each closure resolves the adapter it needs from the session's captured context — the
@@ -429,9 +488,9 @@ function createFlowContext(
               })
               .pipe(
                 Effect.tap((pr) =>
-                  Effect.sync(() => {
-                    manifest.prUrl = pr.url;
-                  }),
+                  Ref.update(stateRef, (fields) =>
+                    transitionState(fields, { kind: 'pr-opened', url: pr.url }),
+                  ),
                 ),
                 Effect.tap((pr) =>
                   notifyOperator(run, notifier, 'pr-opened', `draft PR opened: ${pr.url}`),
@@ -467,20 +526,22 @@ function createFlowContext(
 }
 
 /**
- * Records the exit state on the manifest (plus the budget reason for a cap breach), then
- * fails with the promise-boundary error so the flow stops. One helper so every abort records
- * the same way — the manifest is the receipt, and the transcript (engine-side) tells the
- * human what the flow wanted next. Called exactly once per dispatch failure: the caller
- * short-circuits on the failure, so there is no double-abort.
+ * Transitions the session state on one abort, then fails with the promise-boundary error so
+ * the flow stops. One helper so every abort records the same way — the manifest is the
+ * receipt, and the transcript (engine-side) tells the human what the flow wanted next.
+ * Called exactly once per dispatch failure: the caller short-circuits on the failure, so
+ * there is no double-abort (a repeated abort re-derives the same terminal state).
  */
-function abort(manifest: SessionDraft, aborted: TurnAborted) {
-  manifest.state = aborted.exitState;
+function abort(stateRef: Ref.Ref<SessionStateFields>, aborted: TurnAborted) {
+  const event =
+    aborted.exitState === 'cap-hit'
+      ? { kind: 'turn-aborted' as const, exitState: 'cap-hit' as const, reason: aborted.reason }
+      : { kind: 'turn-aborted' as const, exitState: 'failed' as const };
 
-  if (aborted.kind === 'cap') {
-    manifest.capHit = aborted.reason;
-  }
-
-  return Effect.fail(new TurnAbortedError(aborted.exitState));
+  return Ref.modify(
+    stateRef,
+    (fields) => [new TurnAbortedError(aborted.exitState), transitionState(fields, event)] as const,
+  ).pipe(Effect.flatMap((error) => Effect.fail(error)));
 }
 
 /**
@@ -518,13 +579,13 @@ const runGateCommand = (run: SessionRun, sandbox: Sandbox, command: readonly str
  */
 const dispatchTurn = (run: SessionRun, runtime: AgentRuntime, prompt: string) =>
   Effect.gen(function* () {
-    const { input, worktreePath, model, manifest, turnsEngine } = run;
+    const { input, worktreePath, model, stateRef, turnsEngine } = run;
 
     // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
     // not be able to dispatch past a budget by catching the abort (spec: caps live in
     // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
     const gate = yield* turnsEngine.gate.pipe(
-      Effect.catch((aborted: TurnAborted) => abort(manifest, aborted)),
+      Effect.catch((aborted: TurnAborted) => abort(stateRef, aborted)),
     );
 
     // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
@@ -542,7 +603,7 @@ const dispatchTurn = (run: SessionRun, runtime: AgentRuntime, prompt: string) =>
     // Failures always stop for human takeover — no recovery, no further turns.
     yield* turnsEngine
       .record({ prompt, startedAt: gate.startedAt, outcome })
-      .pipe(Effect.catch((aborted: TurnAborted) => abort(manifest, aborted)));
+      .pipe(Effect.catch((aborted: TurnAborted) => abort(stateRef, aborted)));
   });
 
 /**
@@ -557,19 +618,20 @@ const finalizeSessionReceipt = (
   flowRun: Result.Result<void, Error>,
 ): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, never> =>
   Effect.gen(function* () {
-    const { home, manifest, turnsEngine, logs } = run;
+    const { home, manifest, stateRef, turnsEngine, logs } = run;
 
-    // A turn that already set a terminal state keeps it — cap-hit stays cap-hit.
-    if (Result.isFailure(flowRun) && manifest.state == 'running') {
-      manifest.state = 'failed';
-    }
-
-    if (manifest.state == 'running') {
-      manifest.state = 'completed';
-    }
+    // The flow's own outcome is the last transition: a failure fails a still-running
+    // session, a clean return completes it, and an already-terminal state stays sticky.
+    yield* Ref.update(stateRef, (fields) =>
+      transitionState(
+        fields,
+        Result.isFailure(flowRun) ? { kind: 'flow-failed' } : { kind: 'flow-completed' },
+      ),
+    );
+    const { state, capHit, prUrl } = yield* Ref.get(stateRef);
 
     const { turns, transcripts } = turnsEngine.snapshot();
-    const finalManifest = { ...manifest, endedAt: now(), turns };
+    const finalManifest = { ...manifest, state, capHit, prUrl, endedAt: now(), turns };
 
     // Terminal-state pages: a failure or cap breach stops for human takeover, so the operator
     // is paged. Completed sessions stay silent; the PR-opened page already fired in the ctx

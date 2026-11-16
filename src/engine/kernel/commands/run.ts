@@ -1,8 +1,8 @@
 import { Effect } from 'effect';
+import { Argument } from 'effect/cli';
 
-import { failure, success } from '../../../lib/result.ts';
 import { toEpochMs } from '../../../lib/time.ts';
-import { command } from '../command.ts';
+import { command, parsePositionals } from '../command.ts';
 import { sessionRelDir } from '../receipts.ts';
 import { runSession } from '../session.ts';
 
@@ -11,14 +11,11 @@ export const runCommand = command({
   name: 'run',
   summary: 'run a session for <repo> <issue#>',
   usage: 'run <repo> <issue#>',
-  parse: (args) => {
-    if (args.length !== 2 || !/^\d+$/.test(args[1] ?? '')) {
-      return failure(new Error('expected usage: run <repo> <issue#>'));
-    }
-
-    return success({ repo: args[0] ?? '', issueNumber: Number(args[1]) });
-  },
-  execute: ({ repo, issueNumber }) =>
+  parse: parsePositionals({
+    repo: Argument.String('repo'),
+    issueNumber: Argument.Int('issue-number'),
+  }),
+  execute: ({ repo, issueNumber }: { repo: string; issueNumber: number }) =>
     Effect.map(runSession({ repo, issueNumber }), (result) => {
       const { manifest } = result;
 

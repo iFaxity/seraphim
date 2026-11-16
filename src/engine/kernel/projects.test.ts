@@ -395,16 +395,14 @@ describe('engine contract: register, list, deactivate', () => {
       const noUrl = yield* run(engine(['register']), commandLayer());
       const tooMany = yield* run(engine(['register', REMOTE, 'a', 'b']), commandLayer());
 
-      expect(noUrl.kind == 'error' && noUrl.message).toBe(
-        'expected usage: register <git-url> [name]',
-      );
+      expect(noUrl.kind == 'error' && noUrl.message).toBe('Missing required argument: git-url');
       expect(tooMany.kind == 'error' && tooMany.message).toBe(
-        'expected usage: register <git-url> [name]',
+        'Unexpected positional argument: "b"',
       );
 
       const noRepo = yield* run(engine(['deactivate']), commandLayer());
 
-      expect(noRepo.kind == 'error' && noRepo.message).toBe('expected usage: deactivate <repo>');
+      expect(noRepo.kind == 'error' && noRepo.message).toBe('Missing required argument: repo');
     }),
   );
 });
