@@ -30,7 +30,7 @@ type ScriptedOutcome =
 
 /** A scripted `HttpClient` Layer plus the calls it recorded, for the assertions. */
 type ScriptedTransport = {
-  readonly calls: { method: string; url: string; body: string | null }[];
+  readonly calls: { method: string; url: string; headers: Headers; body: string | null }[];
   readonly layer: Layer.Layer<HttpClient.HttpClient>;
 };
 
@@ -40,7 +40,7 @@ type ScriptedTransport = {
  * check, and Schema validation are exercised through the production code path.
  */
 function transportLayer(outcomes: readonly ScriptedOutcome[]): ScriptedTransport {
-  const calls: { method: string; url: string; body: string | null }[] = [];
+  const calls: { method: string; url: string; headers: Headers; body: string | null }[] = [];
   let index = 0;
 
   const client = HttpClient.make((request) =>
@@ -48,6 +48,7 @@ function transportLayer(outcomes: readonly ScriptedOutcome[]): ScriptedTransport
       calls.push({
         method: request.method,
         url: request.url,
+        headers: new Headers(request.headers),
         body: request.body._tag === 'Uint8Array' ? (request.body.text ?? null) : null,
       });
 
@@ -107,6 +108,26 @@ function apiCall<A>(
       return yield* json(client);
     }),
     Layer.provide(apiLayer, Layer.succeed(GithubToken, token)),
+  );
+}
+
+/**
+ * One `client.json` call against `clientLayer` over a scripted transport, with the token
+ * scripted — the service is read from the layer-built context, exactly as the composition
+ * does.
+ */
+function apiCallOver<A>(
+  transport: ScriptedTransport,
+  token: string,
+  json: (client: GitHubClient) => Effect.Effect<A, ApiError, never>,
+) {
+  return Effect.provide(
+    Effect.gen(function* () {
+      const client = yield* GitHubClientService;
+
+      return yield* json(client);
+    }),
+    Layer.provide(clientLayer, Layer.merge(transport.layer, Layer.succeed(GithubToken, token))),
   );
 }
 
@@ -484,50 +505,37 @@ describe('githubApi', () => {
 
   it.effect('sends the bearer token, GitHub headers, and a body only for writes', () =>
     Effect.gen(function* () {
-      const calls: { method: string; headers: Headers; body: null | string }[] = [];
-      const realFetch = globalThis.fetch;
+      const transport = transportLayer([
+        { status: 200, body: '{}' },
+        { status: 200, body: '{}' },
+      ]);
 
-      globalThis.fetch = async (_input, init) => {
-        const body = typeof init?.body == 'string' ? init.body : null;
+      yield* Effect.ignore(
+        apiCallOver(transport, 'gho_dummytoken', (client) =>
+          client.json({
+            method: 'GET',
+            url: 'https://api.test/repos/o/r/issues',
+            body: null,
+            schema: Schema.Struct({}),
+          }),
+        ),
+      );
+      yield* Effect.ignore(
+        apiCallOver(transport, 'gho_dummytoken', (client) =>
+          client.json({
+            method: 'POST',
+            url: 'https://api.test/repos/o/r/labels',
+            body: '{"labels":["x"]}',
+            schema: Schema.Struct({}),
+          }),
+        ),
+      );
 
-        calls.push({
-          method: init?.method ?? 'GET',
-          headers: new Headers(init?.headers),
-          body,
-        });
-
-        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
-      };
-      try {
-        yield* Effect.ignore(
-          apiCall('gho_dummytoken', (client) =>
-            client.json({
-              method: 'GET',
-              url: 'https://api.test/repos/o/r/issues',
-              body: null,
-              schema: Schema.Struct({}),
-            }),
-          ),
-        );
-        yield* Effect.ignore(
-          apiCall('gho_dummytoken', (client) =>
-            client.json({
-              method: 'POST',
-              url: 'https://api.test/repos/o/r/labels',
-              body: '{"labels":["x"]}',
-              schema: Schema.Struct({}),
-            }),
-          ),
-        );
-      } finally {
-        globalThis.fetch = realFetch;
-      }
-
-      expect(calls[0]?.headers.get('Authorization')).toBe('Bearer gho_dummytoken');
-      expect(calls[0]?.headers.get('Accept')).toBe('application/vnd.github+json');
-      expect(calls[0]?.headers.get('X-GitHub-Api-Version')).toBe('2022-11-28');
-      expect(calls[0]?.body).toBe(null);
-      expect(calls[1]?.body).toBe('{"labels":["x"]}');
+      expect(transport.calls[0]?.headers.get('Authorization')).toBe('Bearer gho_dummytoken');
+      expect(transport.calls[0]?.headers.get('Accept')).toBe('application/vnd.github+json');
+      expect(transport.calls[0]?.headers.get('X-GitHub-Api-Version')).toBe('2022-11-28');
+      expect(transport.calls[0]?.body).toBe(null);
+      expect(transport.calls[1]?.body).toBe('{"labels":["x"]}');
     }),
   );
 });
