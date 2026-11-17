@@ -1,7 +1,12 @@
-import { Context, Effect, Layer, Schema } from 'effect';
+import { Context, Effect, Layer, Option, Schema } from 'effect';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
+import * as Headers from 'effect/http/Headers';
+import * as HttpBody from 'effect/http/HttpBody';
+import * as HttpClient from 'effect/http/HttpClient';
+import * as HttpClientRequest from 'effect/http/HttpClientRequest';
+import { type HttpClientResponse } from 'effect/http/HttpClientResponse';
 
 import { ApiError } from '../../lib/errors.ts';
-import { request, type RequestResponse } from '../../lib/request.ts';
 
 /** The GitHub REST API root — every adapter URL composes from it, repo-scoped. */
 export const API_ROOT = 'https://api.github.com';
@@ -40,10 +45,14 @@ export type GitHubCall<T = unknown> = {
 };
 
 /**
- * The forge client's success payload is the generic `request` response — forge callers
- * read pagination headers out of it.
+ * The forge client's success payload: the schema-validated JSON plus the response's
+ * headers, for the caller to interpret (e.g. `Link` pagination).
  */
-export type { RequestResponse };
+export type RequestResponse<T> = {
+  readonly status: number;
+  readonly data: T;
+  readonly headers: Headers.Headers;
+};
 
 /**
  * The GitHub REST client contract: one call in, one Effect out that either delivers the
@@ -59,28 +68,148 @@ export class GitHubClientService extends Context.Service<GitHubClientService, Gi
 ) {}
 
 /**
- * The production GitHub REST client: transport, status gating, and schema validation are
- * the generic `request` helper's; the layer adds GitHub's surface — headers and the bearer
- * token. `GithubToken` is a `Context.Reference` — its default (`''`) resolves without
- * wiring, so the layer carries no requirement; a runtime overrides it with
+ * The one failure mapping every non-2xx carries: the HTTP status and the forge's own body
+ * text. 401/403 are credential rejections, 429 asks for a backoff, 5xx and the rest are
+ * service states the caller treats as unavailable — the named vocabulary classes branch on
+ * `status` downstream (classes, never message text). A 2xx reads `Option.none()`, so the
+ * caller's pipeline proceeds to the body. Reading a failing response's body maps an
+ * unreadable body to the `status: null` (no usable HTTP exchange) form.
+ */
+function statusFailure(
+  response: HttpClientResponse,
+): Effect.Effect<Option.Option<ApiError>, ApiError> {
+  function failureWith(message: string): Effect.Effect<Option.Option<ApiError>, ApiError> {
+    return Effect.map(
+      Effect.mapError(
+        response.text,
+        (error) =>
+          new ApiError({
+            status: null,
+            message: `failed reading the error body: ${String(error)}`,
+          }),
+      ),
+      (body) =>
+        Option.some(new ApiError({ status: response.status, message: `${message}${body.trim()}` })),
+    );
+  }
+
+  if (response.status == 401 || response.status == 403) {
+    return failureWith(`auth failed (HTTP ${response.status}): `);
+  }
+
+  if (response.status == 429) {
+    return Effect.succeed(
+      Option.some(
+        new ApiError({
+          status: response.status,
+          message: 'rate limited (HTTP 429): back off and retry later',
+        }),
+      ),
+    );
+  }
+
+  if (response.status >= 500) {
+    return failureWith(`forge unavailable (HTTP ${response.status}): `);
+  }
+
+  if (response.status >= 300) {
+    return failureWith(`HTTP ${response.status}: `);
+  }
+
+  return Effect.succeed(Option.none());
+}
+
+/**
+ * The production GitHub REST client over the Effect `HttpClient` service: the service is
+ * the transport (fetched via `FetchHttpClient.layer` in the composed layer), and this layer
+ * adds GitHub's surface — headers and the bearer token — plus the status gating, the JSON
+ * content check, and Schema validation at the response edge. `GithubToken` is a
+ * `Context.Reference` — its default (`''`) resolves without wiring, so the layer carries no
+ * requirement beyond the transport; a runtime overrides it with
  * `Layer.succeed(GithubToken, token)`.
  */
-export const apiLayer: Layer.Layer<GitHubClientService> = Layer.effect(
-  GitHubClientService,
-  Effect.gen(function* () {
-    const token = yield* GithubToken;
+export const clientLayer: Layer.Layer<GitHubClientService, never, HttpClient.HttpClient> =
+  Layer.effect(
+    GitHubClientService,
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const token = yield* GithubToken;
 
-    return {
-      json: <T>(call: GitHubCall<T>) =>
-        request({
-          url: call.url,
-          method: call.method,
-          headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-          body: call.body,
-          schema: call.schema,
-        }),
-    };
-  }),
+      return {
+        json<T>(call: GitHubCall<T>): Effect.Effect<RequestResponse<T>, ApiError> {
+          return Effect.gen(function* () {
+            const response = yield* Effect.mapError(
+              client.execute(
+                HttpClientRequest.make(call.method)(call.url, {
+                  headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
+                  ...(call.body == null
+                    ? {}
+                    : { body: HttpBody.text(call.body, 'application/json') }),
+                }),
+              ),
+              (error) =>
+                new ApiError({ status: null, message: `request failed: ${String(error)}` }),
+            );
+
+            const statusError = yield* statusFailure(response);
+
+            if (Option.isSome(statusError)) {
+              return yield* Effect.fail(statusError.value);
+            }
+
+            const contentType = Headers.get(response.headers, 'content-type');
+
+            if (Option.isNone(contentType) || !contentType.value.includes('json')) {
+              return yield* Effect.fail(
+                new ApiError({
+                  status: null,
+                  message: `response was not JSON (content-type: ${Option.getOrElse(
+                    contentType,
+                    () => 'none',
+                  )})`,
+                }),
+              );
+            }
+
+            const body = yield* Effect.mapError(
+              response.text,
+              (error) =>
+                new ApiError({
+                  status: null,
+                  message: `failed reading the response body: ${String(error)}`,
+                }),
+            );
+
+            let data: T;
+
+            try {
+              const parsed: unknown = JSON.parse(body);
+
+              data = Schema.decodeUnknownSync(call.schema)(parsed);
+            } catch (error) {
+              return yield* Effect.fail(
+                new ApiError({
+                  status: null,
+                  message: `unexpected response shape: ${(error as Error).message}`,
+                }),
+              );
+            }
+
+            return { status: response.status, data, headers: response.headers };
+          });
+        },
+      };
+    }),
+  );
+
+/**
+ * The composed production layer: the client over `FetchHttpClient.layer` (the Web fetch
+ * transport). Tests override the transport with a fake `HttpClient` Layer provided into
+ * `clientLayer` instead.
+ */
+export const apiLayer: Layer.Layer<GitHubClientService> = Layer.provide(
+  clientLayer,
+  FetchHttpClient.layer,
 );
 
 /** Composes one issues-endpoint URL with an optional suffix; repo-scoped, never ambient. */
@@ -93,14 +222,14 @@ export function issuesUrl(repo: string, suffix = '', root: string = API_ROOT) {
  * games — split, match the `rel`, validate the target as a URL. `null` when the response
  * doesn't paginate. Lives here because pagination-by-`Link` is a GitHub API convention.
  */
-export function nextLink(headers: Headers) {
-  const header = headers.get('link');
+export function nextLink(headers: Headers.Headers) {
+  const header = Headers.get(headers, 'link');
 
-  if (header == null) {
+  if (Option.isNone(header)) {
     return null;
   }
 
-  for (const part of header.split(',')) {
+  for (const part of header.value.split(',')) {
     const [target, ...params] = part.split(';');
     const next = params.some((param) => param.trim() === 'rel="next"');
     const url = URL.parse(target?.trim().slice(1, -1) ?? '');
