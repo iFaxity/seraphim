@@ -44,10 +44,7 @@ function testLayer(
     return adapters as Layer.Layer<CommandServices>;
   }
 
-  return Layer.mergeAll(
-    adapters,
-    Layer.succeed(DockerRunnerService, docker),
-  );
+  return Layer.mergeAll(adapters, Layer.succeed(DockerRunnerService, docker));
 }
 
 /** A throwaway engine home for the test Layer's HomeService. */
