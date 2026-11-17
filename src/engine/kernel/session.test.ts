@@ -3,7 +3,7 @@ import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
-import { Duration, Effect, Fiber, Layer, Schema } from 'effect';
+import { Deferred, Duration, Effect, Fiber, Layer, Schema } from 'effect';
 import { TestClock } from 'effect/testing';
 import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
@@ -15,7 +15,7 @@ import { runSession, type SessionError, type SessionInput } from './session.ts';
 
 import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
 import { fakeNotifier } from '../../../test/fakes/notifier.ts';
-import { fakeRuntime } from '../../../test/fakes/runtime.ts';
+import { fakeRuntime, type FakeRuntime } from '../../../test/fakes/runtime.ts';
 import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
 import { fakeTracker, type FakeTracker } from '../../../test/fakes/tracker.ts';
 import { UnavailableError } from '../../lib/errors.ts';
@@ -434,12 +434,34 @@ export default flow;
 
       const git = fakeGit();
       // The fake turn's 2000ms latency rides the session's Clock (TestClock here): the turn
-      // never completes until the clock is adjusted past the 500ms wall cap.
-      const runtime = fakeRuntime('completed', 2000);
+      // never completes until the clock is adjusted past the 500ms wall cap. The dispatch
+      // latch makes the choreography deterministic: the adjust below must run only once the
+      // turn's clock sleep is registered — a bare fork+adjust would find no sleeper on the
+      // TestClock and return while the turn waits on a clock that is never advanced again.
+      const dispatched = yield* Deferred.make<void>();
+      const prompts: string[] = [];
+      const transcript: string[] = [];
+      const runtime: FakeRuntime = {
+        prompts,
+        transcript,
+        available: (agent) => agent != 'claude',
+        run: Effect.fnUntraced(function* (input: Parameters<AgentRuntime['run']>[0]) {
+          // Forked ahead of the sleep, this signaler only runs after the sleep is on the
+          // TestClock and the turn fiber suspends — the exact point the driver may adjust.
+          yield* Effect.forkChild(Deferred.succeed(dispatched, void 0));
+          yield* Effect.sleep(2000);
+
+          prompts.push(`${input.cwd}::${input.prompt}::${input.model}`);
+          transcript.push(input.prompt);
+
+          return { exitState: 'completed', transcript: `transcript of: ${input.prompt}` } as const;
+        }),
+      };
 
       const session = yield* Effect.forkChild(
         sessionOver({ repo: 'overshoot', issueNumber: 22 }, { git, runtime }),
       );
+      yield* Deferred.await(dispatched);
       yield* TestClock.adjust(Duration.millis(2_000));
 
       const { manifest } = yield* Fiber.join(session);
