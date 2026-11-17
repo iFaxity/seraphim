@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { Context, Effect, Layer, Option } from 'effect';
+import { ChildProcessSpawner } from 'effect/process';
 
+import { cliRun, type ProcessSpawner } from '../../lib/cli-run.ts';
 import {
   DockerfileMissingError,
   ImageProvisionError,
@@ -10,7 +12,6 @@ import {
   WorktreeMissingError,
 } from '../../lib/errors.ts';
 import { dirExistsE, fileExistsE, readFileE } from '../../lib/fs.ts';
-import { runCli } from '../../lib/proc.ts';
 import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
 import { SandboxService } from '../core/services.ts';
 
@@ -327,20 +328,28 @@ export function imageTagFor(dir: string): Effect.Effect<Option.Option<string>> {
 
 /**
  * The production runner: one `docker` CLI invocation per `run` call, full argv passthrough
- * (the shared `runCli` capture machinery). A missing/unspawnable binary reports as exit
- * 127 — POSIX "command not found" — so callers keep one structured failure shape.
+ * (the shared `cliRun` capture machinery over the injected spawner). A missing/unspawnable
+ * binary reports as exit 127 — POSIX "command not found" — so callers keep one structured
+ * failure shape.
  */
-export const cliDocker: DockerRunner = {
-  run: (args) => runCli('docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
-};
+export function cliDocker(spawner: ProcessSpawner): DockerRunner {
+  return {
+    run: (args) => cliRun(spawner, 'docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
+  };
+}
 
 /** POSIX "command not found" — what a shell would report for an unresolvable binary. */
 const CLI_NOT_FOUND = 127;
 
-/** Production wiring: the real `docker` CLI subprocess runner. */
-export const dockerCliLayer: Layer.Layer<DockerRunnerService> = Layer.succeed(
+/** Production wiring: the real `docker` CLI subprocess runner, over the spawner the
+ * composition root provides. */
+export const dockerCliLayer: Layer.Layer<
   DockerRunnerService,
-  cliDocker,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> = Layer.effect(
+  DockerRunnerService,
+  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(cliDocker(spawner))),
 );
 
 /** The sandbox contract wired over the injected docker runner. */

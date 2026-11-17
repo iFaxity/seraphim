@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Effect, Option } from 'effect';
+import { Effect, Option, Sink, Stream } from 'effect';
+import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { beforeEach, describe, expect } from 'vite-plus/test';
 
 import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
@@ -11,22 +13,51 @@ import { expectTaggedFailure } from '../../../test/exit.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 
+/** The scripted handle one scripted spawn returns: instant exit with fixed streams. */
+function scriptedHandle(out: { exitCode: number; stdout: string; stderr: string }) {
+  const encode = new TextEncoder();
+
+  return ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(0),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(out.exitCode)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    stdin: Sink.drain,
+    stdout: Stream.make(encode.encode(out.stdout)),
+    stderr: Stream.make(encode.encode(out.stderr)),
+    all: Stream.make(encode.encode(out.stdout + out.stderr)),
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+    unref: Effect.succeed(Effect.void),
+  });
+}
+
 /**
- * Scripted `docker` runner: records every invocation so tests assert the adapter's observable
- * docker operations (what a user would see in `docker` output), never adapter internals.
+ * Scripted `docker` runner over a scripted `ChildProcessSpawner`: records every invocation
+ * so tests assert the adapter's observable docker operations (what a user would see in
+ * `docker` output), never adapter internals.
  */
 export function fakeDockerRunner(
   script: (args: readonly string[]) => { exitCode: number; stdout: string; stderr: string },
 ) {
   const invocations: string[][] = [];
 
-  function run(args: readonly string[]) {
-    invocations.push([...args]);
+  const spawner = ChildProcessSpawner.make((command: ChildProcess.Command) =>
+    Effect.sync(() => {
+      const args =
+        command._tag === 'StandardCommand'
+          ? command.args.filter((word): word is string => typeof word === 'string')
+          : [];
 
-    return Effect.succeed(script(args));
-  }
+      invocations.push(args);
 
-  return { run, invocations } satisfies DockerRunner & { invocations: string[][] };
+      return scriptedHandle(script(args));
+    }),
+  );
+
+  return { ...cliDocker(spawner), invocations } satisfies DockerRunner & {
+    invocations: string[][];
+  };
 }
 
 /** A live-daemon runner that additionally records every `build` invocation for assertions. */
@@ -38,7 +69,7 @@ function countingDocker() {
       builds.push([...args]);
     }
 
-    return cliDocker.run(args);
+    return liveDocker.run(args);
   }
 
   return { run, builds };
@@ -247,7 +278,15 @@ describe('dockerSandbox.exec', () => {
 
 // Integration tier — runs only when a docker daemon answers: exec a trivial command, prove
 // the second ensureImage is a cache hit, a lockfile change rebuilds, and the host stays clean.
-const dockerReady = (await Effect.runPromise(cliDocker.run(['info']))).exitCode === 0;
+// The live tier drives the real Node spawner driver; the fake tiers script their own spawners.
+const nodeSpawner = await Effect.runPromise(
+  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(spawner)).pipe(
+    Effect.provide(NodeServices.layer),
+  ),
+);
+const liveDocker = cliDocker(nodeSpawner);
+
+const dockerReady = (await Effect.runPromise(liveDocker.run(['info']))).exitCode === 0;
 
 describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout: 30_000 }, () => {
   let root: string;
@@ -258,7 +297,7 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
 
   it('execs a trivial command inside the container and leaves the host filesystem untouched', async () => {
     await seedDockerfileUnder(root, 'live', `FROM alpine:3.20\n# ${randomUUID()}\n`);
-    const sandbox = dockerSandbox({ projectsRoot: root, docker: cliDocker });
+    const sandbox = dockerSandbox({ projectsRoot: root, docker: liveDocker });
     const hostSentinel = join(root, 'host-sentinel.txt');
 
     await writeFile(hostSentinel, 'do not touch\n');
