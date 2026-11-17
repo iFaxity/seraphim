@@ -1,8 +1,9 @@
 import { Context, Effect, Layer } from 'effect';
+import { ChildProcessSpawner } from 'effect/process';
 
+import { cliRun, type ProcessSpawner } from '../../lib/cli-run.ts';
 import { GitError } from '../../lib/errors.ts';
 import { dirExistsE } from '../../lib/fs.ts';
-import { runCli } from '../../lib/proc.ts';
 import { type Git } from '../core/contracts.ts';
 import { GitService } from '../core/services.ts';
 
@@ -24,10 +25,12 @@ export type GitRunner = {
   readonly run: (args: readonly string[], cwd?: string) => Effect.Effect<GitRun>;
 };
 
-/** The real `git` CLI runner — the production half of `gitCliLayer`. */
-const processGit: GitRunner = {
-  run: (args, cwd) => runCli('git', args, { cwd, spawnErrorExitCode: -1 }),
-};
+/** The real `git` CLI runner, composed over the injected process spawner. */
+function processGit(spawner: ProcessSpawner): GitRunner {
+  return {
+    run: (args, cwd) => cliRun(spawner, 'git', args, { cwd, spawnErrorExitCode: -1 }),
+  };
+}
 
 /** Passes a successful run through; a nonzero one fails with the labeled diagnostics. */
 function checkedOr(label: string, run: GitRun): Effect.Effect<GitRun, GitError> {
@@ -154,10 +157,15 @@ class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
   'seraphim/kernel/GitRunner',
 ) {}
 
-/** Production wiring: the real `git` CLI subprocess runner. */
-export const gitCliLayer: Layer.Layer<GitRunnerService> = Layer.succeed(
+/** Production wiring: the real `git` CLI subprocess runner, over the spawner the
+ * composition root provides. */
+export const gitCliLayer: Layer.Layer<
   GitRunnerService,
-  processGit,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> = Layer.effect(
+  GitRunnerService,
+  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
 );
 
 /** The `Git` adapter wired over whatever runner the context provides. */

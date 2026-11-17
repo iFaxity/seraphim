@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { NodeServices } from '@effect/platform-node';
 import { Effect, Layer, ManagedRuntime, Result } from 'effect';
 
 import { homeDeps, loadConfig, resolvePoolRoot, type HomeDeps } from './core/bootstrap.ts';
@@ -109,7 +110,11 @@ const composeEngineLayer: Effect.Effect<
   const deps = homeDeps();
   const config = yield* loadConfig(deps.home);
   const baseLayer = baseDepsLayer(deps, config.notify);
-  const adapters = adaptersLayer(baseLayer, deps.projectsRoot);
+  // The Node ChildProcessSpawner driver backs the git/docker CLI runners; `Layer.provide`
+  // keeps the platform's own services (filesystem, path, stdio) out of the merged stack.
+  const adapters = adaptersLayer(baseLayer, deps.projectsRoot).pipe(
+    Layer.provide(NodeServices.layer),
+  );
 
   return engineLayer(adapters, deps.home) as Layer.Layer<CommandServices>;
 });
