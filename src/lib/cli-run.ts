@@ -58,15 +58,15 @@ function joinChunks(chunks: Uint8Array[]): string {
   return new TextDecoder().decode(merged);
 }
 
-/** The failure shape every CLI caller already branches on: the caller's spawn-error exit
+/** The failure shape every CLI caller already branches on: the spawn-error exit
  * code, with the failure message in stderr unless that stream already produced output. */
 function spawnFailure(
+  options: { readonly spawnErrorExitCode: number },
   stderr: string,
   error: PlatformError.PlatformError,
-  exitCode: number,
 ): CliRun {
   return {
-    exitCode,
+    exitCode: options.spawnErrorExitCode,
     stdout: '',
     stderr: stderr.length > 0 ? stderr : describeError(error),
   };
@@ -75,8 +75,9 @@ function spawnFailure(
 /**
  * The shared CLI runner behind the git and docker adapters: one invocation per call, full
  * argv passthrough, per-stream capture, composed over the injected `ChildProcessSpawner`.
- * Spawn failures (a missing binary, an inaccessible cwd) and signaled exits surface as
- * `spawnErrorExitCode` with the failure message in `stderr` (only when nothing streamed),
+ * Spawn failures (a missing binary, an inaccessible cwd) surface as
+ * `spawnErrorExitCode` with the failure message in `stderr` (only when nothing streamed);
+ * signaled exits also surface as `spawnErrorExitCode`, keeping stderr exactly as captured,
  * so a missing/unspawnable binary routes through the caller's normal exit-code handling
  * instead of leaking an error channel.
  */
@@ -106,7 +107,7 @@ export function cliRun(
       );
 
       if (Result.isFailure(handle)) {
-        return spawnFailure('', handle.failure, options.spawnErrorExitCode);
+        return spawnFailure(options, '', handle.failure);
       }
 
       const child = handle.success;
@@ -116,18 +117,18 @@ export function cliRun(
       );
 
       if (Result.isFailure(collected)) {
-        return spawnFailure('', collected.failure, options.spawnErrorExitCode);
+        return spawnFailure(options, '', collected.failure);
       }
 
       const [stdout, stderr] = collected.success;
 
       // A normal exit resolves here; a signaled exit (null code under the legacy runner)
-      // arrives as PlatformError and maps to the spawn-error exit code, keeping whatever
-      // the streams already captured in stderr.
+      // arrives as PlatformError and maps to the spawn-error exit code, keeping stderr
+      // exactly as captured.
       const exitCode = yield* Effect.result(child.exitCode);
 
       if (Result.isFailure(exitCode)) {
-        return spawnFailure(stderr, exitCode.failure, options.spawnErrorExitCode);
+        return { exitCode: options.spawnErrorExitCode, stdout, stderr };
       }
 
       return { exitCode: exitCode.success, stdout, stderr };
