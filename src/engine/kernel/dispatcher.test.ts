@@ -10,7 +10,6 @@ import { FakeNotifier } from '../../../test/fakes/notifier.ts';
 import { FakeRuntime } from '../../../test/fakes/runtime.ts';
 import { FakeSandbox } from '../../../test/fakes/sandbox.ts';
 import { FakeTracker } from '../../../test/fakes/tracker.ts';
-import { run } from '../../../test/run.ts';
 
 const commandStack = Layer.mergeAll(
   FakeTracker.layer(),
@@ -31,7 +30,10 @@ describe('command dispatcher', () => {
         return;
       }
 
-      const outcome = yield* run(help.handler([]) as never, commandStack); // getCommand's row union makes handler a union of Effects TS won't collapse
+      const outcome = yield* Effect.provide(
+        help.handler([]) as Effect.Effect<unknown, never, CommandServices>,
+        commandStack,
+      ); // getCommand's row union makes handler a union of Effects TS won't collapse
 
       expect(outcome).toMatchObject({
         kind: 'help',
@@ -51,7 +53,10 @@ describe('command dispatcher', () => {
       }
 
       for (const { name, summary, usage } of commandList()) {
-        const perCommand = yield* run(help.handler([name]) as never, commandStack);
+        const perCommand = yield* Effect.provide(
+          help.handler([name]) as Effect.Effect<unknown, never, CommandServices>,
+          commandStack,
+        );
 
         expect(perCommand, `'help ${name}' must answer with the row`).toMatchObject({
           kind: 'command-help',
@@ -59,7 +64,10 @@ describe('command dispatcher', () => {
           usage,
         });
 
-        const nearMiss = yield* run(help.handler([`${name}-typo`]) as never, commandStack);
+        const nearMiss = yield* Effect.provide(
+          help.handler([`${name}-typo`]) as Effect.Effect<unknown, never, CommandServices>,
+          commandStack,
+        );
 
         expect(nearMiss, `'help ${name}-typo' must fail as unknown`).toMatchObject({
           kind: 'error',

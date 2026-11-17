@@ -4,7 +4,6 @@ import { describe, expect } from 'vite-plus/test';
 
 import { nullNotifier, webhookNotifier } from './webhook.ts';
 
-import { expectTaggedFailure } from '../../../test/exit.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 
 /** A fetch double that records the call and returns a scripted response status. */
@@ -76,11 +75,11 @@ describe('webhookNotifier', () => {
     }),
   );
 
-  it.effect('throws on a non-2xx response so the kernel logs the delivery failure', () =>
+  it.effect('fails on a non-2xx response so the kernel logs the delivery failure', () =>
     Effect.gen(function* () {
       const { post } = recordingPost(503);
 
-      const error = yield* expectTaggedFailure(
+      const error = yield* Effect.flip(
         webhookNotifier({ url: 'https://ntfy.invalid/seraphim', token: 'tk', post }).notify({
           repo: 'acme/widgets',
           issueNumber: 44,

@@ -9,7 +9,6 @@ import { beforeEach, describe, expect } from 'vite-plus/test';
 
 import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
 
-import { expectTaggedFailure } from '../../../test/exit.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 
@@ -103,7 +102,7 @@ describe('dockerSandbox.ensureImage', () => {
         const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
         const sandbox = dockerSandbox({ projectsRoot, docker });
 
-        const error = yield* expectTaggedFailure(sandbox.ensureImage('ghost'));
+        const error = yield* Effect.flip(sandbox.ensureImage('ghost'));
 
         expect(error).toBeInstanceOf(UnavailableError);
         expect(error.cause).toBeInstanceOf(Error);
@@ -180,7 +179,7 @@ describe('dockerSandbox.ensureImage', () => {
       });
       const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      const error = yield* expectTaggedFailure(sandbox.ensureImage('broken'));
+      const error = yield* Effect.flip(sandbox.ensureImage('broken'));
 
       expect(error).toBeInstanceOf(UnavailableError);
       expect((error.cause as Error).message).toMatch(/image build failed for 'broken'/);
@@ -295,56 +294,70 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
     root = await mkdtemp(join(tmpdir(), 'seraphim-docker-live-'));
   });
 
-  it('execs a trivial command inside the container and leaves the host filesystem untouched', async () => {
-    await seedDockerfileUnder(root, 'live', `FROM alpine:3.20\n# ${randomUUID()}\n`);
-    const sandbox = dockerSandbox({ projectsRoot: root, docker: liveDocker });
-    const hostSentinel = join(root, 'host-sentinel.txt');
+  it.live(
+    'execs a trivial command inside the container and leaves the host filesystem untouched',
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() =>
+          seedDockerfileUnder(root, 'live', `FROM alpine:3.20\n# ${randomUUID()}\n`),
+        );
+        const sandbox = dockerSandbox({ projectsRoot: root, docker: liveDocker });
+        const hostSentinel = join(root, 'host-sentinel.txt');
 
-    await writeFile(hostSentinel, 'do not touch\n');
-    const before = await stat(hostSentinel);
+        yield* Effect.promise(() => writeFile(hostSentinel, 'do not touch\n'));
+        const before = yield* Effect.promise(() => stat(hostSentinel));
 
-    // ensureImage builds the content-tagged image that the exec below resolves to.
-    await Effect.runPromise(sandbox.ensureImage('live'));
+        // ensureImage builds the content-tagged image that the exec below resolves to.
+        yield* sandbox.ensureImage('live');
 
-    const executed = await Effect.runPromise(
-      sandbox.exec({
-        repo: 'live',
-        worktreePath: root,
-        command: ['echo', 'hello from sandbox'],
+        const executed = yield* sandbox.exec({
+          repo: 'live',
+          worktreePath: root,
+          command: ['echo', 'hello from sandbox'],
+        });
+
+        expect(executed.exitCode).toBe(0);
+        expect(executed.stdout.trim()).toBe('hello from sandbox');
+
+        const after = yield* Effect.promise(() => stat(hostSentinel));
+
+        expect(after.mtimeMs).toBe(before.mtimeMs);
       }),
-    );
+  );
 
-    expect(executed.exitCode).toBe(0);
-    expect(executed.stdout.trim()).toBe('hello from sandbox');
+  it.live('reuses the image when Dockerfile and lockfiles are unchanged — no second build', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        seedDockerfileUnder(root, 'cache', `FROM alpine:3.20\n# ${randomUUID()}\n`),
+      );
+      const counting = countingDocker();
+      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
-    const after = await stat(hostSentinel);
+      yield* countingSandbox.ensureImage('cache');
+      yield* countingSandbox.ensureImage('cache');
 
-    expect(after.mtimeMs).toBe(before.mtimeMs);
-  });
+      // Cache hit observable: exactly one build happened across two ensureImage calls.
+      expect(counting.builds).toHaveLength(1);
+    }),
+  );
 
-  it('reuses the image when Dockerfile and lockfiles are unchanged — no second build', async () => {
-    await seedDockerfileUnder(root, 'cache', `FROM alpine:3.20\n# ${randomUUID()}\n`);
-    const counting = countingDocker();
-    const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
+  it.live('rebuilds when a lockfile changes', () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        seedDockerfileUnder(root, 'lockchange', `FROM alpine:3.20\n# ${randomUUID()}\n`),
+      );
+      const counting = countingDocker();
+      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
-    await Effect.runPromise(countingSandbox.ensureImage('cache'));
-    await Effect.runPromise(countingSandbox.ensureImage('cache'));
+      yield* countingSandbox.ensureImage('lockchange');
+      yield* Effect.promise(() =>
+        writeFile(join(root, 'lockchange', 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n'),
+      );
+      yield* countingSandbox.ensureImage('lockchange');
 
-    // Cache hit observable: exactly one build happened across two ensureImage calls.
-    expect(counting.builds).toHaveLength(1);
-  });
-
-  it('rebuilds when a lockfile changes', async () => {
-    await seedDockerfileUnder(root, 'lockchange', `FROM alpine:3.20\n# ${randomUUID()}\n`);
-    const counting = countingDocker();
-    const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
-
-    await Effect.runPromise(countingSandbox.ensureImage('lockchange'));
-    await writeFile(join(root, 'lockchange', 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
-    await Effect.runPromise(countingSandbox.ensureImage('lockchange'));
-
-    expect(counting.builds).toHaveLength(2);
-  });
+      expect(counting.builds).toHaveLength(2);
+    }),
+  );
 });
 
 describe('imageTagFor', () => {

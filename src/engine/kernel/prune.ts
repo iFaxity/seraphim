@@ -61,8 +61,9 @@ export type PruneDone = {
   readonly failed: readonly string[];
 };
 
-/** The kernel modules plan and run the sweep over: git mechanics, layout, optional docker. */
-export type PruneServices = GitService | HomeService | DockerRunnerService;
+/** The kernel modules plan and run the sweep over: git mechanics and layout — docker is
+ * resolved optionally (`Effect.serviceOption`), so it is never a requirement. */
+export type PruneServices = GitService | HomeService;
 
 /** The (layout, git, failure-collector) bundle every prune step shares. */
 type PruneContext = {
