@@ -9,7 +9,6 @@ import { planPrune, runPrune } from './prune.ts';
 import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
 import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
-import { run } from '../../../test/run.ts';
 import { GitError } from '../../lib/errors.ts';
 import { homeLayout, HomeService } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
@@ -116,7 +115,7 @@ describe('planPrune', () => {
           seedSession({ repo: 'demo', issueNumber: 3, state: 'cap-hit' }),
         );
 
-        const planned = yield* run(planPrune, pruneLayer(fakeGit()));
+        const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit()));
 
         expect(planned.sessions).toEqual([
           {
@@ -146,7 +145,7 @@ describe('planPrune', () => {
         );
         const orphan = yield* Effect.promise(() => seedWorktree('demo', '999-orphan'));
 
-        const planned = yield* run(planPrune, pruneLayer(fakeGit()));
+        const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit()));
 
         expect(planned.orphanWorktrees).toEqual([orphan]);
       }),
@@ -160,12 +159,12 @@ describe('planPrune', () => {
         yield* Effect.promise(() =>
           writeFile(join(root, 'projects', 'demo', 'Dockerfile'), 'FROM node:26\n'),
         );
-        yield* run(
+        yield* Effect.provide(
           registerProject('https://example.invalid/acme/demo.git', 'demo'),
           pruneLayer(fakeGit()),
         );
 
-        const planned = yield* run(
+        const planned = yield* Effect.provide(
           planPrune,
           pruneLayer(
             fakeGit(),
@@ -188,7 +187,7 @@ describe('planPrune', () => {
       const projectDir = join(root, 'projects', 'demo');
       yield* Effect.promise(() => mkdir(projectDir, { recursive: true }));
       yield* Effect.promise(() => writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n'));
-      yield* run(
+      yield* Effect.provide(
         registerProject('https://example.invalid/acme/demo.git', 'demo'),
         pruneLayer(fakeGit()),
       );
@@ -200,7 +199,7 @@ describe('planPrune', () => {
       }
 
       const tag = someTag.value;
-      const planned = yield* run(planPrune, pruneLayer(fakeGit(), dockerListing([tag])));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit(), dockerListing([tag])));
 
       expect(planned.images).toEqual([]);
     }),
@@ -208,7 +207,7 @@ describe('planPrune', () => {
 
   it.effect('skips image pruning when no docker runner is configured', () =>
     Effect.gen(function* () {
-      const planned = yield* run(planPrune, pruneLayer(fakeGit()));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit()));
 
       expect(planned.images).toEqual([]);
     }),
@@ -224,8 +223,8 @@ describe('runPrune', () => {
       );
       yield* Effect.promise(() => mkdir(session.worktreePath, { recursive: true }));
 
-      const planned = yield* run(planPrune, pruneLayer(git));
-      const done = yield* run(runPrune(planned), pruneLayer(git));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(git));
+      const done = yield* Effect.provide(runPrune(planned), pruneLayer(git));
 
       expect(git.removedWorktrees).toEqual([session.worktreePath]);
       expect(git.removedBranches).toEqual([session.branch]);
@@ -243,8 +242,8 @@ describe('runPrune', () => {
     Effect.gen(function* () {
       const orphan = yield* Effect.promise(() => seedWorktree('demo', '999-orphan'));
       const docker = dockerListing(['seraphim/gone:00112233']);
-      const planned = yield* run(planPrune, pruneLayer(fakeGit(), docker));
-      yield* run(runPrune(planned), pruneLayer(fakeGit(), docker));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit(), docker));
+      yield* Effect.provide(runPrune(planned), pruneLayer(fakeGit(), docker));
 
       const exit = yield* Effect.exit(Effect.promise(() => readFile(join(orphan, 'marker.txt'))));
       expect(Exit.isFailure(exit)).toBe(true);
@@ -273,8 +272,8 @@ describe('runPrune', () => {
             : Effect.void,
       };
 
-      const planned = yield* run(planPrune, pruneLayer(stuckGit));
-      const done = yield* run(runPrune(planned), pruneLayer(stuckGit));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(stuckGit));
+      const done = yield* Effect.provide(runPrune(planned), pruneLayer(stuckGit));
 
       expect(done.failed.some((detail) => detail.includes('device busy'))).toBe(true);
       expect(git.removedBranches).toContain(clean.branch);
@@ -298,8 +297,8 @@ describe('runPrune image failures', () => {
               : { exitCode: 1, stdout: '', stderr: 'Error: image not known' },
           ),
       };
-      const planned = yield* run(planPrune, pruneLayer(fakeGit(), docker));
-      const done = yield* run(runPrune(planned), pruneLayer(fakeGit(), docker));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit(), docker));
+      const done = yield* Effect.provide(runPrune(planned), pruneLayer(fakeGit(), docker));
 
       expect(done.failed).toEqual(['seraphim/gone:00112233: Error: image not known']);
     }),
@@ -315,7 +314,7 @@ describe('runPrune image failures', () => {
             stderr: 'Cannot connect to the Docker daemon',
           }),
       };
-      const planned = yield* run(planPrune, pruneLayer(fakeGit(), docker));
+      const planned = yield* Effect.provide(planPrune, pruneLayer(fakeGit(), docker));
 
       expect(planned.images).toEqual([]);
     }),

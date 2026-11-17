@@ -17,7 +17,6 @@ import { FakeNotifier } from '../test/fakes/notifier.ts';
 import { FakeRuntime } from '../test/fakes/runtime.ts';
 import { FakeSandbox } from '../test/fakes/sandbox.ts';
 import { FakeTracker } from '../test/fakes/tracker.ts';
-import { run } from '../test/run.ts';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 /**
@@ -48,7 +47,7 @@ function testLayer(
   return Layer.mergeAll(
     adapters,
     Layer.succeed(DockerRunnerService, docker),
-  ) as Layer.Layer<CommandServices>;
+  );
 }
 
 /** A throwaway engine home for the test Layer's HomeService. */
@@ -60,7 +59,7 @@ describe('engine', () => {
   it.effect('parses empty argv as the top-level help view', () =>
     Effect.gen(function* () {
       const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      const outcome = yield* run(engine([]), layer);
+      const outcome = yield* Effect.provide(engine([]), layer);
 
       expect(outcome).toMatchObject({ kind: 'help' });
     }),
@@ -69,7 +68,7 @@ describe('engine', () => {
   it.effect('rejects unknown commands as a failure result', () =>
     Effect.gen(function* () {
       const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      const outcome = yield* run(engine(['frobnicate']), layer);
+      const outcome = yield* Effect.provide(engine(['frobnicate']), layer);
 
       expect(outcome).toMatchObject({ kind: 'error', message: /unknown command 'frobnicate'/ });
     }),
@@ -78,7 +77,7 @@ describe('engine', () => {
   it.effect('rejects unknown options as a failure result, not a throw', () =>
     Effect.gen(function* () {
       const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      const outcome = yield* run(engine(['--verbose']), layer);
+      const outcome = yield* Effect.provide(engine(['--verbose']), layer);
 
       expect(outcome).toMatchObject({ kind: 'error', message: /unrecognized option '--verbose'/ });
     }),
@@ -87,7 +86,7 @@ describe('engine', () => {
   it.effect('reports unimplemented commands as an outcome, not prose', () =>
     Effect.gen(function* () {
       const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      const outcome = yield* run(engine(['tick']), layer);
+      const outcome = yield* Effect.provide(engine(['tick']), layer);
 
       expect(outcome).toEqual({ kind: 'unimplemented', command: 'tick' });
     }),
@@ -104,7 +103,7 @@ describe('engine', () => {
         FakeNotifier.layer(),
         FakeRuntime.layer(),
       ) as Layer.Layer<CommandServices>;
-      const exit = yield* Effect.exit(run(engine(['prune']), homeless));
+      const exit = yield* Effect.exit(Effect.provide(engine(['prune']), homeless));
       expect(Exit.isFailure(exit)).toBe(true);
       if (Exit.isFailure(exit)) {
         expect(String(Cause.squash(exit.cause))).toContain('seraphim/core/Home');
@@ -115,9 +114,9 @@ describe('engine', () => {
   it.effect('validates run arguments and reports the error outcome', () =>
     Effect.gen(function* () {
       const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      const missingRepo = yield* run(engine(['run']), layer);
-      const negativeIssue = yield* run(engine(['run', 'x/y', '-5']), layer);
-      const strayFlag = yield* run(engine(['run', 'x/y', '7', '--wat']), layer);
+      const missingRepo = yield* Effect.provide(engine(['run']), layer);
+      const negativeIssue = yield* Effect.provide(engine(['run', 'x/y', '-5']), layer);
+      const strayFlag = yield* Effect.provide(engine(['run', 'x/y', '7', '--wat']), layer);
 
       expect(missingRepo).toEqual({
         kind: 'error',
@@ -274,7 +273,7 @@ describe('projects listing', () => {
       root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
       layer = envFor();
 
-      const registered = yield* run(registerProject(REMOTE), layer);
+      const registered = yield* Effect.provide(registerProject(REMOTE), layer);
 
       expect(registered.record).toBeTruthy();
 

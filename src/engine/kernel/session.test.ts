@@ -3,26 +3,21 @@ import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
-import { Effect, Layer, Schema } from 'effect';
+import { Duration, Effect, Fiber, Layer, Schema } from 'effect';
+import { TestClock } from 'effect/testing';
 import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
+import { type CommandServices } from './command.ts';
 import { withRepoLock } from './lock.ts';
 import { deactivateProject, registerProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
-import {
-  runSession,
-  type SessionError,
-  type SessionInput,
-  type SessionServices,
-} from './session.ts';
+import { runSession, type SessionError, type SessionInput } from './session.ts';
 
-import { expectTaggedFailure } from '../../../test/exit.ts';
 import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
 import { fakeNotifier } from '../../../test/fakes/notifier.ts';
 import { fakeRuntime } from '../../../test/fakes/runtime.ts';
 import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
 import { fakeTracker, type FakeTracker } from '../../../test/fakes/tracker.ts';
-import { run } from '../../../test/run.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
@@ -39,12 +34,10 @@ import {
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 /**
- * Clock policy: every test below runs under `it.effect` EXCEPT the three plain-`it` tests in
- * `per-repo lock` (lock wait-cap and cross-process polling — `withRepoLock`'s retry schedule
- * paces its polls with `Effect.sleep`, which a TestClock freezes, and the awaited signals ride
- * real timers interleaved with real fs reads) and the one plain-`it` wall-clock overshoot race
- * in `runSession` (a fake turn that must outlive a live `wallClockMs` before the kernel's
- * check — virtual time cannot race itself). Those tests keep the live clock on purpose.
+ * Clock policy: every test runs on the `@effect/vitest` harness — `it.effect` (TestClock)
+ * for the budget and deadline suites, `it.live` where the seam must ride real time:
+ * cross-process lock polling interleaved with real fs reads, a real child process holding
+ * the repo lock, and the internal lock-queue overlap window.
  */
 
 /** The remote seedProject registers; tests assert the session clones exactly this URL. */
@@ -154,8 +147,9 @@ function sessionLayers(overrides: FakeOverrides = {}) {
   );
 
   // `mergeAll` widens the union instead of narrowing to the provided service set; the cast
-  // pins the stack to the exact `SessionServices` composition `runSession` requires.
-  return stack as unknown as Layer.Layer<SessionServices>;
+  // pins the stack to the composition the kernel surfaces — `CommandServices` covers both
+  // the `runSession` contract and the `engine` front door this suite drives.
+  return stack as unknown as Layer.Layer<CommandServices>;
 }
 
 /** One session run over the fake stack. */
@@ -164,16 +158,16 @@ const sessionOver = (input: SessionInput, overrides: FakeOverrides = {}) =>
 
 /** The engine front door over the fake stack — an Outcome back, never a rejection. */
 const engineOutcome = (argv: readonly string[], overrides: FakeOverrides = {}) =>
-  run(engine(argv), sessionLayers(overrides));
+  Effect.provide(engine(argv), sessionLayers(overrides));
 
 /** Narrowing tagged errors to their human detail without re-deriving failure prose. */
 function messageOf(error: SessionError): string {
   return error instanceof Error && error.message != null ? error.message : String(error);
 }
 
-/** Fails one session run out of its Exit, so the kernel's tagged error reaches the assertions. */
+/** Fails one session run out of its error channel, so the kernel's tagged error reaches the assertions. */
 const sessionFailure = (input: SessionInput, overrides: FakeOverrides = {}) =>
-  expectTaggedFailure(sessionOver(input, overrides), 'expected runSession failure');
+  Effect.flip(sessionOver(input, overrides));
 
 let root: string;
 let sessionsRoot: string;
@@ -244,7 +238,10 @@ describe('runSession', () => {
   it.effect('fails fast for an inactive project, naming the re-register fix', () =>
     Effect.gen(function* () {
       yield* Effect.promise(() => seedProject(root, 'dormant'));
-      yield* run(deactivateProject('dormant'), Layer.succeed(HomeService, homeLayout(root)));
+      yield* Effect.provide(
+        deactivateProject('dormant'),
+        Layer.succeed(HomeService, homeLayout(root)),
+      );
 
       const error = yield* sessionFailure({ repo: 'dormant', issueNumber: 9 });
 
@@ -407,14 +404,17 @@ export default flow;
     }),
   );
 
-  // Plain `it`: the fake turn (2000ms) must outlive the wall clock (500ms) on the LIVE clock —
-  // a timing race a TestClock cannot express (it would freeze the turn's sleep; see file head).
-  it('records cap-hit, not completed, when a dispatched turn outlives the wall clock', async () => {
-    const projectDir = await seedProject(root, 'overshoot');
+  // `it.effect` + TestClock: the fake turn's latency is an Effect sleep, so adjusting the
+  // test clock past the wall clock makes the dispatched turn outlive its budget
+  // deterministically — no live timing race (see file head).
+  it.effect('records cap-hit, not completed, when a dispatched turn outlives the wall clock', () =>
+    Effect.gen(function* () {
+      const projectDir = yield* Effect.promise(() => seedProject(root, 'overshoot'));
 
-    await writeFile(
-      join(projectDir, 'flow.ts'),
-      `const flow = {
+      yield* Effect.promise(() =>
+        writeFile(
+          join(projectDir, 'flow.ts'),
+          `const flow = {
   config: {
     agent: 'pi',
     model: 'test-model',
@@ -429,22 +429,27 @@ export default flow;
 
 export default flow;
 `,
-    );
+        ),
+      );
 
-    const git = fakeGit();
-    // Wide margins so the race cannot flip on machine speed: setup reliably finishes
-    // inside the wall clock, and the fake turn reliably outlives it.
-    const runtime = fakeRuntime('completed', 2000);
+      const git = fakeGit();
+      // The fake turn's 2000ms latency rides the session's Clock (TestClock here): the turn
+      // never completes until the clock is adjusted past the 500ms wall cap.
+      const runtime = fakeRuntime('completed', 2000);
 
-    const { manifest } = await Effect.runPromise(
-      sessionOver({ repo: 'overshoot', issueNumber: 22 }, { git, runtime }),
-    );
+      const session = yield* Effect.forkChild(
+        sessionOver({ repo: 'overshoot', issueNumber: 22 }, { git, runtime }),
+      );
+      yield* TestClock.adjust(Duration.millis(2_000));
 
-    expect(runtime.prompts).toHaveLength(1); // the turn ran, the runtime was not killed
-    expect(manifest.state).toBe('cap-hit');
-    expect(manifest.branch).toBe(git.worktrees[0]?.branch); // retention contract
-    expect(manifest.capHit).toMatch(/exceeded by turn 1/);
-  });
+      const { manifest } = yield* Fiber.join(session);
+
+      expect(runtime.prompts).toHaveLength(1); // the turn ran, the runtime was not killed
+      expect(manifest.state).toBe('cap-hit');
+      expect(manifest.branch).toBe(git.worktrees[0]?.branch); // retention contract
+      expect(manifest.capHit).toMatch(/exceeded by turn 1/);
+    }),
+  );
 
   it.effect('records the rejected prompt as a cap-hit marker in the session transcript', () =>
     Effect.gen(function* () {
@@ -1026,137 +1031,153 @@ export default flow;
 });
 
 describe('per-repo lock', () => {
-  // Plain `it`: the overlap window is a real 25ms setTimeout — the lock queue is internal and
-  // no deterministic hook exists at this seam (see file head for the live-clock policy).
-  it('serializes image build across two concurrent runs on one repo; worktrees stay parallel', async () => {
-    await seedProject(root, 'demo');
-    const git = fakeGit();
-    const base = fakeSandbox();
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const sandbox: Sandbox = {
-      ...base,
-      ensureImage: () =>
-        Effect.tryPromise({
-          try: async () => {
-            inFlight += 1;
-            maxInFlight = Math.max(maxInFlight, inFlight);
-            // The overlap window needs real time: the lock queue is internal, so no deterministic
-            // hook exists at this seam to signal "second session reached the mutex".
-            // inFlight is counted in real time — this seam is the one integration point the
-            // overlap-window assertion needs, so a genuine timer is the tool (see comment).
-            const { promise, resolve } = Promise.withResolvers<void>();
+  // `it.live`: the overlap window is a real 25ms pause on the live clock — the lock queue is
+  // internal and no deterministic hook exists at this seam (see file head for the clock policy).
+  it.live(
+    'serializes image build across two concurrent runs on one repo; worktrees stay parallel',
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedProject(root, 'demo'));
+        const git = fakeGit();
+        const base = fakeSandbox();
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const sandbox: Sandbox = {
+          ...base,
+          ensureImage: () =>
+            Effect.tryPromise({
+              try: async () => {
+                inFlight += 1;
+                maxInFlight = Math.max(maxInFlight, inFlight);
+                // The overlap window needs real time: the lock queue is internal, so no deterministic
+                // hook exists at this seam to signal "second session reached the mutex".
+                // inFlight is counted in real time — this seam is the one integration point the
+                // overlap-window assertion needs, so a genuine timer is the tool (see comment).
+                const { promise, resolve } = Promise.withResolvers<void>();
 
-            const timer = setTimeout(resolve, 25);
-            timer.unref?.();
-            await promise;
-            const result = await Effect.runPromise(base.ensureImage());
-            inFlight -= 1;
+                const timer = setTimeout(resolve, 25);
+                timer.unref?.();
+                await promise;
+                const result = await Effect.runPromise(base.ensureImage());
+                inFlight -= 1;
 
-            return result;
-          },
-          catch: (cause) => new UnavailableError({ cause }),
-        }),
-    };
+                return result;
+              },
+              catch: (cause) => new UnavailableError({ cause }),
+            }),
+        };
 
-    const [first, second] = await Effect.runPromise(
-      Effect.all(
-        [
-          sessionOver({ repo: 'demo', issueNumber: 7 }, { git, sandbox }),
-          sessionOver({ repo: 'demo', issueNumber: 8 }, { git, sandbox }),
-        ],
-        { concurrency: 'unbounded' },
-      ),
-    );
+        const [first, second] = yield* Effect.all(
+          [
+            sessionOver({ repo: 'demo', issueNumber: 7 }, { git, sandbox }),
+            sessionOver({ repo: 'demo', issueNumber: 8 }, { git, sandbox }),
+          ],
+          { concurrency: 'unbounded' },
+        );
 
-    expect(first.manifest.state).toBe('completed');
-    expect(second.manifest.state).toBe('completed');
-    expect(maxInFlight).toBe(1);
+        expect(first.manifest.state).toBe('completed');
+        expect(second.manifest.state).toBe('completed');
+        expect(maxInFlight).toBe(1);
 
-    // Parallel issues stay parallel: one distinct worktree per session
-    expect(git.worktrees).toHaveLength(2);
-    expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
+        // Parallel issues stay parallel: one distinct worktree per session
+        expect(git.worktrees).toHaveLength(2);
+        expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
 
-    // Both sessions released the lock on completion
-    expect(await fileExists(join(root, 'locks', 'demo.lock'))).toBe(false);
-  });
+        // Both sessions released the lock on completion
+        expect(yield* Effect.promise(() => fileExists(join(root, 'locks', 'demo.lock')))).toBe(
+          false,
+        );
+      }),
+  );
 
-  // Plain `it`: the wait cap polls the kernel's Effect Clock (`Effect.sleep` cadence) — a
+  // `it.live`: the wait cap polls the kernel's Effect Clock (`Effect.sleep` cadence) — a
   // TestClock would freeze the retry schedule and hang the test; the live clock is required
   // (see file head).
-  it('fails naming pid and holding age once the lock wait cap is spent on a live holder', async () => {
-    // A live holder means another live process: a real child, killed once the test ends.
-    const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+  it.live('fails naming pid and holding age once the lock wait cap is spent on a live holder', () =>
+    Effect.gen(function* () {
+      // A live holder means another live process: a real child, killed once the test ends.
+      const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+      const holderPid = holder.pid;
 
-    if (holder.pid == null) {
-      throw new Error('could not spawn the lock-holder process');
-    }
+      if (holderPid == null) {
+        throw new Error('could not spawn the lock-holder process');
+      }
 
-    try {
-      // The wait cap polls on the kernel's own Clock — here the live one, since the poll
-      // loop interleaves real fs reads, which a TestClock cannot advance deterministically.
-      // The awaited signal is the LockHeldError itself, not a fixed wait: the cap shortens
-      // the wait (pollMs 50, spent in ~100ms) and the holder's write is backdated 120s, so
-      // the failure lands at holding-age ≈120s either way.
-      const nowMs = toEpochMs(now());
-      const lockPath = await writeRepoLock(root, 'demo', { pid: holder.pid, at: nowMs - 120_000 });
+      try {
+        // The wait cap polls on the kernel's own Clock — here the live one, since the poll
+        // loop interleaves real fs reads, which a TestClock cannot advance deterministically.
+        // The awaited signal is the LockHeldError itself, not a fixed wait: the cap shortens
+        // the wait (pollMs 50, spent in ~100ms) and the holder's write is backdated 120s, so
+        // the failure lands at holding-age ≈120s either way.
+        const nowMs = toEpochMs(now());
+        const lockPath = yield* Effect.promise(() =>
+          writeRepoLock(root, 'demo', { pid: holderPid, at: nowMs - 120_000 }),
+        );
 
-      const error = await Effect.runPromise(
-        expectTaggedFailure(
+        const error = yield* Effect.flip(
           withRepoLock(homeLayout(root).home, 'demo', Effect.succeed(1), {
             pollMs: 50,
             maxWaitMs: 100,
           }),
-          'expected the lock wait cap to fail',
-        ),
-      );
+        );
 
-      expect(messageOf(error)).toContain(
-        `repo 'demo' is locked by a live session (pid ${holder.pid}, holding for 120s)`,
-      );
+        expect(messageOf(error)).toContain(
+          `repo 'demo' is locked by a live session (pid ${holderPid}, holding for 120s)`,
+        );
 
-      // The live holder's lock is left alone
-      expect(await readFile(lockPath, 'utf8')).toContain(`"pid":${holder.pid}`);
-    } finally {
-      holder.kill('SIGKILL');
-    }
-  });
+        // The live holder's lock is left alone
+        expect(yield* Effect.promise(() => readFile(lockPath, 'utf8'))).toContain(
+          `"pid":${holderPid}`,
+        );
+      } finally {
+        holder.kill('SIGKILL');
+      }
+    }),
+  );
 
-  // Plain `it`: the holder's unlink lands on a real timer while the waiter polls on the live
+  // `it.live`: the holder's unlink lands on a real timer while the waiter polls on the live
   // Effect Clock (`Effect.sleep` cadence, frozen by a TestClock); the two must share one
   // timeline (see file head).
-  it('hands a cross-process waiter the lock once the holder releases', async () => {
-    // A live holder means another live process: a real child, killed once the test ends.
-    const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+  it.live('hands a cross-process waiter the lock once the holder releases', () =>
+    Effect.gen(function* () {
+      // A live holder means another live process: a real child, killed once the test ends.
+      const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+      const holderPid = holder.pid;
 
-    if (holder.pid == null) {
-      throw new Error('could not spawn the lock-holder process');
-    }
+      if (holderPid == null) {
+        throw new Error('could not spawn the lock-holder process');
+      }
 
-    try {
-      const lockPath = await writeRepoLock(root, 'demo', { pid: holder.pid, at: toEpochMs(now()) });
+      try {
+        const lockPath = yield* Effect.promise(() =>
+          writeRepoLock(root, 'demo', { pid: holderPid, at: toEpochMs(now()) }),
+        );
 
-      // The holder releases on its own (a real unlink from its pid) while the waiter polls.
-      // A real timer is intentional: the waiter's polls run on the live clock here, so the
-      // unlink must land on that same timeline — no fake timer joins them.
-      setTimeout(() => unlinkSync(lockPath), 5).unref?.();
+        // The holder releases on its own (a real unlink from its pid) while the waiter polls.
+        // A real timer is intentional: the waiter's polls run on the live clock here, so the
+        // unlink must land on that same timeline — no fake timer joins them.
+        setTimeout(() => unlinkSync(lockPath), 5).unref?.();
 
-      // The waiter acquires once the file is gone; the guarded effect answers with our pid.
-      const heldPid = await Effect.runPromise(
-        withRepoLock(homeLayout(root).home, 'demo', Effect.succeed(process.pid), {
-          pollMs: 1,
-          maxWaitMs: 60_000,
-        }),
-      );
+        // The waiter acquires once the file is gone; the guarded effect answers with our pid.
+        const heldPid = yield* withRepoLock(
+          homeLayout(root).home,
+          'demo',
+          Effect.succeed(process.pid),
+          {
+            pollMs: 1,
+            maxWaitMs: 60_000,
+          },
+        );
 
-      expect(heldPid).toBe(process.pid);
+        expect(heldPid).toBe(process.pid);
 
-      // Scoped acquisition releases on exit — nothing manual to forget
-      expect(await fileExists(lockPath)).toBe(false);
-    } finally {
-      holder.kill('SIGKILL');
-    }
-  });
+        // Scoped acquisition releases on exit — nothing manual to forget
+        expect(yield* Effect.promise(() => fileExists(lockPath))).toBe(false);
+      } finally {
+        holder.kill('SIGKILL');
+      }
+    }),
+  );
 
   it.effect('breaks and takes a stale lock left by a dead session', () =>
     Effect.gen(function* () {

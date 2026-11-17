@@ -57,7 +57,7 @@ export type TurnEngine = {
    * The pre-dispatch gate: both caps checked here, so flow code cannot dispatch past a
    * budget by catching the abort. Success carries the dispatch instant for `record`.
    */
-  readonly gate: Effect.Effect<{ readonly startedAt: Temporal.Instant }, TurnAborted, Clock.Clock>;
+  readonly gate: Effect.Effect<{ readonly startedAt: Temporal.Instant }, TurnAborted>;
   /**
    * Records one finished turn: the ledger entry, the per-turn transcript, and the session
    * transcript section. A turn that crashed, ended non-completed, or outlived the wall
@@ -65,7 +65,7 @@ export type TurnEngine = {
    */
   readonly record: (
     input: TurnInput,
-  ) => Effect.Effect<{ readonly exitState: TurnResult['exitState'] }, TurnAborted, Clock.Clock>;
+  ) => Effect.Effect<{ readonly exitState: TurnResult['exitState'] }, TurnAborted>;
   /** The accumulated facts for the receipt write: turn records and transcript files. */
   readonly snapshot: () => {
     readonly turns: readonly Turn[];
@@ -145,7 +145,7 @@ export const createTurnEngine = (config: {
   readonly caps: Caps;
   readonly agent: string;
   readonly model: string;
-}): Effect.Effect<TurnEngine, never, Clock.Clock> =>
+}): Effect.Effect<TurnEngine, never, never> =>
   Effect.gen(function* () {
     const { caps, agent, model } = config;
 

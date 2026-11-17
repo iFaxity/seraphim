@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Clock, Context, Effect, Ref, Result } from 'effect';
+import { Context, Effect, Ref, Result } from 'effect';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -67,8 +67,7 @@ export type SessionServices =
   | AgentRuntimeService
   | GitService
   | NotifierService
-  | HomeService
-  | Clock.Clock;
+  | HomeService;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {

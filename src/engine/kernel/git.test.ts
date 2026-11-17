@@ -6,7 +6,6 @@ import { describe, expect } from 'vite-plus/test';
 
 import { gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
-import { expectTaggedFailure } from '../../../test/exit.ts';
 import { GitError } from '../../lib/errors.ts';
 import { mkdtemp } from 'node:fs/promises';
 
@@ -66,7 +65,7 @@ describe('gitAdapter.push', () => {
     Effect.gen(function* () {
       const git = gitAdapter(pushRunner(() => run(128, '', 'fatal: no upstream configured')));
 
-      const error = yield* expectTaggedFailure(
+      const error = yield* Effect.flip(
         git.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' }),
       );
 
@@ -96,7 +95,7 @@ describe('gitAdapter.probeRemote', () => {
         fakeRunner(() => run(128, '', 'fatal: unable to access: could not resolve host')),
       );
 
-      const error = yield* expectTaggedFailure(git.probeRemote('https://down.invalid/repo.git'));
+      const error = yield* Effect.flip(git.probeRemote('https://down.invalid/repo.git'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/remote not reachable.*could not resolve host/s);
@@ -136,9 +135,7 @@ describe('gitAdapter.cloneIfMissing', () => {
     Effect.gen(function* () {
       const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: repository not found')));
 
-      const error = yield* expectTaggedFailure(
-        git.cloneIfMissing('/x', 'https://bad.invalid/r.git'),
-      );
+      const error = yield* Effect.flip(git.cloneIfMissing('/x', 'https://bad.invalid/r.git'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/clone failed.*repository not found/s);
@@ -158,7 +155,7 @@ describe('gitAdapter.pull', () => {
 
       const broken = gitAdapter(fakeRunner(() => run(1, '', 'error: cannot fast-forward')));
 
-      const error = yield* expectTaggedFailure(broken.pull('/x'));
+      const error = yield* Effect.flip(broken.pull('/x'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/pull failed.*cannot fast-forward/s);
@@ -198,7 +195,7 @@ describe('gitAdapter.createWorktree', () => {
         fakeRunner(() => run(128, '', "fatal: a branch named 'x' already exists")),
       );
 
-      const error = yield* expectTaggedFailure(
+      const error = yield* Effect.flip(
         git.createWorktree({ repoPath: '/x', branch: 'x', path: '/p', baseBranch: 'main' }),
       );
 
@@ -225,7 +222,7 @@ describe('gitAdapter.defaultBranch', () => {
         fakeRunner(() => run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref')),
       );
 
-      const error = yield* expectTaggedFailure(git.defaultBranch('/x'));
+      const error = yield* Effect.flip(git.defaultBranch('/x'));
 
       expect(error).toBeInstanceOf(GitError);
       expect(error.message).toMatch(/default branch lookup failed.*not a symbolic ref/s);
@@ -263,7 +260,7 @@ describe('gitAdapter.removeWorktree', () => {
       const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
       const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
 
-      const error = yield* expectTaggedFailure(
+      const error = yield* Effect.flip(
         git.removeWorktree({ repoPath: '/repos/widgets', path: worktree }),
       );
 
@@ -310,7 +307,7 @@ describe('gitAdapter.deleteBranch', () => {
       );
       const git = gitAdapter(runner);
 
-      const error = yield* expectTaggedFailure(
+      const error = yield* Effect.flip(
         git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),
       );
 

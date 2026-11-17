@@ -1,4 +1,4 @@
-import { Clock, Effect, FileSystem, Layer, Path, Result, Stdio, Terminal } from 'effect';
+import { Effect, FileSystem, Layer, Path, Result, Stdio, Terminal } from 'effect';
 import { CliError, type Flag, type Param } from 'effect/cli';
 import { ChildProcessSpawner } from 'effect/process';
 
@@ -30,8 +30,7 @@ export type CommandServices =
   | GitService
   | NotifierService
   | HomeService
-  | DockerRunnerService
-  | Clock.Clock;
+  | DockerRunnerService;
 
 /**
  * One command module's outward shape — the dispatcher's row type. `O` is the command's own
