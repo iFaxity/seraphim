@@ -299,7 +299,7 @@ function buildTracker(client: GitHubClient, root: string): Tracker {
  * forge client service; the API root is a `Context.Reference` whose default (`API_ROOT`)
  * resolves without wiring — a composition can override it with
  * `Layer.succeed(GithubApiRoot, otherRoot)`. The composition root wires `apiLayer` into
- * `trackerLayer`; tests wire a scripted client.
+ * `trackerLayer`; tests wire a scripted transport `HttpClient` Layer into `clientLayer`.
  */
 export const trackerLayer: Layer.Layer<TrackerService, never, GitHubClientService> = Layer.effect(
   TrackerService,
