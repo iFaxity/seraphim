@@ -78,6 +78,14 @@ export class KernelConfigError extends Data.TaggedError('KernelConfigError')<{
   message: string;
 }> {}
 
+/**
+ * The seraphim-home `.env` failing to validate into the forge-token struct: the file's
+ * `GH_TOKEN` value is not a string-shaped config value. `message` names the schema problem.
+ */
+export class HomeEnvError extends Data.TaggedError('HomeEnvError')<{
+  message: string;
+}> {}
+
 /** A session-receipt listing walk failing on the sessions tree itself (not per-record skips). */
 export class ReceiptReadError extends Data.TaggedError('ReceiptReadError')<{
   message: string;

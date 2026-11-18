@@ -1,24 +1,20 @@
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Effect, Layer, ManagedRuntime, Result } from 'effect';
 
+import { homeDeps, loadConfig, resolvePoolRoot, type HomeDeps } from './core/bootstrap.ts';
 import { engine } from './engine/core/engine.ts';
 import { HomeService, homeLayout } from './engine/core/env.ts';
 import { apiLayer, GithubToken } from './engine/forges/github-api.ts';
 import { trackerLayer } from './engine/forges/github-tracker.ts';
 import { type CommandServices } from './engine/kernel/command.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
-import { loadKernelConfig, type NotifyChannel } from './engine/kernel/config.ts';
+import { type NotifyChannel } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
 import { gitCliLayer, gitLayer } from './engine/kernel/git.ts';
-import { poolRoot } from './engine/kernel/skills.ts';
 import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.ts';
 import { runtimeLayer } from './engine/runtimes/pi.ts';
 import { dockerCliLayer, dockerSandboxLayer } from './engine/sandboxes/docker-sandbox.ts';
-import { readEnvFile } from './lib/env-file.ts';
 import { describeError, KernelConfigError } from './lib/errors.ts';
-import { fileExistsSync } from './lib/fs.ts';
 
 /**
  * CLI boundary: the only place engine outcomes become stdout prose. Rendering lives here so
@@ -64,24 +60,6 @@ export async function main(argv: readonly string[], layer?: Layer.Layer<CommandS
  * from the seraphim-home `.env`.
  */
 const TURN_WALL_CLOCK_MS = 30 * 60_000;
-
-/** The home-derived base inputs the composition root reads before any Layer is built. */
-type HomeDeps = {
-  readonly home: string;
-  readonly projectsRoot: string;
-  readonly token: string;
-};
-
-/** Resolves the seraphim home, its projects root, and the forge token from the `.env`. */
-function homeDeps(): HomeDeps {
-  const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
-
-  return {
-    home,
-    projectsRoot: join(home, 'projects'),
-    token: readEnvFile(join(home, '.env')).get('GH_TOKEN') ?? '',
-  };
-}
 
 /**
  * Base deps: the forge token rides the `.env` read; one channel, configured once in the
@@ -129,25 +107,12 @@ const composeEngineLayer: Effect.Effect<
   KernelConfigError
 > = Effect.gen(function* () {
   const deps = homeDeps();
-  const config = yield* loadKernelConfig(deps.home);
+  const config = yield* loadConfig(deps.home);
   const baseLayer = baseDepsLayer(deps, config.notify);
   const adapters = adaptersLayer(baseLayer, deps.projectsRoot);
 
   return engineLayer(adapters, deps.home) as Layer.Layer<CommandServices>;
 });
-
-/**
- * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
- * exists, else the pool shipped in this checkout — a fresh install curates the factory's
- * own skills from day one, and a home skills directory overrides it wholesale.
- */
-function resolvePoolRoot(home: string) {
-  const homePool = poolRoot(home);
-
-  return fileExistsSync(homePool)
-    ? homePool
-    : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
-}
 
 /** Runs one more engine dispatch on the caller's runtime — the prune confirm pass. */
 type RunNext = (argv: readonly string[]) => Promise<Outcome>;
