@@ -7,20 +7,14 @@ import { Effect, FileSystem, Option } from 'effect';
  */
 
 /** The path exists and is a regular file (false when absent, unreadable, or another kind). */
-export const fileExists = (
-  fs: FileSystem.FileSystem,
-  path: string,
-): Effect.Effect<boolean> =>
+export const fileExists = (fs: FileSystem.FileSystem, path: string): Effect.Effect<boolean> =>
   Effect.map(
     Effect.option(fs.stat(path)),
     (info) => Option.isSome(info) && info.value.type === 'File',
   );
 
 /** The path exists and is a directory (false when absent, unreadable, or another kind). */
-export const dirExists = (
-  fs: FileSystem.FileSystem,
-  path: string,
-): Effect.Effect<boolean> =>
+export const dirExists = (fs: FileSystem.FileSystem, path: string): Effect.Effect<boolean> =>
   Effect.map(
     Effect.option(fs.stat(path)),
     (info) => Option.isSome(info) && info.value.type === 'Directory',

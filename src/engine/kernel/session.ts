@@ -7,7 +7,6 @@ import { loadProject, type ProjectRecord } from './projects.ts';
 import { type Session, writeReceipt, sessionRelDir } from './receipts.ts';
 import { checkDeclaredSkills, stageSkills } from './skills.ts';
 import { createTurnEngine, type TurnAborted, type TurnEngine } from './turns.ts';
-import { fileExists } from '../../lib/fs.ts';
 
 import {
   ClaimConflictError,
@@ -20,6 +19,7 @@ import {
   ReceiptWriteError,
   UnavailableError,
 } from '../../lib/errors.ts';
+import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import {
   type KernelFailure,
