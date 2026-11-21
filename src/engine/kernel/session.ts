@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Context, Effect, FileSystem, Option, Ref, Result } from 'effect';
+import { Context, Effect, FileSystem, Ref, Result } from 'effect';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -19,6 +19,7 @@ import {
   ReceiptWriteError,
   UnavailableError,
 } from '../../lib/errors.ts';
+import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import {
   type KernelFailure,
@@ -209,8 +210,7 @@ const resolveRunnableFlow = (
 const checkPreflight = (fs: FileSystem.FileSystem, home: Home, repo: string) =>
   Effect.gen(function* () {
     const dockerfilePath = join(home.projectsRoot, repo, 'Dockerfile');
-    const dockerfileInfo = yield* Effect.option(fs.stat(dockerfilePath));
-    const hasDockerfile = Option.isSome(dockerfileInfo) && dockerfileInfo.value.type === 'File';
+    const hasDockerfile = yield* fileExists(fs, dockerfilePath);
 
     if (!hasDockerfile) {
       const missing = missingDockerfile(repo, home.projectsRoot);
