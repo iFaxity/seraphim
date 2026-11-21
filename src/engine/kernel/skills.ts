@@ -1,7 +1,8 @@
 import { basename, join } from 'node:path';
-import { Effect, FileSystem, Option, Result } from 'effect';
+import { Effect, FileSystem, Result } from 'effect';
 
 import { isNotFound, SkillPoolError } from '../../lib/errors.ts';
+import { fileExists } from '../../lib/fs.ts';
 
 /**
  * The curated skill pool (stories 14–16): one directory per skill, one `SKILL.md`
@@ -66,12 +67,7 @@ export const listPoolSkills = (
   });
 
 /** The shared stat probe under the `is*` read: missing/unreadable paths read as not-a-kind. */
-function hasFile(fs: FileSystem.FileSystem, path: string) {
-  return Effect.map(
-    Effect.option(fs.stat(path)),
-    (info) => Option.isSome(info) && info.value.type === 'File',
-  );
-}
+const hasFile = fileExists;
 
 /**
  * Fail-fast check that every declared skill exists in the pool — a flow naming a skill the
