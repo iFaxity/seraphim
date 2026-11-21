@@ -1,9 +1,5 @@
 import { Context, Effect, Layer, Option, Schema } from 'effect';
-import * as FetchHttpClient from 'effect/http/FetchHttpClient';
-import * as Headers from 'effect/http/Headers';
-import * as HttpBody from 'effect/http/HttpBody';
-import * as HttpClient from 'effect/http/HttpClient';
-import * as HttpClientRequest from 'effect/http/HttpClientRequest';
+import { FetchHttpClient, Headers, HttpBody, HttpClient, HttpClientRequest } from 'effect/http';
 import { type HttpClientResponse } from 'effect/http/HttpClientResponse';
 
 import { ApiError } from '../../lib/errors.ts';
