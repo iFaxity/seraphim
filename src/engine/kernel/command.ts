@@ -22,7 +22,8 @@ import { type DockerRunnerService } from '../sandboxes/docker-sandbox.ts';
  */
 export type ErrorOutcome = { readonly kind: 'error'; readonly message: string };
 
-/** The service stack every command's execute runs against (the composition root builds it). */
+/** The service stack every command's execute runs against (the composition root builds it).
+ * The CLI-backed adapters' honest R rides it too: the spawner behind the git/docker runners. */
 export type CommandServices =
   | TrackerService
   | SandboxService
@@ -31,7 +32,8 @@ export type CommandServices =
   | NotifierService
   | HomeService
   | DockerRunnerService
-  | FileSystem.FileSystem;
+  | FileSystem.FileSystem
+  | ChildProcessSpawner.ChildProcessSpawner;
 
 /**
  * One command module's outward shape — the dispatcher's row type. `O` is the command's own

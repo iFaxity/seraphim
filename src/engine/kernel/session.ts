@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { Context, Effect, FileSystem, Ref, Result } from 'effect';
+import { ChildProcessSpawner } from 'effect/process';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -60,7 +61,9 @@ export type SessionInput = {
  * (sessions never read other sessions' receipts). Tags survive to the composition root. */
 export type SessionError = Exclude<KernelFailure, ReceiptReadError>;
 
-/** The services one session run resolves: the adapter contracts plus the home layout. */
+/** The services one session run resolves: the adapter contracts plus the home layout.
+ * The CLI-backed adapters' honest R (spawner, filesystem) rides this stack too — the
+ * session resolves them from the context, never threads them through parameters. */
 export type SessionServices =
   | TrackerService
   | SandboxService
@@ -68,7 +71,8 @@ export type SessionServices =
   | GitService
   | NotifierService
   | HomeService
-  | FileSystem.FileSystem;
+  | FileSystem.FileSystem
+  | ChildProcessSpawner.ChildProcessSpawner;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {
@@ -168,10 +172,14 @@ const resolveRunnableFlow = (
 ): Effect.Effect<
   RunnableFlow & { tracker: Tracker; git: Git; runtime: AgentRuntime },
   RunnableFlowError,
-  TrackerService | GitService | AgentRuntimeService | HomeService | FileSystem.FileSystem
+  | TrackerService
+  | GitService
+  | AgentRuntimeService
+  | HomeService
+  | FileSystem.FileSystem
+  | ChildProcessSpawner.ChildProcessSpawner
 > =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
     const tracker = yield* TrackerService;
     const git = yield* GitService;
     const runtime = yield* AgentRuntimeService;
@@ -186,7 +194,7 @@ const resolveRunnableFlow = (
 
     const flow = yield* loadFlow(home.home, input.repo);
     yield* checkDeclaredSkills(home.poolRoot, flow.config.skills);
-    yield* checkPreflight(fs, home, input.repo);
+    yield* checkPreflight(home, input.repo);
 
     if (!runtime.available(flow.config.agent)) {
       return yield* new UnavailableError({
@@ -207,10 +215,10 @@ const resolveRunnableFlow = (
  * moves the failure ahead of the claim so a broken project never consumes an issue. The
  * diagnostic wording lives once, in the sandbox module.
  */
-const checkPreflight = (fs: FileSystem.FileSystem, home: Home, repo: string) =>
+const checkPreflight = (home: Home, repo: string) =>
   Effect.gen(function* () {
     const dockerfilePath = join(home.projectsRoot, repo, 'Dockerfile');
-    const hasDockerfile = yield* fileExists(fs, dockerfilePath);
+    const hasDockerfile = yield* fileExists(dockerfilePath);
 
     if (!hasDockerfile) {
       const missing = missingDockerfile(repo, home.projectsRoot);
@@ -322,7 +330,7 @@ const claimAndSyncIssue = (
 ): Effect.Effect<
   Issue,
   TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
-  FileSystem.FileSystem
+  FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
 > =>
   withRepoLock(
     home.home,

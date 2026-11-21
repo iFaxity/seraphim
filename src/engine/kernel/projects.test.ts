@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeFileSystem } from '@effect/platform-node';
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Cause, Effect, Exit, FileSystem, Layer } from 'effect';
+import { Cause, Effect, Exit, Layer } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { type CommandServices } from './command.ts';
@@ -39,10 +39,12 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-/** The project record reads ride the platform FileSystem service, merged into every layer. */
-const fsLayer = NodeFileSystem.layer;
+/** The project record reads ride the platform FileSystem service; registration's remote
+ * probe resolves the spawner from the context too, so NodeServices backs both. The layer's
+ * type keeps the spawner the record services' honest R resolves through. */
+const fsLayer = NodeServices.layer;
 
-function homeLayer(): Layer.Layer<HomeService | FileSystem.FileSystem> {
+function homeLayer() {
   return Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), fsLayer);
 }
 

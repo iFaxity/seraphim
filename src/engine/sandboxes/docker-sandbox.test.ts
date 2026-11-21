@@ -12,8 +12,13 @@ import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './dock
 import { UnavailableError } from '../../lib/errors.ts';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 
-/** The real fs the adapter's file probes run against — tests seed the tree directly. */
-const fs = Effect.runSync(Effect.provide(FileSystem.FileSystem, NodeServices.layer));
+/**
+ * The adapter resolves the filesystem and the process spawner from the Effect context, so
+ * every case provides the Node driver itself — the tests seed the tree it probes.
+ */
+const withStack = <A, E>(
+  effect: Effect.Effect<A, E, FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner>,
+) => Effect.provide(effect, NodeServices.layer);
 
 /** The scripted handle one scripted spawn returns: instant exit with fixed streams. */
 function scriptedHandle(out: { exitCode: number; stdout: string; stderr: string }) {
@@ -37,7 +42,8 @@ function scriptedHandle(out: { exitCode: number; stdout: string; stderr: string 
 /**
  * Scripted `docker` runner over a scripted `ChildProcessSpawner`: records every invocation
  * so tests assert the adapter's observable docker operations (what a user would see in
- * `docker` output), never adapter internals.
+ * `docker` output), never adapter internals. The scripted spawner is provided to the run
+ * Effects' context — the same seam the production runner resolves through.
  */
 export function fakeDockerRunner(
   script: (args: readonly string[]) => { exitCode: number; stdout: string; stderr: string },
@@ -57,7 +63,11 @@ export function fakeDockerRunner(
     }),
   );
 
-  return { ...cliDocker(spawner), invocations } satisfies DockerRunner & {
+  return {
+    invocations,
+    run: (args: readonly string[]) =>
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)(cliDocker.run(args)),
+  } satisfies DockerRunner & {
     invocations: string[][];
   };
 }
@@ -71,10 +81,10 @@ function countingDocker() {
       builds.push([...args]);
     }
 
-    return liveDocker.run(args);
+    return cliDocker.run(args);
   }
 
-  return { run, builds };
+  return { run, builds } satisfies DockerRunner & { builds: string[][] };
 }
 
 let projectsRoot: string;
@@ -89,6 +99,8 @@ async function seedDockerfileUnder(base: string, repo: string, body: string) {
 
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, 'Dockerfile'), body);
+
+  return dir;
 }
 
 /** Seeds under the file-scoped temp projects root (fake-runner tests). */
@@ -100,94 +112,104 @@ describe('dockerSandbox.ensureImage', () => {
   it.effect(
     'fails fast with a clear message when the project has no Dockerfile — before any docker call',
     () =>
-      Effect.gen(function* () {
-        yield* Effect.promise(() => mkdir(join(projectsRoot, 'ghost'), { recursive: true }));
-        const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
-        const sandbox = dockerSandbox({ projectsRoot, docker, fs });
+      withStack(
+        Effect.gen(function* () {
+          yield* Effect.promise(() => mkdir(join(projectsRoot, 'ghost'), { recursive: true }));
+          const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
+          const sandbox = dockerSandbox({ projectsRoot, docker });
 
-        const error = yield* Effect.flip(sandbox.ensureImage('ghost'));
+          const error = yield* Effect.flip(sandbox.ensureImage('ghost'));
 
-        expect(error).toBeInstanceOf(UnavailableError);
-        expect(error.cause).toBeInstanceOf(Error);
-        expect((error.cause as Error).message).toMatch(/no Dockerfile for 'ghost'/);
-        expect((error.cause as Error).message).toContain(join(projectsRoot, 'ghost', 'Dockerfile'));
+          expect(error).toBeInstanceOf(UnavailableError);
+          expect(error.cause).toBeInstanceOf(Error);
+          expect((error.cause as Error).message).toMatch(/no Dockerfile for 'ghost'/);
+          expect((error.cause as Error).message).toContain(
+            join(projectsRoot, 'ghost', 'Dockerfile'),
+          );
 
-        expect(docker.invocations).toHaveLength(0);
-      }),
+          expect(docker.invocations).toHaveLength(0);
+        }),
+      ),
   );
 
   it.effect('cache hit: existing content-hash tag is reused without a build', () =>
-    Effect.gen(function* () {
-      yield* Effect.promise(() => seedDockerfile('cached', 'FROM node:26\n'));
-      const docker = fakeDockerRunner((args) => {
-        if (args[0] === 'image' && args[1] === 'inspect') {
-          return { exitCode: 0, stdout: '"sha256:abc123"', stderr: '' };
-        }
+    withStack(
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedDockerfile('cached', 'FROM node:26\n'));
+        const docker = fakeDockerRunner((args) => {
+          if (args[0] === 'image' && args[1] === 'inspect') {
+            return { exitCode: 0, stdout: '"sha256:abc123"', stderr: '' };
+          }
 
-        return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
-      });
-      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
+          return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
+        });
+        const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      // Void contract: success is the point; the inspect reuse is asserted via the call count.
-      yield* sandbox.ensureImage('cached');
+        // Void contract: success is the point; the inspect reuse is asserted via the call count.
+        yield* sandbox.ensureImage('cached');
 
-      // Only the inspect ran — no build, no tag churn.
-      expect(docker.invocations).toHaveLength(1);
-    }),
+        // Only the inspect ran — no build, no tag churn.
+        expect(docker.invocations).toHaveLength(1);
+      }),
+    ),
   );
 
   it.effect('cache miss: builds and tags the image, reporting the built id', () =>
-    Effect.gen(function* () {
-      yield* Effect.promise(() => seedDockerfile('fresh', 'FROM node:26\n'));
-      const docker = fakeDockerRunner((args) => {
-        if (args[0] === 'image' && args[1] === 'inspect') {
-          return { exitCode: 1, stdout: '', stderr: 'no such image' };
-        }
+    withStack(
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedDockerfile('fresh', 'FROM node:26\n'));
+        const docker = fakeDockerRunner((args) => {
+          if (args[0] === 'image' && args[1] === 'inspect') {
+            return { exitCode: 1, stdout: '', stderr: 'no such image' };
+          }
 
-        if (args[0] === 'buildx' && args[1] === 'build') {
-          return { exitCode: 0, stdout: 'sha256:fedcba9876543210', stderr: '' };
-        }
+          if (args[0] === 'buildx' && args[1] === 'build') {
+            return { exitCode: 0, stdout: 'sha256:fedcba9876543210', stderr: '' };
+          }
 
-        return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
-      });
-      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
+          return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
+        });
+        const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      yield* sandbox.ensureImage('fresh');
+        yield* sandbox.ensureImage('fresh');
 
-      expect(docker.invocations).toHaveLength(2);
+        expect(docker.invocations).toHaveLength(2);
 
-      const build = docker.invocations[1] ?? [];
+        const build = docker.invocations[1] ?? [];
 
-      expect(build[0]).toBe('buildx');
-      expect(build).toContain('build');
-      expect(build).toContain('--load');
-      expect(build).toContain('-t');
-      expect(build.at(-1)).toBe(join(projectsRoot, 'fresh'));
-    }),
+        expect(build[0]).toBe('buildx');
+        expect(build).toContain('build');
+        expect(build).toContain('--load');
+        expect(build).toContain('-t');
+        expect(build.at(-1)).toBe(join(projectsRoot, 'fresh'));
+      }),
+    ),
   );
 
   it.effect('fails with docker build stderr when the build itself errors', () =>
-    Effect.gen(function* () {
-      yield* Effect.promise(() => seedDockerfile('broken', 'FROM no-such-base:latest\n'));
-      const docker = fakeDockerRunner((args) => {
-        if (args[0] === 'image' && args[1] === 'inspect') {
-          return { exitCode: 1, stdout: '', stderr: 'no such image' };
-        }
+    withStack(
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedDockerfile('broken', 'FROM no-such-base:latest\n'));
+        const docker = fakeDockerRunner((args) => {
+          if (args[0] === 'image' && args[1] === 'inspect') {
+            return { exitCode: 1, stdout: '', stderr: 'no such image' };
+          }
 
-        if (args[0] === 'buildx' && args[1] === 'build') {
-          return { exitCode: 1, stdout: '', stderr: 'pull access denied for no-such-base' };
-        }
+          if (args[0] === 'buildx' && args[1] === 'build') {
+            return { exitCode: 1, stdout: '', stderr: 'pull access denied for no-such-base' };
+          }
 
-        return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
-      });
-      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
+          return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
+        });
+        const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      const error = yield* Effect.flip(sandbox.ensureImage('broken'));
+        const error = yield* Effect.flip(sandbox.ensureImage('broken'));
 
-      expect(error).toBeInstanceOf(UnavailableError);
-      expect((error.cause as Error).message).toMatch(/image build failed for 'broken'/);
-      expect((error.cause as Error).message).toContain('pull access denied');
-    }),
+        expect(error).toBeInstanceOf(UnavailableError);
+        expect((error.cause as Error).message).toMatch(/image build failed for 'broken'/);
+        expect((error.cause as Error).message).toContain('pull access denied');
+      }),
+    ),
   );
 });
 
@@ -204,91 +226,92 @@ describe('dockerSandbox.exec', () => {
   it.effect(
     'runs the command inside a container with the worktree mounted read-write at /workspace',
     () =>
-      Effect.gen(function* () {
-        const docker = fakeDockerRunner((args) => {
-          if (args[0] === 'run') {
-            return { exitCode: 0, stdout: 'hello from container', stderr: '' };
-          }
+      withStack(
+        Effect.gen(function* () {
+          const docker = fakeDockerRunner((args) => {
+            if (args[0] === 'run') {
+              return { exitCode: 0, stdout: 'hello from container', stderr: '' };
+            }
 
-          return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
-        });
-        const sandbox = dockerSandbox({ projectsRoot, docker, fs });
+            return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
+          });
+          const sandbox = dockerSandbox({ projectsRoot, docker });
+
+          const executed = yield* sandbox.exec({
+            repo: 'demo',
+            worktreePath,
+            command: ['pnpm', 'lint'],
+          });
+
+          expect(executed).toEqual({
+            command: ['pnpm', 'lint'],
+            exitCode: 0,
+            stdout: 'hello from container',
+            stderr: '',
+          });
+
+          const run = docker.invocations[0] ?? [];
+          const image = run.find((arg) => arg.startsWith('seraphim/demo:')) ?? '';
+          const mount = run[run.indexOf('--mount') + 1] ?? '';
+
+          expect(image).toMatch(/^seraphim\/demo:[0-9a-f]{16}$/);
+          expect(run.indexOf(image)).toBeLessThan(run.indexOf('pnpm'));
+          expect(run.at(-1)).toBe('lint');
+          expect(run.slice(-2)).toEqual(['pnpm', 'lint']);
+          expect(mount).toContain('type=bind');
+        }),
+      ),
+  );
+
+  it.effect('captures a nonzero exit code as the exec outcome, not a failure', () =>
+    withStack(
+      Effect.gen(function* () {
+        const docker = fakeDockerRunner(() => ({ exitCode: 7, stdout: '', stderr: 'boom' }));
+        const sandbox = dockerSandbox({ projectsRoot, docker });
 
         const executed = yield* sandbox.exec({
           repo: 'demo',
           worktreePath,
-          command: ['pnpm', 'lint'],
+          command: ['false'],
         });
 
-        expect(executed).toEqual({
-          command: ['pnpm', 'lint'],
-          exitCode: 0,
-          stdout: 'hello from container',
-          stderr: '',
-        });
-
-        const run = docker.invocations[0] ?? [];
-        const image = run.find((arg) => arg.startsWith('seraphim/demo:')) ?? '';
-        const mount = run[run.indexOf('--mount') + 1] ?? '';
-
-        expect(image).toMatch(/^seraphim\/demo:[0-9a-f]{16}$/);
-        expect(run.indexOf(image)).toBeLessThan(run.indexOf('pnpm'));
-        expect(run.at(-1)).toBe('lint');
-        expect(run.slice(-2)).toEqual(['pnpm', 'lint']);
-        expect(mount).toContain('type=bind');
+        expect(executed.exitCode).toBe(7);
+        expect(executed.stderr).toBe('boom');
       }),
-  );
-
-  it.effect('captures a nonzero exit code as the exec outcome, not a failure', () =>
-    Effect.gen(function* () {
-      const docker = fakeDockerRunner(() => ({ exitCode: 7, stdout: '', stderr: 'boom' }));
-      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
-
-      const executed = yield* sandbox.exec({
-        repo: 'demo',
-        worktreePath,
-        command: ['false'],
-      });
-
-      expect(executed.exitCode).toBe(7);
-      expect(executed.stderr).toBe('boom');
-    }),
+    ),
   );
 
   it.effect('mounts the project env file when present so credentials reach the container', () =>
-    Effect.gen(function* () {
-      yield* Effect.promise(() => seedDockerfile('withenv', 'FROM node:26\n'));
-      yield* Effect.promise(() =>
-        writeFile(join(projectsRoot, 'withenv', '.env'), 'AGENT_KEY=secret\n'),
-      );
-      const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
-      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
+    withStack(
+      Effect.gen(function* () {
+        yield* Effect.promise(() => seedDockerfile('withenv', 'FROM node:26\n'));
+        yield* Effect.promise(() =>
+          writeFile(join(projectsRoot, 'withenv', '.env'), 'AGENT_KEY=secret\n'),
+        );
+        const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
+        const sandbox = dockerSandbox({ projectsRoot, docker });
 
-      yield* sandbox.exec({
-        repo: 'withenv',
-        worktreePath,
-        command: ['printenv', 'AGENT_KEY'],
-      });
+        yield* sandbox.exec({
+          repo: 'withenv',
+          worktreePath,
+          command: ['printenv', 'AGENT_KEY'],
+        });
 
-      const run = docker.invocations[0] ?? [];
+        const run = docker.invocations[0] ?? [];
 
-      expect(run).toContain('--env-file');
-      expect(run[run.indexOf('--env-file') + 1]).toBe(join(projectsRoot, 'withenv', '.env'));
-    }),
+        expect(run).toContain('--env-file');
+        expect(run[run.indexOf('--env-file') + 1]).toBe(join(projectsRoot, 'withenv', '.env'));
+      }),
+    ),
   );
 });
 
 // Integration tier — runs only when a docker daemon answers: exec a trivial command, prove
 // the second ensureImage is a cache hit, a lockfile change rebuilds, and the host stays clean.
 // The live tier drives the real Node spawner driver; the fake tiers script their own spawners.
-const nodeSpawner = await Effect.runPromise(
-  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(spawner)).pipe(
-    Effect.provide(NodeServices.layer),
-  ),
-);
-const liveDocker = cliDocker(nodeSpawner);
-
-const dockerReady = (await Effect.runPromise(liveDocker.run(['info']))).exitCode === 0;
+const dockerReady =
+  (await Effect.runPromise(Effect.provide(cliDocker.run(['info']), NodeServices.layer)))
+    .exitCode === 0;
 
 describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout: 30_000 }, () => {
   let root: string;
@@ -300,75 +323,83 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
   it.live(
     'execs a trivial command inside the container and leaves the host filesystem untouched',
     () =>
-      Effect.gen(function* () {
-        yield* Effect.promise(() =>
-          seedDockerfileUnder(root, 'live', `FROM alpine:3.20\n# ${randomUUID()}\n`),
-        );
-        const sandbox = dockerSandbox({ projectsRoot: root, docker: liveDocker, fs });
-        const hostSentinel = join(root, 'host-sentinel.txt');
+      withStack(
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            seedDockerfileUnder(root, 'live', `FROM alpine:3.20\n# ${randomUUID()}\n`),
+          );
+          const sandbox = dockerSandbox({ projectsRoot: root, docker: cliDocker });
+          const hostSentinel = join(root, 'host-sentinel.txt');
 
-        yield* Effect.promise(() => writeFile(hostSentinel, 'do not touch\n'));
-        const before = yield* Effect.promise(() => stat(hostSentinel));
+          yield* Effect.promise(() => writeFile(hostSentinel, 'do not touch\n'));
+          const before = yield* Effect.promise(() => stat(hostSentinel));
 
-        // ensureImage builds the content-tagged image that the exec below resolves to.
-        yield* sandbox.ensureImage('live');
+          // ensureImage builds the content-tagged image that the exec below resolves to.
+          yield* sandbox.ensureImage('live');
 
-        const executed = yield* sandbox.exec({
-          repo: 'live',
-          worktreePath: root,
-          command: ['echo', 'hello from sandbox'],
-        });
+          const executed = yield* sandbox.exec({
+            repo: 'live',
+            worktreePath: root,
+            command: ['echo', 'hello from sandbox'],
+          });
 
-        expect(executed.exitCode).toBe(0);
-        expect(executed.stdout.trim()).toBe('hello from sandbox');
+          expect(executed.exitCode).toBe(0);
+          expect(executed.stdout.trim()).toBe('hello from sandbox');
 
-        const after = yield* Effect.promise(() => stat(hostSentinel));
+          const after = yield* Effect.promise(() => stat(hostSentinel));
 
-        expect(after.mtimeMs).toBe(before.mtimeMs);
-      }),
+          expect(after.mtimeMs).toBe(before.mtimeMs);
+        }),
+      ),
   );
 
   it.live('reuses the image when Dockerfile and lockfiles are unchanged — no second build', () =>
-    Effect.gen(function* () {
-      yield* Effect.promise(() =>
-        seedDockerfileUnder(root, 'cache', `FROM alpine:3.20\n# ${randomUUID()}\n`),
-      );
-      const counting = countingDocker();
-      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting, fs });
+    withStack(
+      Effect.gen(function* () {
+        yield* Effect.promise(() =>
+          seedDockerfileUnder(root, 'cache', `FROM alpine:3.20\n# ${randomUUID()}\n`),
+        );
+        const counting = countingDocker();
+        const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
-      yield* countingSandbox.ensureImage('cache');
-      yield* countingSandbox.ensureImage('cache');
+        yield* countingSandbox.ensureImage('cache');
+        yield* countingSandbox.ensureImage('cache');
 
-      // Cache hit observable: exactly one build happened across two ensureImage calls.
-      expect(counting.builds).toHaveLength(1);
-    }),
+        // Cache hit observable: exactly one build happened across two ensureImage calls.
+        expect(counting.builds).toHaveLength(1);
+      }),
+    ),
   );
 
   it.live('rebuilds when a lockfile changes', () =>
-    Effect.gen(function* () {
-      yield* Effect.promise(() =>
-        seedDockerfileUnder(root, 'lockchange', `FROM alpine:3.20\n# ${randomUUID()}\n`),
-      );
-      const counting = countingDocker();
-      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting, fs });
+    withStack(
+      Effect.gen(function* () {
+        yield* Effect.promise(() =>
+          seedDockerfileUnder(root, 'lockchange', `FROM alpine:3.20\n# ${randomUUID()}\n`),
+        );
+        const counting = countingDocker();
+        const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
 
-      yield* countingSandbox.ensureImage('lockchange');
-      yield* Effect.promise(() =>
-        writeFile(join(root, 'lockchange', 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n'),
-      );
-      yield* countingSandbox.ensureImage('lockchange');
+        yield* countingSandbox.ensureImage('lockchange');
+        yield* Effect.promise(() =>
+          writeFile(join(root, 'lockchange', 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n'),
+        );
+        yield* countingSandbox.ensureImage('lockchange');
 
-      expect(counting.builds).toHaveLength(2);
-    }),
+        expect(counting.builds).toHaveLength(2);
+      }),
+    ),
   );
 });
 
 describe('imageTagFor', () => {
   it.effect('reads none when the project directory has no Dockerfile — absence as Option', () =>
-    Effect.gen(function* () {
-      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
+    withStack(
+      Effect.gen(function* () {
+        const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
 
-      expect(Option.isNone(yield* imageTagFor(fs, dir))).toBe(true);
-    }),
+        expect(Option.isNone(yield* imageTagFor(dir))).toBe(true);
+      }),
+    ),
   );
 });
