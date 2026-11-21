@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Effect, Option, Sink, Stream } from 'effect';
+import { Effect, FileSystem, Option, Sink, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { beforeEach, describe, expect } from 'vite-plus/test';
 
@@ -11,6 +11,9 @@ import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './dock
 
 import { UnavailableError } from '../../lib/errors.ts';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
+
+/** The real fs the adapter's file probes run against — tests seed the tree directly. */
+const fs = Effect.runSync(Effect.provide(FileSystem.FileSystem, NodeServices.layer));
 
 /** The scripted handle one scripted spawn returns: instant exit with fixed streams. */
 function scriptedHandle(out: { exitCode: number; stdout: string; stderr: string }) {
@@ -100,7 +103,7 @@ describe('dockerSandbox.ensureImage', () => {
       Effect.gen(function* () {
         yield* Effect.promise(() => mkdir(join(projectsRoot, 'ghost'), { recursive: true }));
         const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
-        const sandbox = dockerSandbox({ projectsRoot, docker });
+        const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
         const error = yield* Effect.flip(sandbox.ensureImage('ghost'));
 
@@ -123,7 +126,7 @@ describe('dockerSandbox.ensureImage', () => {
 
         return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
       });
-      const sandbox = dockerSandbox({ projectsRoot, docker });
+      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
       // Void contract: success is the point; the inspect reuse is asserted via the call count.
       yield* sandbox.ensureImage('cached');
@@ -147,7 +150,7 @@ describe('dockerSandbox.ensureImage', () => {
 
         return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
       });
-      const sandbox = dockerSandbox({ projectsRoot, docker });
+      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
       yield* sandbox.ensureImage('fresh');
 
@@ -177,7 +180,7 @@ describe('dockerSandbox.ensureImage', () => {
 
         return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
       });
-      const sandbox = dockerSandbox({ projectsRoot, docker });
+      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
       const error = yield* Effect.flip(sandbox.ensureImage('broken'));
 
@@ -209,7 +212,7 @@ describe('dockerSandbox.exec', () => {
 
           return { exitCode: 1, stdout: '', stderr: 'unexpected call' };
         });
-        const sandbox = dockerSandbox({ projectsRoot, docker });
+        const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
         const executed = yield* sandbox.exec({
           repo: 'demo',
@@ -239,7 +242,7 @@ describe('dockerSandbox.exec', () => {
   it.effect('captures a nonzero exit code as the exec outcome, not a failure', () =>
     Effect.gen(function* () {
       const docker = fakeDockerRunner(() => ({ exitCode: 7, stdout: '', stderr: 'boom' }));
-      const sandbox = dockerSandbox({ projectsRoot, docker });
+      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
       const executed = yield* sandbox.exec({
         repo: 'demo',
@@ -259,7 +262,7 @@ describe('dockerSandbox.exec', () => {
         writeFile(join(projectsRoot, 'withenv', '.env'), 'AGENT_KEY=secret\n'),
       );
       const docker = fakeDockerRunner(() => ({ exitCode: 0, stdout: '', stderr: '' }));
-      const sandbox = dockerSandbox({ projectsRoot, docker });
+      const sandbox = dockerSandbox({ projectsRoot, docker, fs });
 
       yield* sandbox.exec({
         repo: 'withenv',
@@ -301,7 +304,7 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
         yield* Effect.promise(() =>
           seedDockerfileUnder(root, 'live', `FROM alpine:3.20\n# ${randomUUID()}\n`),
         );
-        const sandbox = dockerSandbox({ projectsRoot: root, docker: liveDocker });
+        const sandbox = dockerSandbox({ projectsRoot: root, docker: liveDocker, fs });
         const hostSentinel = join(root, 'host-sentinel.txt');
 
         yield* Effect.promise(() => writeFile(hostSentinel, 'do not touch\n'));
@@ -331,7 +334,7 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
         seedDockerfileUnder(root, 'cache', `FROM alpine:3.20\n# ${randomUUID()}\n`),
       );
       const counting = countingDocker();
-      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
+      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting, fs });
 
       yield* countingSandbox.ensureImage('cache');
       yield* countingSandbox.ensureImage('cache');
@@ -347,7 +350,7 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
         seedDockerfileUnder(root, 'lockchange', `FROM alpine:3.20\n# ${randomUUID()}\n`),
       );
       const counting = countingDocker();
-      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting });
+      const countingSandbox = dockerSandbox({ projectsRoot: root, docker: counting, fs });
 
       yield* countingSandbox.ensureImage('lockchange');
       yield* Effect.promise(() =>
@@ -365,7 +368,7 @@ describe('imageTagFor', () => {
     Effect.gen(function* () {
       const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
 
-      expect(Option.isNone(yield* imageTagFor(dir))).toBe(true);
+      expect(Option.isNone(yield* imageTagFor(fs, dir))).toBe(true);
     }),
   );
 });

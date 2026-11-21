@@ -1,8 +1,7 @@
 import { join } from 'node:path';
-import { Effect, Result, Schema } from 'effect';
+import { Effect, FileSystem, Result, Schema } from 'effect';
 
 import { FlowError } from '../../lib/errors.ts';
-import { fsTagged, readFileE } from '../../lib/fs.ts';
 import { FlowConfigSchema, type FlowConfig, type SessionContext } from '../core/flow-api.ts';
 
 /**
@@ -33,11 +32,16 @@ function flowPath(home: string, repo: string) {
  */
 export const loadFlow = (home: string, repo: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const path = flowPath(home, repo);
 
-    yield* readFileE(path).pipe(
-      fsTagged(() => new FlowError({ message: `no project flow for '${repo}': expected ${path}` })),
-    );
+    const read = yield* Effect.result(fs.readFileString(path));
+
+    if (Result.isFailure(read)) {
+      return yield* new FlowError({
+        message: `no project flow for '${repo}': expected ${path}`,
+      });
+    }
 
     const imported = yield* Effect.result(Effect.promise(() => import(path)));
 

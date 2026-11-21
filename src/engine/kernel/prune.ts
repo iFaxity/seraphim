@@ -1,12 +1,10 @@
-import { type Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { Effect, Result } from 'effect';
+import { Effect, FileSystem, Result } from 'effect';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 
-import { describeError, ProjectError, ReceiptReadError } from '../../lib/errors.ts';
-import { isFsErrorCode, readDirE, rmE } from '../../lib/fs.ts';
+import { describeError, isNotFound, ProjectError, ReceiptReadError } from '../../lib/errors.ts';
 import { type Git } from '../core/contracts.ts';
 import { HomeService, type Home } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
@@ -82,51 +80,55 @@ type PruneContext = {
  * absent from the context yields an empty image list — image pruning is optional;
  * worktree/session prune is not.
  */
-export const planPrune: Effect.Effect<PrunePlan, ProjectError | ReceiptReadError, PruneServices> =
-  Effect.gen(function* () {
-    const home = yield* HomeService;
-    const docker = yield* Effect.serviceOption(DockerRunnerService);
+export const planPrune: Effect.Effect<
+  PrunePlan,
+  ProjectError | ReceiptReadError,
+  PruneServices | FileSystem.FileSystem
+> = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const home = yield* HomeService;
+  const docker = yield* Effect.serviceOption(DockerRunnerService);
 
-    const listed = yield* listSessions(home.sessionsRoot);
+  const listed = yield* listSessions(home.sessionsRoot);
 
-    const sessions = listed.sessions
-      .filter((entry) => entry.manifest.state == 'completed')
-      .map((entry) => ({
-        repo: entry.manifest.repo,
-        issueNumber: entry.manifest.issueNumber,
-        dir: entry.dir,
-        worktreePath: entry.manifest.worktreePath,
-        branch: entry.manifest.branch,
-      }));
+  const sessions = listed.sessions
+    .filter((entry) => entry.manifest.state == 'completed')
+    .map((entry) => ({
+      repo: entry.manifest.repo,
+      issueNumber: entry.manifest.issueNumber,
+      dir: entry.dir,
+      worktreePath: entry.manifest.worktreePath,
+      branch: entry.manifest.branch,
+    }));
 
-    // Retained sessions (any state a human must be able to inspect) keep their worktrees.
-    const retainedWorktrees = new Set(
-      listed.sessions
-        .filter((entry) => entry.manifest.state != 'completed')
-        .map((entry) => entry.manifest.worktreePath),
-    );
-    const sessionWorktrees = new Set(sessions.map((session) => session.worktreePath));
+  // Retained sessions (any state a human must be able to inspect) keep their worktrees.
+  const retainedWorktrees = new Set(
+    listed.sessions
+      .filter((entry) => entry.manifest.state != 'completed')
+      .map((entry) => entry.manifest.worktreePath),
+  );
+  const sessionWorktrees = new Set(sessions.map((session) => session.worktreePath));
 
-    const orphanWorktrees = yield* listOrphanWorktrees(home.worktreesRoot, (path) => {
-      return !retainedWorktrees.has(path) && !sessionWorktrees.has(path);
-    });
-
-    let images: PruneImage[] = [];
-    if (docker._tag === 'Some') {
-      images = yield* staleImages(home.home, docker.value);
-    }
-
-    return {
-      sessions,
-      orphanWorktrees,
-      images,
-      skipped: listed.skipped,
-    };
+  const orphanWorktrees = yield* listOrphanWorktrees(fs, home.worktreesRoot, (path) => {
+    return !retainedWorktrees.has(path) && !sessionWorktrees.has(path);
   });
+
+  let images: PruneImage[] = [];
+  if (docker._tag === 'Some') {
+    images = yield* staleImages(home.home, docker.value);
+  }
+
+  return {
+    sessions,
+    orphanWorktrees,
+    images,
+    skipped: listed.skipped,
+  };
+});
 
 /** Removes one session's worktree, branch, and receipt directory. Failures collect, never
  * fatal — one stuck worktree must not block the rest of the cleanup. */
-const pruneSession = (ctx: PruneContext, session: PruneSession) =>
+const pruneSession = (fs: FileSystem.FileSystem, ctx: PruneContext, session: PruneSession) =>
   Effect.gen(function* () {
     const { git, failed } = ctx;
     const repoPath = join(ctx.home.home, 'repos', session.repo);
@@ -143,7 +145,9 @@ const pruneSession = (ctx: PruneContext, session: PruneSession) =>
       failed.push(`${session.branch}: ${describeError(deleted.failure)}`);
     }
 
-    const removedReceipts = yield* Effect.result(rmE(session.dir));
+    const removedReceipts = yield* Effect.result(
+      fs.remove(session.dir, { recursive: true, force: true }),
+    );
 
     if (Result.isFailure(removedReceipts)) {
       failed.push(`${session.dir}: ${String(removedReceipts.failure)}`);
@@ -153,7 +157,7 @@ const pruneSession = (ctx: PruneContext, session: PruneSession) =>
 /** Deletes one orphan worktree directory. Through git, not rm alone: an orphan directory may
  * still be a registered worktree, and git owns prunable `.git/worktrees` metadata — the
  * kernel replaces that layer entirely. */
-const pruneOrphan = (ctx: PruneContext, path: string) =>
+const pruneOrphan = (fs: FileSystem.FileSystem, ctx: PruneContext, path: string) =>
   Effect.gen(function* () {
     const { git, failed } = ctx;
     const repo = path.slice(ctx.home.worktreesRoot.length + 1).split('/')[0] ?? '';
@@ -164,7 +168,7 @@ const pruneOrphan = (ctx: PruneContext, path: string) =>
       failed.push(`${path}: ${describeError(removed.failure)}`);
     }
 
-    const deleted = yield* Effect.result(rmE(path));
+    const deleted = yield* Effect.result(fs.remove(path, { recursive: true, force: true }));
 
     if (Result.isFailure(deleted)) {
       failed.push(`${path}: ${String(deleted.failure)}`);
@@ -188,19 +192,22 @@ const pruneImages = (docker: DockerRunner, images: readonly PruneImage[], failed
  * directory, deletes orphan worktree directories, untags stale images. Per-item failures are
  * collected, never fatal — one stuck worktree must not block the rest of the cleanup.
  */
-export const runPrune = (plan: PrunePlan): Effect.Effect<PruneDone, never, PruneServices> =>
+export const runPrune = (
+  plan: PrunePlan,
+): Effect.Effect<PruneDone, never, PruneServices | FileSystem.FileSystem> =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const home = yield* HomeService;
     const git = yield* GitService;
     const failed: string[] = [];
     const ctx: PruneContext = { home, git, failed };
 
     for (const session of plan.sessions) {
-      yield* pruneSession(ctx, session);
+      yield* pruneSession(fs, ctx, session);
     }
 
     for (const path of plan.orphanWorktrees) {
-      yield* pruneOrphan(ctx, path);
+      yield* pruneOrphan(fs, ctx, path);
     }
 
     const docker = yield* Effect.serviceOption(DockerRunnerService);
@@ -214,16 +221,17 @@ export const runPrune = (plan: PrunePlan): Effect.Effect<PruneDone, never, Prune
 /** Reads one repo directory under worktrees root: its orphan candidate dirs. A missing repo
  * directory is a skipped read; any other failure is real and propagates. */
 const readRepoOrphans = (
+  fs: FileSystem.FileSystem,
   worktreesRoot: string,
-  repoEntry: Dirent,
+  repoName: string,
   isOrphan: (path: string) => boolean,
 ) =>
   Effect.gen(function* () {
-    const repoRoot = join(worktreesRoot, repoEntry.name);
-    const dirs = yield* Effect.result(readDirE(repoRoot));
+    const repoRoot = join(worktreesRoot, repoName);
+    const dirs = yield* Effect.result(fs.readDirectoryEntries(repoRoot));
 
     if (Result.isFailure(dirs)) {
-      if (isFsErrorCode(dirs.failure, 'ENOENT')) {
+      if (isNotFound(dirs.failure)) {
         return [];
       }
 
@@ -233,7 +241,7 @@ const readRepoOrphans = (
     }
 
     return dirs.success
-      .filter((entry) => entry.isDirectory())
+      .filter((entry) => entry.type === 'Directory')
       .map((entry) => join(repoRoot, entry.name))
       .filter(isOrphan);
   });
@@ -243,12 +251,16 @@ const readRepoOrphans = (
  * is optional — a factory that has never run a session has nothing to collect, so its
  * absence reads as an empty list; any other read failure is a real failure and propagates.
  */
-const listOrphanWorktrees = (worktreesRoot: string, isOrphan: (path: string) => boolean) =>
+const listOrphanWorktrees = (
+  fs: FileSystem.FileSystem,
+  worktreesRoot: string,
+  isOrphan: (path: string) => boolean,
+) =>
   Effect.gen(function* () {
-    const repos = yield* Effect.result(readDirE(worktreesRoot));
+    const repos = yield* Effect.result(fs.readDirectoryEntries(worktreesRoot));
 
     if (Result.isFailure(repos)) {
-      if (isFsErrorCode(repos.failure, 'ENOENT')) {
+      if (isNotFound(repos.failure)) {
         return [];
       }
 
@@ -260,8 +272,8 @@ const listOrphanWorktrees = (worktreesRoot: string, isOrphan: (path: string) => 
     // First failure wins: the repo fan-out fails the plan the way the receipt walk does.
     const reads = yield* Effect.all(
       repos.success
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => readRepoOrphans(worktreesRoot, entry, isOrphan)),
+        .filter((entry) => entry.type === 'Directory')
+        .map((entry) => readRepoOrphans(fs, worktreesRoot, entry.name, isOrphan)),
       { concurrency: 'unbounded' },
     );
 
@@ -276,6 +288,7 @@ const listOrphanWorktrees = (worktreesRoot: string, isOrphan: (path: string) => 
  */
 const staleImages = (home: string, docker: DockerRunner) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const listed = yield* docker.run([
       'images',
       '--format',
@@ -297,7 +310,7 @@ const staleImages = (home: string, docker: DockerRunner) =>
     const hashlessRepos = new Set<string>();
 
     for (const project of projects.success.projects) {
-      const tag = yield* imageTagFor(join(home, 'projects', project.repo));
+      const tag = yield* imageTagFor(fs, join(home, 'projects', project.repo));
 
       // A project without a Dockerfile has no current tag, so all of its old tags are stale.
       if (tag._tag === 'Some') {

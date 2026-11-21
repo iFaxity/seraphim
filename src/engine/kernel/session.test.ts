@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { unlinkSync } from 'node:fs';
+import { unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Deferred, Duration, Effect, Fiber, Layer, Schema } from 'effect';
 import { TestClock } from 'effect/testing';
@@ -19,7 +20,6 @@ import { fakeRuntime, type FakeRuntime } from '../../../test/fakes/runtime.ts';
 import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
 import { fakeTracker, type FakeTracker } from '../../../test/fakes/tracker.ts';
 import { UnavailableError } from '../../lib/errors.ts';
-import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import { type AgentRuntime, type Notifier, type Sandbox, type Tracker } from '../core/contracts.ts';
 import { engine } from '../core/engine.ts';
@@ -69,6 +69,7 @@ async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 
       Layer.mergeAll(
         Layer.succeed(HomeService, homeLayout(root)),
         Layer.succeed(GitService, fakeGit()),
+        NodeFileSystem.layer,
       ),
     ),
   );
@@ -144,6 +145,7 @@ function sessionLayers(overrides: FakeOverrides = {}) {
     Layer.succeed(AgentRuntimeService, overrides.runtime ?? fakeRuntime()),
     Layer.succeed(SandboxService, overrides.sandbox ?? fakeSandbox()),
     Layer.succeed(NotifierService, overrides.notifier ?? fakeNotifier()),
+    NodeFileSystem.layer,
   );
 
   // `mergeAll` widens the union instead of narrowing to the provided service set; the cast
@@ -240,7 +242,7 @@ describe('runSession', () => {
       yield* Effect.promise(() => seedProject(root, 'dormant'));
       yield* Effect.provide(
         deactivateProject('dormant'),
-        Layer.succeed(HomeService, homeLayout(root)),
+        Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), NodeFileSystem.layer),
       );
 
       const error = yield* sessionFailure({ repo: 'dormant', issueNumber: 9 });
@@ -1106,9 +1108,7 @@ describe('per-repo lock', () => {
         expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
 
         // Both sessions released the lock on completion
-        expect(yield* Effect.promise(() => fileExists(join(root, 'locks', 'demo.lock')))).toBe(
-          false,
-        );
+        expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
       }),
   );
 
@@ -1154,7 +1154,7 @@ describe('per-repo lock', () => {
       } finally {
         holder.kill('SIGKILL');
       }
-    }),
+    }).pipe(Effect.provide(NodeFileSystem.layer)),
   );
 
   // `it.live`: the holder's unlink lands on a real timer while the waiter polls on the live
@@ -1194,11 +1194,11 @@ describe('per-repo lock', () => {
         expect(heldPid).toBe(process.pid);
 
         // Scoped acquisition releases on exit — nothing manual to forget
-        expect(yield* Effect.promise(() => fileExists(lockPath))).toBe(false);
+        expect(yield* Effect.sync(() => existsSync(lockPath))).toBe(false);
       } finally {
         holder.kill('SIGKILL');
       }
-    }),
+    }).pipe(Effect.provide(NodeFileSystem.layer)),
   );
 
   it.effect('breaks and takes a stale lock left by a dead session', () =>
@@ -1214,7 +1214,7 @@ describe('per-repo lock', () => {
       expect(git.worktrees).toHaveLength(1);
 
       // Taken by this run, released cleanly on completion
-      expect(yield* Effect.promise(() => fileExists(lockPath))).toBe(false);
+      expect(yield* Effect.sync(() => existsSync(lockPath))).toBe(false);
     }),
   );
 
@@ -1240,7 +1240,7 @@ describe('per-repo lock', () => {
       const following = yield* sessionOver({ repo: 'demo', issueNumber: 7 }, { tracker, git });
 
       expect(following.manifest.state).toBe('completed');
-      expect(yield* Effect.promise(() => fileExists(join(root, 'locks', 'demo.lock')))).toBe(false);
+      expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
     }),
   );
 
@@ -1253,7 +1253,7 @@ describe('per-repo lock', () => {
       const { manifest } = yield* sessionOver({ repo: 'demo', issueNumber: 7 });
 
       expect(manifest.state).toBe('completed');
-      expect(yield* Effect.promise(() => fileExists(join(root, 'locks', 'demo.lock')))).toBe(false);
+      expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
     }),
   );
 });
