@@ -5,11 +5,11 @@ import { it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { describe, expect } from 'vite-plus/test';
 
-import { homeDeps } from './bootstrap.ts';
+import { readBootstrap } from './bootstrap.ts';
 
 import { mkdtemp, writeFile } from 'node:fs/promises';
 
-/** Runs `homeDeps` against a throwaway home, restoring the ambient `SERAPHIM_HOME`. */
+/** Runs `readBootstrap` against a throwaway home, restoring the ambient `SERAPHIM_HOME`. */
 const withHome = (contents: string | null) =>
   Effect.gen(function* () {
     const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-env-')));
@@ -18,7 +18,7 @@ const withHome = (contents: string | null) =>
     }
     const previous = process.env['SERAPHIM_HOME'];
     process.env['SERAPHIM_HOME'] = home;
-    const deps = yield* Effect.provide(homeDeps, NodeFileSystem.layer).pipe(
+    const boot = yield* Effect.provide(readBootstrap, NodeFileSystem.layer).pipe(
       Effect.ensuring(
         Effect.sync(() => {
           if (previous === undefined) {
@@ -29,10 +29,10 @@ const withHome = (contents: string | null) =>
         }),
       ),
     );
-    return deps.token;
+    return boot.token;
   });
 
-describe('homeDeps dotenv boundary', () => {
+describe('readBootstrap dotenv boundary', () => {
   const envCases = [
     ['comment lines are skipped', '# only a comment\nGH_TOKEN=abc', 'abc'],
     ['inline # after the value is stripped', 'GH_TOKEN=abc # trailing', 'abc'],

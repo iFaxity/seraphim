@@ -73,5 +73,5 @@ The operator page channel: one authenticated webhook POST per terminal session o
 _Avoid_: alerting, push channel, messaging adapter
 
 **HomeService**:
-The Effect service carrying the kernel's filesystem layout (`home`, `projectsRoot`, `sessionsRoot`, `poolRoot`, `reposRoot`, `worktreesRoot`), built once via `homeLayout()` and provided through the adapter Layer stack composed in `src/main.ts` (`composeEngineLayer`) — tests substitute a Layer over a tempdir home. Formerly the `KernelEnvironment` env object, retired in the Effect migration (#73).
+The Effect service carrying the kernel's filesystem layout (`home`, `projectsRoot`, `sessionsRoot`, `poolRoot`, `reposRoot`, `worktreesRoot`), built once via `homeLayout()` and provided through the static Layer stack composed in `src/main.ts` (`engineStack`) — tests substitute a Layer over a tempdir home. Formerly the `KernelEnvironment` env object, retired in the Effect migration (#73).
 _Avoid_: deps, dependencies, context

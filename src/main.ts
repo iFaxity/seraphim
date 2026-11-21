@@ -1,21 +1,19 @@
-import { join } from 'node:path';
-import { NodeFileSystem, NodeServices } from '@effect/platform-node';
-import { Effect, FileSystem, Layer, ManagedRuntime, Result } from 'effect';
+import { NodeFileSystem, NodeChildProcessSpawner } from '@effect/platform-node';
+import { Effect, Layer, ManagedRuntime, Path, Result } from 'effect';
 
-import { homeDeps, loadConfig, resolvePoolRoot, type HomeDeps } from './core/bootstrap.ts';
+import { readBootstrap, resolvePoolRoot, seraphimHome, type Bootstrap } from './core/bootstrap.ts';
 import { engine } from './engine/core/engine.ts';
 import { HomeService, homeLayout } from './engine/core/env.ts';
 import { apiLayer, GithubToken } from './engine/forges/github-api.ts';
 import { trackerLayer } from './engine/forges/github-tracker.ts';
 import { type CommandServices } from './engine/kernel/command.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
-import { type NotifyChannel } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
 import { gitLayer } from './engine/kernel/git.ts';
 import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.ts';
 import { runtimeLayer } from './engine/runtimes/pi.ts';
 import { dockerCliLayer, dockerSandboxLayer } from './engine/sandboxes/docker-sandbox.ts';
-import { describeError, HomeEnvError, KernelConfigError } from './lib/errors.ts';
+import { describeError } from './lib/errors.ts';
 
 /**
  * CLI boundary: the only place engine outcomes become stdout prose. Rendering lives here so
@@ -26,15 +24,15 @@ import { describeError, HomeEnvError, KernelConfigError } from './lib/errors.ts'
  */
 export async function main(argv: readonly string[], layer?: Layer.Layer<CommandServices>) {
   if (layer == null) {
-    const composed = await Effect.runPromise(
-      Effect.provide(Effect.result(composeEngineLayer), NodeFileSystem.layer),
+    const bootResult = await Effect.runPromise(
+      Effect.provide(Effect.result(readBootstrap), NodeFileSystem.layer),
     );
 
-    if (Result.isFailure(composed)) {
-      return `error: ${describeError(composed.failure)}`;
+    if (Result.isFailure(bootResult)) {
+      return `error: ${describeError(bootResult.failure)}`;
     }
 
-    layer = composed.success;
+    layer = engineStack(bootResult.success);
   }
 
   const managed = ManagedRuntime.make(layer);
@@ -68,69 +66,51 @@ const TURN_WALL_CLOCK_MS = 30 * 60_000;
  * Base deps: the forge token rides the `.env` read; one channel, configured once in the
  * global kernel config — no channel configured is a silent notifier (pages go nowhere).
  */
-function baseDepsLayer(deps: HomeDeps, notify: NotifyChannel | null) {
+function baseDepsLayer(boot: Bootstrap) {
   return Layer.mergeAll(
     apiLayer,
-    Layer.succeed(GithubToken, deps.token),
-    dockerCliLayer,
-    Layer.succeed(NotifyChannelService, notify),
+    Layer.succeed(GithubToken, boot.token),
+    Layer.succeed(NotifyChannelService, boot.notify),
   );
 }
 
 /** The adapter stack: tracker, git, notifier, and the sandbox-backed pi runtime. */
-function adaptersLayer<RIn>(baseLayer: Layer.Layer<never, never, RIn>, projectsRoot: string) {
-  const withRuntime = Layer.provideMerge(
-    runtimeLayer(TURN_WALL_CLOCK_MS),
-    dockerSandboxLayer(projectsRoot),
-  );
-  // provideMerge keeps the dependency services (DockerRunner among them — prune's plan needs
-  // the runner itself, not only what sandbox built on top of it).
+function adaptersLayer(boot: Bootstrap, projectsRoot: string) {
+  // The sandbox builds on the docker CLI runner and keeps it in the merged output —
+  // prune's plan needs the runner itself, not only what sandbox built on top of it.
+  const sandbox = Layer.provideMerge(dockerSandboxLayer(projectsRoot), dockerCliLayer);
+  const withRuntime = Layer.provideMerge(runtimeLayer(TURN_WALL_CLOCK_MS), sandbox);
   return Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
-    Layer.provideMerge(baseLayer),
+    Layer.provide(baseDepsLayer(boot)),
   );
 }
 
-/** The engine's full service stack: adapters plus the HomeService layout. */
-function engineLayer<RIn>(
-  adapters: Layer.Layer<never, never, RIn>,
-  home: string,
-  poolRoot: string,
-) {
-  return Layer.mergeAll(
-    adapters,
-    NodeFileSystem.layer,
-    Layer.succeed(
-      HomeService,
-      homeLayout(home, {
-        poolRoot,
-        sessionsRoot: join(home, 'sessions'),
-      }),
-    ),
-  );
+/**
+ * The engine's full service stack, built as ONE purely static graph from the boot values.
+ * No Effect wraps it and no layer is provisioned twice: the Node driver appears once as
+ * the spawner behind the CLI-backed adapters, the Node filesystem once as the kernel's
+ * sanctioned fs seam, and the HomeService layer derives the home layout (including the
+ * probed pool root) from that same fs.
+ */
+function engineStack(boot: Bootstrap): Layer.Layer<CommandServices> {
+  const home = seraphimHome();
+  const layout = homeLayout(home);
+  const fs = NodeFileSystem.layer;
+
+  const adapters = adaptersLayer(boot, layout.projectsRoot);
+
+  const homeService = Layer.effect(
+    HomeService,
+    Effect.map(resolvePoolRoot(home), (poolRoot) => ({ ...layout, poolRoot })),
+  ).pipe(Layer.provide(fs));
+
+  // The Node ChildProcessSpawner driver backs the CLI runners the adapters' operations
+  // resolve from the Effect context at run time (never parameters); its own fs/path deps
+  // memoize onto the same fs layer, so one driver instance rides the stack.
+  const spawner = NodeChildProcessSpawner.layer.pipe(Layer.provide(Layer.mergeAll(fs, Path.layer)));
+
+  return Layer.mergeAll(adapters, fs, homeService, spawner);
 }
-
-const composeEngineLayer: Effect.Effect<
-  Layer.Layer<CommandServices>,
-  KernelConfigError | HomeEnvError,
-  FileSystem.FileSystem
-> = Effect.gen(function* () {
-  const deps = yield* homeDeps;
-  const config = yield* loadConfig(deps.home);
-  const poolRoot = yield* resolvePoolRoot(deps.home);
-  const baseLayer = baseDepsLayer(deps, config.notify);
-  // The Node ChildProcessSpawner driver backs the git/docker CLI runners; `Layer.provide`
-  // keeps the platform's own services (path, stdio) out of the merged stack — the
-  // FileSystem service is merged in below as the kernel's sanctioned fs seam.
-  const adapters = adaptersLayer(baseLayer, deps.projectsRoot).pipe(
-    Layer.provide(NodeServices.layer),
-  );
-
-  // The adapters resolve the spawner and filesystem from the Effect context at run time
-  // (never parameters), so the Node driver rides the merged stack the commands execute in.
-  return engineLayer(adapters, deps.home, poolRoot).pipe(
-    Layer.provideMerge(NodeServices.layer),
-  ) as Layer.Layer<CommandServices>;
-});
 
 /** Runs one more engine dispatch on the caller's runtime — the prune confirm pass. */
 type RunNext = (argv: readonly string[]) => Promise<Outcome>;

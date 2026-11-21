@@ -3,22 +3,21 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigProvider, Effect, FileSystem, Option, Schema } from 'effect';
 
-import { loadKernelConfig } from '../engine/kernel/config.ts';
+import { loadKernelConfig, type NotifyChannel } from '../engine/kernel/config.ts';
 import { poolRoot } from '../engine/kernel/skills.ts';
-import { describeError, HomeEnvError } from '../lib/errors.ts';
+import { describeError, HomeEnvError, KernelConfigError } from '../lib/errors.ts';
 
 /**
  * Bootstrap config: everything the composition root reads straight from the host before
- * any Layer exists — the seraphim home, its `.env` forge token, and the kernel config.
+ * any Layer exists — the seraphim home's `.env` forge token and the global kernel config.
  * The reads run on the platform FileSystem service inside the composition root's Effect,
- * which is itself the edge.
+ * which is itself the edge: the only bootstrap steps that can fail.
  */
 
-/** The home-derived base inputs the composition root reads before any Layer is built. */
-export type HomeDeps = {
-  readonly home: string;
-  readonly projectsRoot: string;
+/** The host-derived inputs the composition root reads before any Layer is built. */
+export type Bootstrap = {
   readonly token: string;
+  readonly notify: NotifyChannel | null;
 };
 
 /** The validated forge-token struct the home `.env` resolves to. */
@@ -73,27 +72,31 @@ const loadHomeEnv = (contents: string | null): Effect.Effect<HomeEnv, HomeEnvErr
   });
 
 /**
- * Resolves the seraphim home, its projects root, and the forge token from the `.env`.
- * The optional-config read pre-wraps to `null` on any failure — the caller decides what
- * absence means.
+ * The seraphim home: the operator's override or the default dot-directory. A plain
+ * infallible read — home resolution cannot fail, only the reads against it can.
  */
-export const homeDeps: Effect.Effect<HomeDeps, HomeEnvError, FileSystem.FileSystem> = Effect.gen(
-  function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
+export const seraphimHome = (): string =>
+  process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
 
-    const envContents = Option.getOrNull(
-      yield* Effect.option(fs.readFileString(join(home, '.env'))),
-    );
-    const env = yield* loadHomeEnv(envContents);
+/**
+ * The failing bootstrap edge: the home `.env` forge token and the global kernel config,
+ * read against the platform FileSystem. The home layout itself is not derived here — the
+ * HomeService layer owns it.
+ */
+export const readBootstrap: Effect.Effect<
+  Bootstrap,
+  KernelConfigError | HomeEnvError,
+  FileSystem.FileSystem
+> = Effect.gen(function* () {
+  const home = seraphimHome();
+  const fs = yield* FileSystem.FileSystem;
 
-    return {
-      home,
-      projectsRoot: join(home, 'projects'),
-      token: env['GH_TOKEN'],
-    };
-  },
-);
+  const envContents = Option.getOrNull(yield* Effect.option(fs.readFileString(join(home, '.env'))));
+  const env = yield* loadHomeEnv(envContents);
+  const config = yield* loadKernelConfig(home);
+
+  return { token: env['GH_TOKEN'], notify: config.notify };
+});
 
 /**
  * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
@@ -112,6 +115,3 @@ export const resolvePoolRoot = (
 
     return present ? homePool : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
   });
-
-/** The global kernel config, re-homed here so the composition root reads it via bootstrap. */
-export const loadConfig = loadKernelConfig;
