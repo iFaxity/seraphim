@@ -1,3 +1,4 @@
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { describe, expect } from 'vite-plus/test';
@@ -139,7 +140,8 @@ describe('piRuntime', () => {
   ].join('\n');
 
   it.effect('routes the turn through the sandbox exec with the composed command', () =>
-    Effect.gen(function* () {
+    Effect.provide(
+      Effect.gen(function* () {
       const execs: { repo: string; worktreePath: string; command: readonly string[] }[] = [];
       const runtime = piRuntime({
         maxTimeMs: 90_000,
@@ -186,10 +188,13 @@ describe('piRuntime', () => {
       expect(turn.exitState).toBe('completed');
       expect(turn.transcript).toContain('### assistant\n\nready');
     }),
+      NodeServices.layer,
+    ),
   );
 
   it.effect('maps a deadline-aborted sandbox turn to cap-hit with the raw stop line kept', () =>
-    Effect.gen(function* () {
+    Effect.provide(
+      Effect.gen(function* () {
       const stdout = [
         assistantEnd('partway'),
         '{"type":"turn_end","message":{"stopReason":"aborted","errorMessage":"Deadline exceeded"}}',
@@ -211,10 +216,13 @@ describe('piRuntime', () => {
       expect(turn.transcript).toContain('partway');
       expect(turn.transcript).toContain('"stopReason":"aborted"');
     }),
+      NodeServices.layer,
+    ),
   );
 
   it.effect('appends container stderr to a failed turn and keeps completions pure', () =>
-    Effect.gen(function* () {
+    Effect.provide(
+      Effect.gen(function* () {
       const failed = piRuntime({
         maxTimeMs: 60_000,
         exec: (input) =>
@@ -250,5 +258,7 @@ describe('piRuntime', () => {
       expect(cleanTurn.exitState).toBe('completed');
       expect(cleanTurn.transcript).not.toContain('harmless warning');
     }),
+      NodeServices.layer,
+    ),
   );
 });

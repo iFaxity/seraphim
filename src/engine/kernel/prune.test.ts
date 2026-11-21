@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeFileSystem } from '@effect/platform-node';
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Cause, Effect, Exit, FileSystem, Layer, Option } from 'effect';
+import { Cause, Effect, Exit, Layer, Option } from 'effect';
 import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
@@ -35,10 +35,11 @@ afterAll(async () => {
 
 /** The prune layer stack over one home layout; omitting `docker` is the docker-absent case. */
 function pruneLayer(git: FakeGit, docker?: DockerRunner) {
+  // NodeServices backs the git/docker CLI adapters' context-resolved spawner and fs.
   const base = Layer.mergeAll(
     Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
     Layer.succeed(GitService, git),
-    NodeFileSystem.layer,
+    NodeServices.layer,
   );
 
   return docker ? Layer.merge(base, Layer.succeed(DockerRunnerService, docker)) : base;
@@ -195,12 +196,8 @@ describe('planPrune', () => {
       );
 
       const someTag = yield* Effect.provide(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-
-          return yield* imageTagFor(fs, projectDir);
-        }),
-        NodeFileSystem.layer,
+        imageTagFor(projectDir),
+        NodeServices.layer,
       );
 
       if (Option.isNone(someTag)) {

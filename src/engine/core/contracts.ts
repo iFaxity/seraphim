@@ -1,4 +1,6 @@
 import { type Effect } from 'effect/Effect';
+import { FileSystem } from 'effect';
+import { type ChildProcessSpawner } from 'effect/process';
 
 import {
   type AuthError,
@@ -109,18 +111,26 @@ export type SandboxExec = {
 };
 
 /**
+ * The services the CLI-backed adapter contracts resolve from the Effect context (honest in
+ * their `R`): the process spawner behind the docker CLI runner, plus the filesystem the
+ * sandbox probes for worktrees, env files, and Dockerfile content hashes.
+ */
+export type SpawnContext = ChildProcessSpawner.ChildProcessSpawner;
+export type SandboxContext = SpawnContext | FileSystem.FileSystem;
+
+/**
  * Sandbox contract: per-project image build/cache and exec with the session worktree mounted.
  * The kernel asserts success and never inspects the built identity; v1 ships a real docker
  * adapter plus the fake tests inject.
  */
 export type Sandbox = {
   /** Builds/caches the image the session's execs run against; success is the observable. */
-  readonly ensureImage: (repo: string) => Effect<void, UnavailableError>;
+  readonly ensureImage: (repo: string) => Effect<void, UnavailableError, SandboxContext>;
   readonly exec: (input: {
     readonly repo: string;
     readonly worktreePath: string;
     readonly command: readonly string[];
-  }) => Effect<SandboxExec, UnavailableError>;
+  }) => Effect<SandboxExec, UnavailableError, SandboxContext>;
 };
 
 /** Result of one agent turn, captured by the runtime. */
@@ -142,7 +152,7 @@ export type AgentRuntime = {
     readonly cwd: string;
     readonly prompt: string;
     readonly model: string;
-  }) => Effect<TurnResult, TurnRuntimeError>;
+  }) => Effect<TurnResult, TurnRuntimeError, SandboxContext>;
 };
 
 /**
@@ -152,30 +162,33 @@ export type AgentRuntime = {
  * (`cause` carries the spawn error/`stderr` for diagnostics).
  */
 export type Git = {
-  readonly defaultBranch: (repoPath: string) => Effect<string, GitError>;
-  readonly cloneIfMissing: (repoPath: string, url: string) => Effect<void, GitError>;
-  readonly pull: (repoPath: string) => Effect<void, GitError>;
+  readonly defaultBranch: (repoPath: string) => Effect<string, GitError, SpawnContext>;
+  readonly cloneIfMissing: (
+    repoPath: string,
+    url: string,
+  ) => Effect<void, GitError, SpawnContext>;
+  readonly pull: (repoPath: string) => Effect<void, GitError, SpawnContext>;
   readonly createWorktree: (input: {
     readonly repoPath: string;
     readonly branch: string;
     readonly path: string;
     readonly baseBranch: string;
-  }) => Effect<void, GitError>;
+  }) => Effect<void, GitError, SpawnContext>;
   /** Removes one worktree directory (confirmed prune only — nothing else may delete one). */
   readonly removeWorktree: (input: {
     readonly repoPath: string;
     readonly path: string;
-  }) => Effect<void, GitError>;
+  }) => Effect<void, GitError, SandboxContext>;
   /** Deletes one branch (confirmed prune only, after its worktree is gone). */
   readonly deleteBranch: (input: {
     readonly repoPath: string;
     readonly branch: string;
-  }) => Effect<void, GitError>;
+  }) => Effect<void, GitError, SpawnContext>;
   /**
    * Reachability check over the remote — registration's fail-fast on an unreachable URL.
    * Read-only (a ref-list ping), never a clone.
    */
-  readonly probeRemote: (url: string) => Effect<void, GitError>;
+  readonly probeRemote: (url: string) => Effect<void, GitError, SpawnContext>;
   /**
    * Publishes one branch from the session's clone directory to its `origin`. Still
    * flow-authored (the kernel never pre-checks an unpushed branch — a PR opened against
@@ -186,7 +199,7 @@ export type Git = {
   readonly push: (input: {
     readonly repoPath: string;
     readonly branch: string;
-  }) => Effect<void, GitError>;
+  }) => Effect<void, GitError, SpawnContext>;
 };
 
 /** The terminal outcomes the kernel pages the operator about. Resumed sessions never notify. */

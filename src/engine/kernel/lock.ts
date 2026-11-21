@@ -59,8 +59,9 @@ function pidAlive(pid: number) {
 }
 
 /** Missing or corrupt lock files read unheld — a crash mid-write cannot wedge the repo. */
-const readLock = (fs: FileSystem.FileSystem, path: string) =>
+const readLock = (path: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const read = yield* Effect.result(fs.readFileString(path));
 
     if (Result.isFailure(read)) {
@@ -78,8 +79,9 @@ const readLock = (fs: FileSystem.FileSystem, path: string) =>
   });
 
 /** One exclusive-create attempt; unexpected (non-EEXIST) write failures crash the acquire. */
-const createExclusive = (fs: FileSystem.FileSystem, path: string, lock: LockFile) =>
+const createExclusive = (path: string, lock: LockFile) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const wrote = yield* Effect.result(
       fs.writeFileString(path, JSON.stringify(lock), { flag: 'wx' }),
     );
@@ -118,14 +120,16 @@ function lockHeldFailure(repo: string, held: LockFile, maxWaitMs: number) {
  * breaker, not a wait. A live foreign holder fails the attempt; the retry schedule owns the
  * re-polling.
  */
-const acquireOnce = (fs: FileSystem.FileSystem, path: string) =>
+const acquireOnce = (path: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+
     while (true) {
-      if (yield* createExclusive(fs, path, { pid: process.pid, at: toEpochMs(now()) })) {
+      if (yield* createExclusive(path, { pid: process.pid, at: toEpochMs(now()) })) {
         return;
       }
 
-      const held = yield* readLock(fs, path);
+      const held = yield* readLock(path);
 
       if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
         yield* Effect.result(fs.remove(path, { force: true }));
@@ -143,14 +147,8 @@ const acquireOnce = (fs: FileSystem.FileSystem, path: string) =>
  * wins the unlink. A live foreign holder is waited out on a spaced retry schedule bounded by
  * the wait cap, then the acquisition fails naming the pid and holding age.
  */
-const takeFileLock = (
-  fs: FileSystem.FileSystem,
-  path: string,
-  repo: string,
-  pollMs: number,
-  maxWaitMs: number,
-) =>
-  acquireOnce(fs, path).pipe(
+const takeFileLock = (path: string, repo: string, pollMs: number, maxWaitMs: number) =>
+  acquireOnce(path).pipe(
     Effect.retry(
       Schedule.spaced(`${pollMs} millis`).pipe(Schedule.upTo({ duration: `${maxWaitMs} millis` })),
     ),
@@ -182,8 +180,9 @@ export function withRepoLock<A, E, R>(
   const tail = previous.then(() => turn);
   mutexTails.set(path, tail);
 
-  const unlinkRelease = (fs: FileSystem.FileSystem) =>
-    Effect.result(fs.remove(path, { force: true })).pipe(Effect.asVoid);
+  const unlinkRelease = Effect.result(
+    Effect.flatMap(FileSystem.FileSystem, (fs) => fs.remove(path, { force: true })),
+  ).pipe(Effect.asVoid);
 
   return Effect.gen(function* () {
     yield* Effect.promise(() => previous);
@@ -195,8 +194,8 @@ export function withRepoLock<A, E, R>(
       return yield* Effect.die(made.failure);
     }
 
-    return yield* Effect.flatMap(takeFileLock(fs, path, repo, pollMs, maxWaitMs), () =>
-      Effect.ensuring(guarded, unlinkRelease(fs)),
+    return yield* Effect.flatMap(takeFileLock(path, repo, pollMs, maxWaitMs), () =>
+      Effect.ensuring(guarded, unlinkRelease),
     );
   }).pipe(
     Effect.ensuring(

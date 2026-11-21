@@ -125,7 +125,11 @@ const composeEngineLayer: Effect.Effect<
     Layer.provide(NodeServices.layer),
   );
 
-  return engineLayer(adapters, deps.home, poolRoot) as Layer.Layer<CommandServices>;
+  // The adapters resolve the spawner and filesystem from the Effect context at run time
+  // (never parameters), so the Node driver rides the merged stack the commands execute in.
+  return engineLayer(adapters, deps.home, poolRoot).pipe(
+    Layer.provideMerge(NodeServices.layer),
+  ) as Layer.Layer<CommandServices>;
 });
 
 /** Runs one more engine dispatch on the caller's runtime — the prune confirm pass. */

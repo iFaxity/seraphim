@@ -3,6 +3,8 @@ import { Effect, Fiber, Layer } from 'effect';
 import { TestClock } from 'effect/testing';
 import { describe, expect } from 'vite-plus/test';
 
+import { NodeServices } from '@effect/platform-node';
+
 import { FakeGit } from './git.ts';
 import { FakeNotifier } from './notifier.ts';
 import { FakeRuntime } from './runtime.ts';
@@ -38,6 +40,8 @@ const studioLayers = Layer.mergeAll(
   FakeGit.layer('trunk'),
   FakeNotifier.layer(),
   FakeRuntime.layer('cap-hit', 50),
+  // The CLI-backed contracts' honest R (spawner, filesystem) rides the context.
+  NodeServices.layer,
 );
 
 describe('fake Layers', () => {
