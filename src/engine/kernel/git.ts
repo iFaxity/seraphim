@@ -160,14 +160,11 @@ class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
 
 /** Production wiring: the real `git` CLI subprocess runner, over the spawner the
  * composition root provides. */
-const gitCliLayer: Layer.Layer<
-  GitRunnerService,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner
-> = Layer.effect(
-  GitRunnerService,
-  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
-);
+const gitCliLayer: Layer.Layer<GitRunnerService, never, ChildProcessSpawner.ChildProcessSpawner> =
+  Layer.effect(
+    GitRunnerService,
+    ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
+  );
 
 /** The `Git` adapter: git CLI wiring fused internally — the composition root only provides
  * the spawner and filesystem. */
