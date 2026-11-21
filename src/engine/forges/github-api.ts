@@ -2,7 +2,7 @@ import { Context, Effect, Layer, Option, Schema } from 'effect';
 import { FetchHttpClient, Headers, HttpBody, HttpClient, HttpClientRequest } from 'effect/http';
 import { type HttpClientResponse } from 'effect/http/HttpClientResponse';
 
-import { ApiError } from '../../lib/errors.ts';
+import { ApiError, describeError } from '../../lib/errors.ts';
 
 /** The GitHub REST API root — every adapter URL composes from it, repo-scoped. */
 export const API_ROOT = 'https://api.github.com';
@@ -167,8 +167,8 @@ export const clientLayer: Layer.Layer<GitHubClientService, never, HttpClient.Htt
               );
             }
 
-            const body = yield* Effect.mapError(
-              response.text,
+            const parsed = yield* Effect.mapError(
+              response.json,
               (error) =>
                 new ApiError({
                   status: null,
@@ -176,20 +176,14 @@ export const clientLayer: Layer.Layer<GitHubClientService, never, HttpClient.Htt
                 }),
             );
 
-            let data: T;
-
-            try {
-              const parsed: unknown = JSON.parse(body);
-
-              data = Schema.decodeUnknownSync(call.schema)(parsed);
-            } catch (error) {
-              return yield* Effect.fail(
+            const data = yield* Effect.mapError(
+              Effect.try(() => Schema.decodeUnknownSync(call.schema)(parsed)),
+              (error) =>
                 new ApiError({
                   status: null,
-                  message: `unexpected response shape: ${(error as Error).message}`,
+                  message: `unexpected response shape: ${describeError(error)}`,
                 }),
-              );
-            }
+            );
 
             return { status: response.status, data, headers: response.headers };
           });
