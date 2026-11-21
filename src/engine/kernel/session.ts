@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Context, Effect, Ref, Result } from 'effect';
+import { Context, Effect, FileSystem, Option, Ref, Result } from 'effect';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -19,7 +19,6 @@ import {
   ReceiptWriteError,
   UnavailableError,
 } from '../../lib/errors.ts';
-import { fileExistsE } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import {
   type KernelFailure,
@@ -67,7 +66,8 @@ export type SessionServices =
   | AgentRuntimeService
   | GitService
   | NotifierService
-  | HomeService;
+  | HomeService
+  | FileSystem.FileSystem;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {
@@ -167,9 +167,10 @@ const resolveRunnableFlow = (
 ): Effect.Effect<
   RunnableFlow & { tracker: Tracker; git: Git; runtime: AgentRuntime },
   RunnableFlowError,
-  TrackerService | GitService | AgentRuntimeService | HomeService
+  TrackerService | GitService | AgentRuntimeService | HomeService | FileSystem.FileSystem
 > =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const tracker = yield* TrackerService;
     const git = yield* GitService;
     const runtime = yield* AgentRuntimeService;
@@ -184,7 +185,7 @@ const resolveRunnableFlow = (
 
     const flow = yield* loadFlow(home.home, input.repo);
     yield* checkDeclaredSkills(home.poolRoot, flow.config.skills);
-    yield* checkPreflight(home, input.repo);
+    yield* checkPreflight(fs, home, input.repo);
 
     if (!runtime.available(flow.config.agent)) {
       return yield* new UnavailableError({
@@ -205,10 +206,11 @@ const resolveRunnableFlow = (
  * moves the failure ahead of the claim so a broken project never consumes an issue. The
  * diagnostic wording lives once, in the sandbox module.
  */
-const checkPreflight = (home: Home, repo: string) =>
+const checkPreflight = (fs: FileSystem.FileSystem, home: Home, repo: string) =>
   Effect.gen(function* () {
     const dockerfilePath = join(home.projectsRoot, repo, 'Dockerfile');
-    const hasDockerfile = yield* fileExistsE(dockerfilePath);
+    const dockerfileInfo = yield* Effect.option(fs.stat(dockerfilePath));
+    const hasDockerfile = Option.isSome(dockerfileInfo) && dockerfileInfo.value.type === 'File';
 
     if (!hasDockerfile) {
       const missing = missingDockerfile(repo, home.projectsRoot);
@@ -320,7 +322,7 @@ const claimAndSyncIssue = (
 ): Effect.Effect<
   Issue,
   TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
-  never
+  FileSystem.FileSystem
 > =>
   withRepoLock(
     home.home,
@@ -615,7 +617,7 @@ const finalizeSessionReceipt = (
   notifier: Notifier,
   relDir: string,
   flowRun: Result.Result<void, Error>,
-): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, never> =>
+): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const { home, manifest, stateRef, turnsEngine, logs } = run;
 

@@ -1,7 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Cause, Effect, Exit, Layer } from 'effect';
+import { Cause, Effect, Exit, FileSystem, Layer } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { type CommandServices } from './command.ts';
@@ -38,8 +39,11 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function homeLayer(): Layer.Layer<HomeService> {
-  return Layer.succeed(HomeService, homeLayout(root));
+/** The project record reads ride the platform FileSystem service, merged into every layer. */
+const fsLayer = NodeFileSystem.layer;
+
+function homeLayer(): Layer.Layer<HomeService | FileSystem.FileSystem> {
+  return Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), fsLayer);
 }
 
 function projectLayer(git: Git) {
@@ -108,7 +112,7 @@ describe('registerProject', () => {
 
       yield* Effect.provide(registerProject(REMOTE), projectLayer(git));
 
-      const flow = yield* Effect.provide(loadFlow(root, 'widgets'), Layer.empty);
+      const flow = yield* Effect.provide(loadFlow(root, 'widgets'), fsLayer);
 
       expect(flow.config.agent).toBe('pi');
       expect(typeof flow.run).toBe('function');

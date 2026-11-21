@@ -30,7 +30,8 @@ export type CommandServices =
   | GitService
   | NotifierService
   | HomeService
-  | DockerRunnerService;
+  | DockerRunnerService
+  | FileSystem.FileSystem;
 
 /**
  * One command module's outward shape — the dispatcher's row type. `O` is the command's own
