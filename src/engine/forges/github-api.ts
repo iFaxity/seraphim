@@ -1,7 +1,5 @@
 import { Context, Effect, Layer, Option, Schema } from 'effect';
 import { FetchHttpClient, Headers, HttpBody, HttpClient, HttpClientRequest } from 'effect/http';
-import { type HttpClientResponse } from 'effect/http/HttpClientResponse';
-
 import { ApiError, describeError } from '../../lib/errors.ts';
 
 /** The GitHub REST API root — every adapter URL composes from it, repo-scoped. */
@@ -64,55 +62,18 @@ export class GitHubClientService extends Context.Service<GitHubClientService, Gi
 ) {}
 
 /**
- * The one failure mapping every non-2xx carries: the HTTP status and the forge's own body
- * text. 401/403 are credential rejections, 429 asks for a backoff, 5xx and the rest are
- * service states the caller treats as unavailable — the named vocabulary classes branch on
- * `status` downstream (classes, never message text). A 2xx reads `Option.none()`, so the
- * caller's pipeline proceeds to the body. Reading a failing response's body maps an
- * unreadable body to the `status: null` (no usable HTTP exchange) form.
+ * The failure prefix each non-2xx status carries, or `null` for a 2xx the caller proceeds
+ * to read. 401/403 are credential rejections, 429 asks for a backoff (its message is fixed,
+ * so the body is never read), 5xx and the rest are service states the caller treats as
+ * unavailable — the named vocabulary classes branch on `status` downstream (classes, never
+ * message text). A prefix ending in `: ` expects the forge's own body text appended.
  */
-function statusFailure(
-  response: HttpClientResponse,
-): Effect.Effect<Option.Option<ApiError>, ApiError> {
-  function failureWith(message: string): Effect.Effect<Option.Option<ApiError>, ApiError> {
-    return Effect.map(
-      Effect.mapError(
-        response.text,
-        (error) =>
-          new ApiError({
-            status: null,
-            message: `failed reading the error body: ${String(error)}`,
-          }),
-      ),
-      (body) =>
-        Option.some(new ApiError({ status: response.status, message: `${message}${body.trim()}` })),
-    );
-  }
-
-  if (response.status == 401 || response.status == 403) {
-    return failureWith(`auth failed (HTTP ${response.status}): `);
-  }
-
-  if (response.status == 429) {
-    return Effect.succeed(
-      Option.some(
-        new ApiError({
-          status: response.status,
-          message: 'rate limited (HTTP 429): back off and retry later',
-        }),
-      ),
-    );
-  }
-
-  if (response.status >= 500) {
-    return failureWith(`forge unavailable (HTTP ${response.status}): `);
-  }
-
-  if (response.status >= 300) {
-    return failureWith(`HTTP ${response.status}: `);
-  }
-
-  return Effect.succeed(Option.none());
+function statusMessage(status: number): string | null {
+  if (status === 401 || status === 403) return `auth failed (HTTP ${status}): `;
+  if (status === 429) return 'rate limited (HTTP 429): back off and retry later';
+  if (status >= 500) return `forge unavailable (HTTP ${status}): `;
+  if (status >= 300) return `HTTP ${status}: `;
+  return null;
 }
 
 /**
@@ -147,10 +108,24 @@ export const clientLayer: Layer.Layer<GitHubClientService, never, HttpClient.Htt
                 new ApiError({ status: null, message: `request failed: ${String(error)}` }),
             );
 
-            const statusError = yield* statusFailure(response);
+            const message = statusMessage(response.status);
 
-            if (Option.isSome(statusError)) {
-              return yield* Effect.fail(statusError.value);
+            if (message != null) {
+              if (message.endsWith(': ')) {
+                const body = yield* Effect.mapError(
+                  response.text,
+                  (error) =>
+                    new ApiError({
+                      status: null,
+                      message: `failed reading the error body: ${String(error)}`,
+                    }),
+                );
+                return yield* Effect.fail(
+                  new ApiError({ status: response.status, message: `${message}${body.trim()}` }),
+                );
+              }
+
+              return yield* Effect.fail(new ApiError({ status: response.status, message }));
             }
 
             const contentType = Headers.get(response.headers, 'content-type');
