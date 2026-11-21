@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Cause, Effect, Exit, FileSystem, Layer } from 'effect';
-import { NodeFileSystem } from '@effect/platform-node';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { type CommandServices } from './command.ts';

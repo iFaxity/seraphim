@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, FileSystem } from 'effect';
-import { NodeFileSystem } from '@effect/platform-node';
 import { describe, expect } from 'vite-plus/test';
 
 import { MANIFEST_FILE, type Session, type Turn, writeReceipt } from './receipts.ts';

@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { unlinkSync } from 'node:fs';
+import { unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Deferred, Duration, Effect, Fiber, Layer, Schema } from 'effect';
-import { NodeFileSystem } from '@effect/platform-node';
 import { TestClock } from 'effect/testing';
 import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
@@ -20,7 +20,6 @@ import { fakeRuntime, type FakeRuntime } from '../../../test/fakes/runtime.ts';
 import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
 import { fakeTracker, type FakeTracker } from '../../../test/fakes/tracker.ts';
 import { UnavailableError } from '../../lib/errors.ts';
-import { existsSync } from 'node:fs';
 import { now, toEpochMs } from '../../lib/time.ts';
 import { type AgentRuntime, type Notifier, type Sandbox, type Tracker } from '../core/contracts.ts';
 import { engine } from '../core/engine.ts';
@@ -1109,9 +1108,7 @@ describe('per-repo lock', () => {
         expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
 
         // Both sessions released the lock on completion
-        expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(
-          false,
-        );
+        expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
       }),
   );
 

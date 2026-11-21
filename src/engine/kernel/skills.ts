@@ -67,8 +67,9 @@ export const listPoolSkills = (
 
 /** The shared stat probe under the `is*` read: missing/unreadable paths read as not-a-kind. */
 function hasFile(fs: FileSystem.FileSystem, path: string) {
-  return Effect.map(Effect.option(fs.stat(path)), (info) =>
-    Option.isSome(info) && info.value.type === 'File',
+  return Effect.map(
+    Effect.option(fs.stat(path)),
+    (info) => Option.isSome(info) && info.value.type === 'File',
   );
 }
 

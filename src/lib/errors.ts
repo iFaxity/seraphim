@@ -1,5 +1,5 @@
-import * as PlatformErrorNs from 'effect/PlatformError';
 import { Data } from 'effect';
+import * as PlatformErrorNs from 'effect/PlatformError';
 
 /**
  * Structural `PlatformError` discriminators — the FileSystem service's error vocabulary.

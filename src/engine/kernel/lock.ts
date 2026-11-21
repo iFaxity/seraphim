@@ -190,9 +190,7 @@ export function withRepoLock<A, E, R>(
 
     const fs = yield* FileSystem.FileSystem;
 
-    const made = yield* Effect.result(
-      fs.makeDirectory(join(home, 'locks'), { recursive: true }),
-    );
+    const made = yield* Effect.result(fs.makeDirectory(join(home, 'locks'), { recursive: true }));
     if (Result.isFailure(made)) {
       return yield* Effect.die(made.failure);
     }

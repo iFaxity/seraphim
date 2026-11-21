@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, FileSystem } from 'effect';
-import { NodeFileSystem } from '@effect/platform-node';
 import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
 import {
@@ -85,11 +85,11 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => seedSkill('implement'));
       yield* withFs(
         stageSkills({
-        poolRoot: poolRoot(root),
-        worktreePath: worktree,
-        agent: 'pi',
-        declared: ['implement'],
-      }),
+          poolRoot: poolRoot(root),
+          worktreePath: worktree,
+          agent: 'pi',
+          declared: ['implement'],
+        }),
       );
       expect(
         yield* Effect.promise(() =>
@@ -112,11 +112,11 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => seedSkill('tdd', 'fresh body'));
       yield* withFs(
         stageSkills({
-        poolRoot: poolRoot(root),
-        worktreePath: worktree,
-        agent: 'claude',
-        declared: ['tdd'],
-      }),
+          poolRoot: poolRoot(root),
+          worktreePath: worktree,
+          agent: 'claude',
+          declared: ['tdd'],
+        }),
       );
       expect(yield* Effect.promise(() => readFile(join(stale, 'SKILL.md'), 'utf8'))).toContain(
         'fresh body',
@@ -129,11 +129,11 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => mkdir(worktree, { recursive: true }));
       const staged = yield* withFs(
         stageSkills({
-        poolRoot: poolRoot(root),
-        worktreePath: worktree,
-        agent: 'pi',
-        declared: [],
-      }),
+          poolRoot: poolRoot(root),
+          worktreePath: worktree,
+          agent: 'pi',
+          declared: [],
+        }),
       );
       expect(staged).toEqual([]);
       const entries = yield* Effect.promise(() =>

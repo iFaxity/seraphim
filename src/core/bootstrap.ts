@@ -77,8 +77,8 @@ const loadHomeEnv = (contents: string | null): Effect.Effect<HomeEnv, HomeEnvErr
  * The optional-config read pre-wraps to `null` on any failure — the caller decides what
  * absence means.
  */
-export const homeDeps: Effect.Effect<HomeDeps, HomeEnvError, FileSystem.FileSystem> =
-  Effect.gen(function* () {
+export const homeDeps: Effect.Effect<HomeDeps, HomeEnvError, FileSystem.FileSystem> = Effect.gen(
+  function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
 
@@ -92,7 +92,8 @@ export const homeDeps: Effect.Effect<HomeDeps, HomeEnvError, FileSystem.FileSyst
       projectsRoot: join(home, 'projects'),
       token: env['GH_TOKEN'],
     };
-  });
+  },
+);
 
 /**
  * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
@@ -109,9 +110,7 @@ export const resolvePoolRoot = (
 
     const present = Option.isSome(yield* Effect.option(fs.stat(homePool)));
 
-    return present
-      ? homePool
-      : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
+    return present ? homePool : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
   });
 
 /** The global kernel config, re-homed here so the composition root reads it via bootstrap. */

@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { Effect, FileSystem, Result } from 'effect';
-import type { PlatformError } from 'effect/PlatformError';
+import { type PlatformError } from 'effect/PlatformError';
 import { z } from 'zod';
 
 import { describeError, isAlreadyExists, isNotFound, ProjectError } from '../../lib/errors.ts';
@@ -275,9 +275,7 @@ const writeRecord = (fs: FileSystem.FileSystem, dir: string, record: ProjectReco
       });
     }
 
-    const renamed = yield* Effect.result(
-      fs.rename(tmpPath, `${dir}/${RECORD_FILE}`),
-    );
+    const renamed = yield* Effect.result(fs.rename(tmpPath, `${dir}/${RECORD_FILE}`));
     if (Result.isFailure(renamed)) {
       return yield* new ProjectError({
         message: `could not persist the project record ${dir}: ${String(renamed.failure)}`,

@@ -4,12 +4,7 @@ import { Effect, FileSystem, Result } from 'effect';
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 
-import {
-  describeError,
-  isNotFound,
-  ProjectError,
-  ReceiptReadError,
-} from '../../lib/errors.ts';
+import { describeError, isNotFound, ProjectError, ReceiptReadError } from '../../lib/errors.ts';
 import { type Git } from '../core/contracts.ts';
 import { HomeService, type Home } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
@@ -173,9 +168,7 @@ const pruneOrphan = (fs: FileSystem.FileSystem, ctx: PruneContext, path: string)
       failed.push(`${path}: ${describeError(removed.failure)}`);
     }
 
-    const deleted = yield* Effect.result(
-      fs.remove(path, { recursive: true, force: true }),
-    );
+    const deleted = yield* Effect.result(fs.remove(path, { recursive: true, force: true }));
 
     if (Result.isFailure(deleted)) {
       failed.push(`${path}: ${String(deleted.failure)}`);

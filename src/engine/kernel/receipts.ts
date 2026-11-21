@@ -218,9 +218,7 @@ const listRepoSessions = (
     const listings = yield* Effect.all(
       dirs.success
         .filter((dirEntry) => dirEntry.type === 'Directory')
-        .map((dirEntry) =>
-          listOneSession(fs, sessionsRoot, repoName, dirEntry.name, skipped),
-        ),
+        .map((dirEntry) => listOneSession(fs, sessionsRoot, repoName, dirEntry.name, skipped)),
       { concurrency: 'unbounded' },
     );
 
@@ -414,9 +412,7 @@ const writeAll = (
 ) =>
   Effect.gen(function* () {
     const results = yield* Effect.all(
-      files.map((file) =>
-        Effect.result(fs.writeFileString(join(dir, file.name), file.body)),
-      ),
+      files.map((file) => Effect.result(fs.writeFileString(join(dir, file.name), file.body))),
       { concurrency: 'unbounded' },
     );
 

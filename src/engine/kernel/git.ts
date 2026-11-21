@@ -171,16 +171,13 @@ export const gitCliLayer: Layer.Layer<
 );
 
 /** The `Git` adapter wired over whatever runner and filesystem the context provides. */
-export const gitLayer: Layer.Layer<
-  GitService,
-  never,
-  GitRunnerService | FileSystem.FileSystem
-> = Layer.effect(
-  GitService,
-  Effect.gen(function* () {
-    const runner = yield* GitRunnerService;
-    const fs = yield* FileSystem.FileSystem;
+export const gitLayer: Layer.Layer<GitService, never, GitRunnerService | FileSystem.FileSystem> =
+  Layer.effect(
+    GitService,
+    Effect.gen(function* () {
+      const runner = yield* GitRunnerService;
+      const fs = yield* FileSystem.FileSystem;
 
-    return gitAdapter(runner, fs);
-  }),
-);
+      return gitAdapter(runner, fs);
+    }),
+  );

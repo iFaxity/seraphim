@@ -15,7 +15,6 @@ import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 /** The real fs the adapter's file probes run against — tests seed the tree directly. */
 const fs = Effect.runSync(Effect.provide(FileSystem.FileSystem, NodeServices.layer));
 
-
 /** The scripted handle one scripted spawn returns: instant exit with fixed streams. */
 function scriptedHandle(out: { exitCode: number; stdout: string; stderr: string }) {
   const encode = new TextEncoder();
