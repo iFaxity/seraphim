@@ -11,7 +11,7 @@ import { type CommandServices } from './engine/kernel/command.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
 import { type NotifyChannel } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
-import { gitCliLayer, gitLayer } from './engine/kernel/git.ts';
+import { gitLayer } from './engine/kernel/git.ts';
 import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.ts';
 import { runtimeLayer } from './engine/runtimes/pi.ts';
 import { dockerCliLayer, dockerSandboxLayer } from './engine/sandboxes/docker-sandbox.ts';
@@ -73,7 +73,6 @@ function baseDepsLayer(deps: HomeDeps, notify: NotifyChannel | null) {
     apiLayer,
     Layer.succeed(GithubToken, deps.token),
     dockerCliLayer,
-    gitCliLayer,
     Layer.succeed(NotifyChannelService, notify),
   );
 }
