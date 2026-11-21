@@ -39,7 +39,7 @@ const GitHubLabelSchema = Schema.Struct({
  * `pull_request?: unknown`, present exactly when the entry is a PR (GitHub's issues
  * endpoints return both): the discriminating key for the read filter upstream.
  */
-export const GitHubIssueSchema = Schema.Struct({
+const GitHubIssueSchema = Schema.Struct({
   number: Schema.Number,
   title: Schema.String,
   body: Schema.NullOr(Schema.String),
@@ -52,7 +52,7 @@ export type GitHubIssue = Schema.Schema.Type<typeof GitHubIssueSchema>;
 
 /** The created-PR response, reduced to what the contract's `PullRequest` carries. Draft is
  * checked by the schema so a non-draft create response fails validation loudly. */
-export const GitHubPullSchema = Schema.Struct({
+const GitHubPullSchema = Schema.Struct({
   number: Schema.Number,
   html_url: Schema.String,
   draft: Schema.Boolean,
