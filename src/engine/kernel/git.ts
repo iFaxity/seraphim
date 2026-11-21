@@ -1,8 +1,9 @@
-import { Context, Effect, FileSystem, Layer, Option } from 'effect';
+import { Context, Effect, FileSystem, Layer } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 
 import { cliRun, type ProcessSpawner } from '../../lib/cli-run.ts';
 import { GitError } from '../../lib/errors.ts';
+import { dirExists } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
 import { GitService } from '../core/services.ts';
 
@@ -50,9 +51,7 @@ function removeWorktree(
 ): Effect.Effect<void, GitError> {
   return Effect.gen(function* () {
     // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-    const stat = yield* Effect.option(fs.stat(input.path));
-
-    if (Option.isNone(stat) || stat.value.type !== 'Directory') {
+    if (!(yield* dirExists(fs, input.path))) {
       return;
     }
 

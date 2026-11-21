@@ -11,6 +11,7 @@ import {
   UnavailableError,
   WorktreeMissingError,
 } from '../../lib/errors.ts';
+import { dirExists, fileExists } from '../../lib/fs.ts';
 import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
 import { SandboxService } from '../core/services.ts';
 
@@ -129,9 +130,7 @@ function execArgs(
   input: ExecInput,
 ): Effect.Effect<string[], SandboxArgError> {
   return Effect.gen(function* () {
-    const worktree = yield* Effect.option(fs.stat(input.worktreePath));
-
-    if (Option.isNone(worktree) || worktree.value.type !== 'Directory') {
+    if (!(yield* dirExists(fs, input.worktreePath))) {
       return yield* Effect.fail(
         new WorktreeMissingError({ message: `worktree not found: ${input.worktreePath}` }),
       );
@@ -157,9 +156,7 @@ function execArgs(
     // Credentials surface: the project's `.env` file, mounted only when it exists — the
     // `--env-file` argv is the adapter's contract; what agents do with the variables is not.
     const envFile = join(dir, '.env');
-    const envInfo = yield* Effect.option(fs.stat(envFile));
-
-    if (Option.isSome(envInfo) && envInfo.value.type === 'File') {
+    if (yield* fileExists(fs, envFile)) {
       args.push('--env-file', envFile);
     }
 
@@ -312,9 +309,7 @@ export function imageTagFor(
 ): Effect.Effect<Option.Option<string>> {
   return Effect.gen(function* () {
     const dockerfilePath = join(dir, 'Dockerfile');
-    const dockerfileInfo = yield* Effect.option(fs.stat(dockerfilePath));
-
-    if (Option.isNone(dockerfileInfo) || dockerfileInfo.value.type !== 'File') {
+    if (!(yield* fileExists(fs, dockerfilePath))) {
       return Option.none();
     }
 
