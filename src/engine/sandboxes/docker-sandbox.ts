@@ -46,13 +46,6 @@ export type DockerRunner = {
   readonly run: (args: readonly string[]) => Effect.Effect<DockerRun>;
 };
 
-/** The adapter's injectable configuration: where project assets live, and how docker runs. */
-export type DockerSandboxOptions = {
-  readonly projectsRoot: string;
-  readonly docker: DockerRunner;
-  readonly fs: FileSystem.FileSystem;
-};
-
 /** Lockfile names that participate in the image's content hash, checked per project. */
 const LOCKFILES = ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'Cargo.lock'] as const;
 
