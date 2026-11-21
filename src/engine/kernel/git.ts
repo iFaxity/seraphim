@@ -153,24 +153,26 @@ export function gitAdapter(runner: GitRunner, fs: FileSystem.FileSystem) {
   } satisfies Git;
 }
 
-/** The internal runner key — the adapter owns it; the composition root provides the CLI impl. */
+/** The internal runner key — the adapter owns it; the composition root never sees it. */
 class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
   'seraphim/kernel/GitRunner',
 ) {}
 
 /** Production wiring: the real `git` CLI subprocess runner, over the spawner the
  * composition root provides. */
-export const gitCliLayer: Layer.Layer<
-  GitRunnerService,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner
-> = Layer.effect(
-  GitRunnerService,
-  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
-);
+const gitCliLayer: Layer.Layer<GitRunnerService, never, ChildProcessSpawner.ChildProcessSpawner> =
+  Layer.effect(
+    GitRunnerService,
+    ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
+  );
 
-/** The `Git` adapter wired over whatever runner and filesystem the context provides. */
-export const gitLayer: Layer.Layer<GitService, never, GitRunnerService | FileSystem.FileSystem> =
+/** The `Git` adapter: git CLI wiring fused internally — the composition root only provides
+ * the spawner and filesystem. */
+export const gitLayer: Layer.Layer<
+  GitService,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem
+> = Layer.provide(
   Layer.effect(
     GitService,
     Effect.gen(function* () {
@@ -179,4 +181,6 @@ export const gitLayer: Layer.Layer<GitService, never, GitRunnerService | FileSys
 
       return gitAdapter(runner, fs);
     }),
-  );
+  ),
+  gitCliLayer,
+);
