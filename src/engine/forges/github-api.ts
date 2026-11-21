@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Option, Schema } from 'effect';
 import { FetchHttpClient, Headers, HttpBody, HttpClient, HttpClientRequest } from 'effect/http';
+import { schemaBodyJson } from 'effect/http/HttpClientResponse';
 import { ApiError, describeError } from '../../lib/errors.ts';
 
 /** The GitHub REST API root — every adapter URL composes from it, repo-scoped. */
@@ -142,17 +143,8 @@ export const clientLayer: Layer.Layer<GitHubClientService, never, HttpClient.Htt
               );
             }
 
-            const parsed = yield* Effect.mapError(
-              response.json,
-              (error) =>
-                new ApiError({
-                  status: null,
-                  message: `failed reading the response body: ${String(error)}`,
-                }),
-            );
-
             const data = yield* Effect.mapError(
-              Effect.try(() => Schema.decodeUnknownSync(call.schema)(parsed)),
+              schemaBodyJson(call.schema)(response),
               (error) =>
                 new ApiError({
                   status: null,
