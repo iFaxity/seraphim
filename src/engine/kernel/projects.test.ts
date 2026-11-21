@@ -1,5 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Cause, Effect, Exit, Layer } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
@@ -38,8 +39,13 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function homeLayer(): Layer.Layer<HomeService> {
-  return Layer.succeed(HomeService, homeLayout(root));
+/** The project record reads ride the platform FileSystem service; registration's remote
+ * probe resolves the spawner from the context too, so NodeServices backs both. The layer's
+ * type keeps the spawner the record services' honest R resolves through. */
+const fsLayer = NodeServices.layer;
+
+function homeLayer() {
+  return Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), fsLayer);
 }
 
 function projectLayer(git: Git) {
@@ -108,7 +114,7 @@ describe('registerProject', () => {
 
       yield* Effect.provide(registerProject(REMOTE), projectLayer(git));
 
-      const flow = yield* Effect.provide(loadFlow(root, 'widgets'), Layer.empty);
+      const flow = yield* Effect.provide(loadFlow(root, 'widgets'), fsLayer);
 
       expect(flow.config.agent).toBe('pi');
       expect(typeof flow.run).toBe('function');

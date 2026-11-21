@@ -90,7 +90,7 @@ export default defineConfig({
       'unicorn/filename-case': ['error', { case: 'kebabCase' }],
       // Promise — style
       'promise/avoid-new': 'error',
-      // Filesystem — all fs passes through the result-based helpers in src/lib/fs.ts
+      // Filesystem — all fs passes through the platform FileSystem service
       'no-restricted-imports': [
         'error',
         {
@@ -99,18 +99,13 @@ export default defineConfig({
               group: ['node:fs', 'node:fs/promises'],
               allowTypeImports: true,
               message:
-                'use the result-based helpers in src/lib/fs.ts; direct node fs access is reserved for that module',
+                'use the FileSystem service (effect/FileSystem, provided by NodeFileSystem in the composition root); direct node fs access is reserved for test fixture seeding',
             },
           ],
         },
       ],
     },
     overrides: [
-      // src/lib/fs.ts is the one module allowed to touch node fs.
-      {
-        files: ['src/lib/fs.ts'],
-        rules: { 'no-restricted-imports': 'off' },
-      },
       // Tests seed fixtures directly.
       {
         files: ['**/*.test.ts'],

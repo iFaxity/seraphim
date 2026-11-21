@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { Context, Effect, Ref, Result } from 'effect';
+import { Context, Effect, FileSystem, Ref, Result } from 'effect';
+import { ChildProcessSpawner } from 'effect/process';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -19,7 +20,7 @@ import {
   ReceiptWriteError,
   UnavailableError,
 } from '../../lib/errors.ts';
-import { fileExistsE } from '../../lib/fs.ts';
+import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import {
   type KernelFailure,
@@ -60,14 +61,18 @@ export type SessionInput = {
  * (sessions never read other sessions' receipts). Tags survive to the composition root. */
 export type SessionError = Exclude<KernelFailure, ReceiptReadError>;
 
-/** The services one session run resolves: the adapter contracts plus the home layout. */
+/** The services one session run resolves: the adapter contracts plus the home layout.
+ * The CLI-backed adapters' honest R (spawner, filesystem) rides this stack too — the
+ * session resolves them from the context, never threads them through parameters. */
 export type SessionServices =
   | TrackerService
   | SandboxService
   | AgentRuntimeService
   | GitService
   | NotifierService
-  | HomeService;
+  | HomeService
+  | FileSystem.FileSystem
+  | ChildProcessSpawner.ChildProcessSpawner;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {
@@ -167,7 +172,12 @@ const resolveRunnableFlow = (
 ): Effect.Effect<
   RunnableFlow & { tracker: Tracker; git: Git; runtime: AgentRuntime },
   RunnableFlowError,
-  TrackerService | GitService | AgentRuntimeService | HomeService
+  | TrackerService
+  | GitService
+  | AgentRuntimeService
+  | HomeService
+  | FileSystem.FileSystem
+  | ChildProcessSpawner.ChildProcessSpawner
 > =>
   Effect.gen(function* () {
     const tracker = yield* TrackerService;
@@ -208,7 +218,7 @@ const resolveRunnableFlow = (
 const checkPreflight = (home: Home, repo: string) =>
   Effect.gen(function* () {
     const dockerfilePath = join(home.projectsRoot, repo, 'Dockerfile');
-    const hasDockerfile = yield* fileExistsE(dockerfilePath);
+    const hasDockerfile = yield* fileExists(dockerfilePath);
 
     if (!hasDockerfile) {
       const missing = missingDockerfile(repo, home.projectsRoot);
@@ -320,7 +330,7 @@ const claimAndSyncIssue = (
 ): Effect.Effect<
   Issue,
   TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
-  never
+  FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
 > =>
   withRepoLock(
     home.home,
@@ -615,7 +625,7 @@ const finalizeSessionReceipt = (
   notifier: Notifier,
   relDir: string,
   flowRun: Result.Result<void, Error>,
-): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, never> =>
+): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const { home, manifest, stateRef, turnsEngine, logs } = run;
 

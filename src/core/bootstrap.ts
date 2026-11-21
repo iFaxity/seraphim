@@ -1,17 +1,17 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigProvider, Effect, Schema } from 'effect';
+import { ConfigProvider, Effect, FileSystem, Option, Schema } from 'effect';
 
 import { loadKernelConfig } from '../engine/kernel/config.ts';
 import { poolRoot } from '../engine/kernel/skills.ts';
 import { describeError, HomeEnvError } from '../lib/errors.ts';
-import { fileExistsSync, readTextFileSync } from '../lib/fs.ts';
 
 /**
  * Bootstrap config: everything the composition root reads straight from the host before
  * any Layer exists — the seraphim home, its `.env` forge token, and the kernel config.
- * The sync file reads and `Effect.runSync` live only here, at this edge.
+ * The reads run on the platform FileSystem service inside the composition root's Effect,
+ * which is itself the edge.
  */
 
 /** The home-derived base inputs the composition root reads before any Layer is built. */
@@ -72,32 +72,46 @@ const loadHomeEnv = (contents: string | null): Effect.Effect<HomeEnv, HomeEnvErr
     return yield* parseHomeEnv({ GH_TOKEN: node.value });
   });
 
-/** Resolves the seraphim home, its projects root, and the forge token from the `.env`. */
-export function homeDeps(): HomeDeps {
-  const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
+/**
+ * Resolves the seraphim home, its projects root, and the forge token from the `.env`.
+ * The optional-config read pre-wraps to `null` on any failure — the caller decides what
+ * absence means.
+ */
+export const homeDeps: Effect.Effect<HomeDeps, HomeEnvError, FileSystem.FileSystem> = Effect.gen(
+  function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = process.env['SERAPHIM_HOME'] ?? join(homedir(), '.seraphim');
 
-  const envContents = readTextFileSync(join(home, '.env'));
-  const env = Effect.runSync(loadHomeEnv(envContents));
+    const envContents = Option.getOrNull(
+      yield* Effect.option(fs.readFileString(join(home, '.env'))),
+    );
+    const env = yield* loadHomeEnv(envContents);
 
-  return {
-    home,
-    projectsRoot: join(home, 'projects'),
-    token: env['GH_TOKEN'],
-  };
-}
+    return {
+      home,
+      projectsRoot: join(home, 'projects'),
+      token: env['GH_TOKEN'],
+    };
+  },
+);
 
 /**
  * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
  * exists, else the pool shipped in this checkout — a fresh install curates the factory's
- * own skills from day one, and a home skills directory overrides it wholesale.
+ * own skills from day one, and a home skills directory overrides it wholesale. An
+ * unreadable probe reads as absent (the shipped pool fallback).
  */
-export function resolvePoolRoot(home: string) {
-  const homePool = poolRoot(home);
+export const resolvePoolRoot = (
+  home: string,
+): Effect.Effect<string, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const homePool = poolRoot(home);
 
-  return fileExistsSync(homePool)
-    ? homePool
-    : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
-}
+    const present = Option.isSome(yield* Effect.option(fs.stat(homePool)));
+
+    return present ? homePool : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
+  });
 
 /** The global kernel config, re-homed here so the composition root reads it via bootstrap. */
 export const loadConfig = loadKernelConfig;

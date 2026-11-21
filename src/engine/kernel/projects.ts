@@ -1,16 +1,9 @@
-import { Effect, Result } from 'effect';
+import { fileURLToPath } from 'node:url';
+import { Effect, FileSystem, Result } from 'effect';
+import { type PlatformError } from 'effect/PlatformError';
 import { z } from 'zod';
 
-import { describeError, ProjectError } from '../../lib/errors.ts';
-import {
-  isFsErrorCode,
-  isMissing,
-  mkdirE,
-  readDirE,
-  readFileE,
-  renameE,
-  writeFileE,
-} from '../../lib/fs.ts';
+import { describeError, isAlreadyExists, isNotFound, ProjectError } from '../../lib/errors.ts';
 import { HomeService } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
 
@@ -58,63 +51,71 @@ function deriveName(url: string) {
   return name && !/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(name) ? name : undefined;
 }
 
-/** Reads one project template's body at module load — boot seeding fails fast on an
- * unreadable template instead of registering with an empty slot later. */
-async function templateBody(fileName: string) {
-  const read = await Effect.runPromise(
-    readFileE(new URL(`../../../templates/project/${fileName}`, import.meta.url)),
-  );
+/** The slot files seeded into a new project's directory — flow template, Dockerfile slot,
+ * env-file slot. `wx` during seeding keeps owner edits intact on a re-register of a partial
+ * directory — a slot already on disk is that owner's content, not scaffolding to clobber. */
+const SLOTS = [
+  { name: 'flow.ts', file: 'flow.ts' },
+  { name: 'Dockerfile', file: 'Dockerfile' },
+  { name: '.env', file: 'env' },
+] as const;
 
-  return read;
+/** One seeded slot: its destination file name and the template body it carries. */
+type Slot = { readonly name: string; readonly body: string };
+
+/** Reads one project template's body; an unreadable template is a defect (fail-fast seeding). */
+function templateBody(file: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+
+    return yield* fs.readFileString(
+      fileURLToPath(new URL(`../../../templates/project/${file}`, import.meta.url)),
+    );
+  });
 }
 
-/**
- * The slot files seeded into a new project's directory — flow template, Dockerfile slot,
- * env-file slot — read once at module load. `wx` during seeding keeps owner edits intact on
- * a re-register of a partial directory — a slot already on disk is that owner's content,
- * not scaffolding to clobber.
- */
-const SLOTS = [
-  {
-    name: 'flow.ts',
-    body: await templateBody('flow.ts'),
-  },
-  {
-    name: 'Dockerfile',
-    body: await templateBody('Dockerfile'),
-  },
-  {
-    name: '.env',
-    body: await templateBody('env'),
-  },
-] as const;
+/** Reads the slot templates once per registration — the old module-load read, re-homed onto
+ * the service. Unreadable templates fail fast as a defect instead of seeding empty slots. */
+const projectSlots = () =>
+  Effect.gen(function* () {
+    return yield* Effect.all(
+      SLOTS.map((slot) =>
+        Effect.map(templateBody(slot.file).pipe(Effect.orDie), (body): Slot => ({
+          name: slot.name,
+          body,
+        })),
+      ),
+      { concurrency: 'unbounded' },
+    );
+  });
 
 /**
  * Seeds every file in `templates/home/` into the home directory — a template file's name is
  * its destination (`templates/home/.gitignore` → `<home>/.gitignore`). Per-file `wx`: an
  * owner-curated copy is never clobbered, its EEXIST is the success case.
  */
-const HOME_TEMPLATES = new URL('../../../templates/home/', import.meta.url);
+const HOME_TEMPLATES = fileURLToPath(new URL('../../../templates/home/', import.meta.url));
 
 const seedHome = (home: string) =>
   Effect.gen(function* () {
-    const entries = yield* readDirE(HOME_TEMPLATES);
+    const fs = yield* FileSystem.FileSystem;
+    const entries = yield* fs.readDirectoryEntries(HOME_TEMPLATES);
 
     for (const entry of entries) {
-      if (!entry.isFile()) {
+      if (entry.type !== 'File') {
         continue;
       }
 
-      const read = yield* Effect.result(readFileE(new URL(entry.name, HOME_TEMPLATES)));
+      const read = yield* Effect.result(fs.readFileString(`${HOME_TEMPLATES}/${entry.name}`));
       if (Result.isFailure(read)) {
         return yield* Effect.die(read.failure);
       }
 
       const seeded = yield* Effect.result(
-        writeFileE({ path: `${home}/${entry.name}`, data: read.success, flag: 'wx' }),
+        fs.writeFileString(`${home}/${entry.name}`, read.success, { flag: 'wx' }),
       );
 
-      if (Result.isFailure(seeded) && !isFsErrorCode(seeded.failure, 'EEXIST')) {
+      if (Result.isFailure(seeded) && !isAlreadyExists(seeded.failure)) {
         return yield* Effect.die(seeded.failure);
       }
     }
@@ -149,9 +150,10 @@ function checkedRepo(url: string, name: string | undefined) {
  */
 const makeDirAndSeedHome = (home: string, repo: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const dir = projectPath(home, repo);
 
-    const made = yield* Effect.result(mkdirE(dir));
+    const made = yield* Effect.result(fs.makeDirectory(dir, { recursive: true }));
     if (Result.isFailure(made)) {
       return yield* new ProjectError({
         message: `could not create the project directory ${dir}: ${String(made.failure)}`,
@@ -179,11 +181,12 @@ const seedSlot = (
   slot: { readonly name: string; readonly body: string },
 ) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const wrote = yield* Effect.result(
-      writeFileE({ path: `${dir}/${slot.name}`, data: slot.body, flag: 'wx' }),
+      fs.writeFileString(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }),
     );
 
-    if (Result.isSuccess(wrote) || isFsErrorCode(wrote.failure, 'EEXIST')) {
+    if (Result.isSuccess(wrote) || isAlreadyExists(wrote.failure)) {
       return `projects/${repo}/${slot.name}`;
     }
 
@@ -202,15 +205,22 @@ const seedSlots = (dir: string, repo: string) =>
     // `Effect.all` fails fast — the first slot failure fails the whole seed, so every
     // element of the result is a seeded path by construction.
     return yield* Effect.all(
-      SLOTS.map((slot) => seedSlot(dir, repo, slot)),
+      (yield* projectSlots()).map((slot) => seedSlot(dir, repo, slot)),
       { concurrency: 'unbounded' },
     );
   });
 
 /** Reads and schema-checks one `project.json`. Invalid shape is a ProjectError; never throws. */
-const readRecord = (dir: string): Effect.Effect<Result.Result<ProjectRecord, Error>> =>
+const readRecord = (
+  dir: string,
+): Effect.Effect<
+  Result.Result<ProjectRecord, ProjectError | PlatformError>,
+  never,
+  FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
-    const read = yield* Effect.result(readFileE(`${dir}/${RECORD_FILE}`));
+    const fs = yield* FileSystem.FileSystem;
+    const read = yield* Effect.result(fs.readFileString(`${dir}/${RECORD_FILE}`));
 
     if (Result.isFailure(read)) {
       // A missing record file is the unregistered case — the raw fs error is kept so
@@ -250,7 +260,7 @@ const requireRegistered = (home: string, repo: string) =>
       return read.success;
     }
 
-    if (!isMissing(read.failure)) {
+    if (!isNotFound(read.failure)) {
       // Every non-missing failure `readRecord` produces is a ProjectError (corrupt record,
       // bad schema); the wider `Error` type only carries the raw fs miss.
       return yield* Effect.fail(read.failure as ProjectError);
@@ -264,10 +274,11 @@ const requireRegistered = (home: string, repo: string) =>
 /** Persists one record atomically: temp file then rename, so readers never see a torn row. */
 const writeRecord = (dir: string, record: ProjectRecord) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const tmpPath = `${dir}/${RECORD_FILE}.tmp`;
 
     const wrote = yield* Effect.result(
-      writeFileE({ path: tmpPath, data: `${JSON.stringify(record, null, 2)}\n` }),
+      fs.writeFileString(tmpPath, `${JSON.stringify(record, null, 2)}\n`),
     );
     if (Result.isFailure(wrote)) {
       return yield* new ProjectError({
@@ -275,7 +286,7 @@ const writeRecord = (dir: string, record: ProjectRecord) =>
       });
     }
 
-    const renamed = yield* Effect.result(renameE({ path: tmpPath, to: `${dir}/${RECORD_FILE}` }));
+    const renamed = yield* Effect.result(fs.rename(tmpPath, `${dir}/${RECORD_FILE}`));
     if (Result.isFailure(renamed)) {
       return yield* new ProjectError({
         message: `could not persist the project record ${dir}: ${String(renamed.failure)}`,
@@ -337,7 +348,7 @@ export const loadProject = (repo: string) =>
 /** Marks one project inactive in place — the record stays, nothing is deleted. */
 export const deactivateProject = (
   repo: string,
-): Effect.Effect<{ readonly repo: string }, ProjectError, HomeService> =>
+): Effect.Effect<{ readonly repo: string }, ProjectError, HomeService | FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const home = yield* HomeService;
     const read = yield* requireRegistered(home.home, repo);
@@ -359,13 +370,14 @@ export const deactivateProject = (
 /** All registered projects, repo order. Corrupt records are skipped, never fatal. */
 export const listProjects = () =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const home = yield* HomeService;
     const root = `${home.home}/projects`;
 
-    const dirs = yield* Effect.result(readDirE(root));
+    const dirs = yield* Effect.result(fs.readDirectoryEntries(root));
 
     if (Result.isFailure(dirs)) {
-      if (isMissing(dirs.failure)) {
+      if (isNotFound(dirs.failure)) {
         return { projects: [], skipped: 0 };
       }
 
@@ -378,7 +390,7 @@ export const listProjects = () =>
     // default fail-fast never fires — every read completes and corrupt records are skipped.
     const listed = yield* Effect.all(
       dirs.success
-        .filter((entry) => entry.isDirectory())
+        .filter((entry) => entry.type === 'Directory')
         .map((entry) => readRecord(`${root}/${entry.name}`)),
       { concurrency: 'unbounded' },
     );

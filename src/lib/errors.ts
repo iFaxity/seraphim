@@ -1,4 +1,18 @@
-import { Data } from 'effect';
+import { Data, PlatformError } from 'effect';
+
+/**
+ * Structural `PlatformError` discriminators — the FileSystem service's error vocabulary.
+ * The reason carries the OS failure class (NotFound, AlreadyExists, …), so callers branch on
+ * these predicates instead of matching string errno codes.
+ */
+
+/** The absent-path case: everything else (permissions, corrupt data, io) reads false. */
+export const isNotFound = (error: unknown): boolean =>
+  PlatformError.isPlatformError(error) && error.reason._tag === 'NotFound';
+
+/** The existing-path case: exclusive-create conflicts, clobber refusals. */
+export const isAlreadyExists = (error: unknown): boolean =>
+  PlatformError.isPlatformError(error) && error.reason._tag === 'AlreadyExists';
 
 /**
  * Module-scoped tagged-error vocabulary — the single source of error names for the Effect

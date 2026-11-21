@@ -1,7 +1,6 @@
-import { Effect, Result, Schema } from 'effect';
+import { Effect, FileSystem, Result, Schema } from 'effect';
 
-import { KernelConfigError } from '../../lib/errors.ts';
-import { isMissing, readFileE } from '../../lib/fs.ts';
+import { isNotFound, KernelConfigError } from '../../lib/errors.ts';
 
 /**
  * The global kernel config: one schema-validated record at `<home>/config.json`, read once
@@ -52,13 +51,16 @@ const defaultConfig: KernelConfig = { notify: null, crashStaleMs: CRASH_STALE_MS
  * `KernelConfigError` naming the fix — the operator configured something, so fail fast
  * instead of guessing.
  */
-export const loadKernelConfig = (home: string): Effect.Effect<KernelConfig, KernelConfigError> =>
+export const loadKernelConfig = (
+  home: string,
+): Effect.Effect<KernelConfig, KernelConfigError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const path = `${home}/config.json`;
-    const read = yield* Effect.result(readFileE(path));
+    const read = yield* Effect.result(fs.readFileString(path));
 
     if (Result.isFailure(read)) {
-      return isMissing(read.failure)
+      return isNotFound(read.failure)
         ? defaultConfig
         : yield* new KernelConfigError({
             message: `kernel config unreadable at '${path}': ${String(read.failure)}`,

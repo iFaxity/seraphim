@@ -1,9 +1,9 @@
-import { Context, Effect, Layer } from 'effect';
+import { Context, Effect, FileSystem, Layer } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 
-import { cliRun, type ProcessSpawner } from '../../lib/cli-run.ts';
+import { cliRun } from '../../lib/cli-run.ts';
 import { GitError } from '../../lib/errors.ts';
-import { dirExistsE } from '../../lib/fs.ts';
+import { dirExists } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
 import { GitService } from '../core/services.ts';
 
@@ -22,15 +22,17 @@ export type GitRun = {
 
 /** The `git` CLI surface the adapter drives. Injected so tests script git's behavior. */
 export type GitRunner = {
-  readonly run: (args: readonly string[], cwd?: string) => Effect.Effect<GitRun>;
+  readonly run: (
+    args: readonly string[],
+    cwd?: string,
+  ) => Effect.Effect<GitRun, never, ChildProcessSpawner.ChildProcessSpawner>;
 };
 
-/** The real `git` CLI runner, composed over the injected process spawner. */
-function processGit(spawner: ProcessSpawner): GitRunner {
-  return {
-    run: (args, cwd) => cliRun(spawner, 'git', args, { cwd, spawnErrorExitCode: -1 }),
-  };
-}
+/** The real `git` CLI runner: the shared CLI capture machinery over the spawner the
+ * composition root provides — the runner resolves it from the context, never a parameter. */
+const processGit: GitRunner = {
+  run: (args, cwd) => cliRun('git', args, { cwd, spawnErrorExitCode: -1 }),
+};
 
 /** Passes a successful run through; a nonzero one fails with the labeled diagnostics. */
 function checkedOr(label: string, run: GitRun): Effect.Effect<GitRun, GitError> {
@@ -47,10 +49,10 @@ function checkedOr(label: string, run: GitRun): Effect.Effect<GitRun, GitError> 
 function removeWorktree(
   runner: GitRunner,
   input: { readonly repoPath: string; readonly path: string },
-): Effect.Effect<void, GitError> {
+): Effect.Effect<void, GitError, FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.gen(function* () {
     // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-    if (!(yield* dirExistsE(input.path))) {
+    if (!(yield* dirExists(input.path))) {
       return;
     }
 
@@ -63,7 +65,7 @@ function removeWorktree(
 function deleteBranch(
   runner: GitRunner,
   input: { readonly repoPath: string; readonly branch: string },
-): Effect.Effect<void, GitError> {
+): Effect.Effect<void, GitError, ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.gen(function* () {
     const listing = yield* runner.run(['branch', '--list', input.branch], input.repoPath);
     yield* checkedOr('branch listing failed', listing);
@@ -81,6 +83,8 @@ function deleteBranch(
 /**
  * Real `Git` adapter. Every operation maps one git invocation to `void` (the receipt-visible
  * state is the filesystem, not git's stdout) except `defaultBranch`, which reads `origin/HEAD`.
+ * The filesystem rides the Effect context (`removeWorktree`'s presence probe) — the adapter
+ * never receives it as a parameter.
  */
 export function gitAdapter(runner: GitRunner) {
   return {
@@ -152,24 +156,18 @@ export function gitAdapter(runner: GitRunner) {
   } satisfies Git;
 }
 
-/** The internal runner key — the adapter owns it; the composition root provides the CLI impl. */
+/** The internal runner key — the adapter owns it; the composition root never sees it. */
 class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
   'seraphim/kernel/GitRunner',
 ) {}
 
-/** Production wiring: the real `git` CLI subprocess runner, over the spawner the
- * composition root provides. */
-export const gitCliLayer: Layer.Layer<
-  GitRunnerService,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner
-> = Layer.effect(
-  GitRunnerService,
-  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
-);
+/** Production wiring: the real `git` CLI subprocess runner — the spawner rides the Effects'
+ * context, so this layer is pure `Layer.succeed`. */
+const gitCliLayer: Layer.Layer<GitRunnerService> = Layer.succeed(GitRunnerService, processGit);
 
-/** The `Git` adapter wired over whatever runner the context provides. */
-export const gitLayer: Layer.Layer<GitService, never, GitRunnerService> = Layer.effect(
-  GitService,
-  GitRunnerService.use((runner) => Effect.succeed(gitAdapter(runner))),
+/** The `Git` adapter: git CLI wiring fused internally. The layer itself is self-contained;
+ * the spawner and filesystem ride the adapter operations' R (honest, per the contract). */
+export const gitLayer: Layer.Layer<GitService> = Layer.provide(
+  Layer.effect(GitService, Effect.map(GitRunnerService, gitAdapter)),
+  gitCliLayer,
 );

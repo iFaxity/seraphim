@@ -1,6 +1,6 @@
 import { join } from 'node:path';
-import { NodeServices } from '@effect/platform-node';
-import { Effect, Layer, ManagedRuntime, Result } from 'effect';
+import { NodeFileSystem, NodeServices } from '@effect/platform-node';
+import { Effect, FileSystem, Layer, ManagedRuntime, Result } from 'effect';
 
 import { homeDeps, loadConfig, resolvePoolRoot, type HomeDeps } from './core/bootstrap.ts';
 import { engine } from './engine/core/engine.ts';
@@ -11,11 +11,11 @@ import { type CommandServices } from './engine/kernel/command.ts';
 import { type SessionLine } from './engine/kernel/commands/status.ts';
 import { type NotifyChannel } from './engine/kernel/config.ts';
 import { type Outcome } from './engine/kernel/dispatcher.ts';
-import { gitCliLayer, gitLayer } from './engine/kernel/git.ts';
+import { gitLayer } from './engine/kernel/git.ts';
 import { NotifyChannelService, notifierLayer } from './engine/notifiers/webhook.ts';
 import { runtimeLayer } from './engine/runtimes/pi.ts';
 import { dockerCliLayer, dockerSandboxLayer } from './engine/sandboxes/docker-sandbox.ts';
-import { describeError, KernelConfigError } from './lib/errors.ts';
+import { describeError, HomeEnvError, KernelConfigError } from './lib/errors.ts';
 
 /**
  * CLI boundary: the only place engine outcomes become stdout prose. Rendering lives here so
@@ -26,7 +26,9 @@ import { describeError, KernelConfigError } from './lib/errors.ts';
  */
 export async function main(argv: readonly string[], layer?: Layer.Layer<CommandServices>) {
   if (layer == null) {
-    const composed = await Effect.runPromise(Effect.result(composeEngineLayer));
+    const composed = await Effect.runPromise(
+      Effect.provide(Effect.result(composeEngineLayer), NodeFileSystem.layer),
+    );
 
     if (Result.isFailure(composed)) {
       return `error: ${describeError(composed.failure)}`;
@@ -71,7 +73,6 @@ function baseDepsLayer(deps: HomeDeps, notify: NotifyChannel | null) {
     apiLayer,
     Layer.succeed(GithubToken, deps.token),
     dockerCliLayer,
-    gitCliLayer,
     Layer.succeed(NotifyChannelService, notify),
   );
 }
@@ -90,13 +91,18 @@ function adaptersLayer<RIn>(baseLayer: Layer.Layer<never, never, RIn>, projectsR
 }
 
 /** The engine's full service stack: adapters plus the HomeService layout. */
-function engineLayer<RIn>(adapters: Layer.Layer<never, never, RIn>, home: string) {
+function engineLayer<RIn>(
+  adapters: Layer.Layer<never, never, RIn>,
+  home: string,
+  poolRoot: string,
+) {
   return Layer.mergeAll(
     adapters,
+    NodeFileSystem.layer,
     Layer.succeed(
       HomeService,
       homeLayout(home, {
-        poolRoot: resolvePoolRoot(home),
+        poolRoot,
         sessionsRoot: join(home, 'sessions'),
       }),
     ),
@@ -105,18 +111,25 @@ function engineLayer<RIn>(adapters: Layer.Layer<never, never, RIn>, home: string
 
 const composeEngineLayer: Effect.Effect<
   Layer.Layer<CommandServices>,
-  KernelConfigError
+  KernelConfigError | HomeEnvError,
+  FileSystem.FileSystem
 > = Effect.gen(function* () {
-  const deps = homeDeps();
+  const deps = yield* homeDeps;
   const config = yield* loadConfig(deps.home);
+  const poolRoot = yield* resolvePoolRoot(deps.home);
   const baseLayer = baseDepsLayer(deps, config.notify);
   // The Node ChildProcessSpawner driver backs the git/docker CLI runners; `Layer.provide`
-  // keeps the platform's own services (filesystem, path, stdio) out of the merged stack.
+  // keeps the platform's own services (path, stdio) out of the merged stack — the
+  // FileSystem service is merged in below as the kernel's sanctioned fs seam.
   const adapters = adaptersLayer(baseLayer, deps.projectsRoot).pipe(
     Layer.provide(NodeServices.layer),
   );
 
-  return engineLayer(adapters, deps.home) as Layer.Layer<CommandServices>;
+  // The adapters resolve the spawner and filesystem from the Effect context at run time
+  // (never parameters), so the Node driver rides the merged stack the commands execute in.
+  return engineLayer(adapters, deps.home, poolRoot).pipe(
+    Layer.provideMerge(NodeServices.layer),
+  ) as Layer.Layer<CommandServices>;
 });
 
 /** Runs one more engine dispatch on the caller's runtime — the prune confirm pass. */

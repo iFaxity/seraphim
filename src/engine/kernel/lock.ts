@@ -1,8 +1,7 @@
 import { join } from 'node:path';
-import { Clock, Effect, Result, Schedule } from 'effect';
+import { Clock, Effect, FileSystem, Result, Schedule } from 'effect';
 
-import { LockHeldError } from '../../lib/errors.ts';
-import { isFsErrorCode, mkdirE, readFileE, unlinkE, writeFileE } from '../../lib/fs.ts';
+import { isAlreadyExists, LockHeldError } from '../../lib/errors.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 
 /**
@@ -54,14 +53,16 @@ function pidAlive(pid: number) {
 
     return true;
   } catch (error) {
-    return !isFsErrorCode(error, 'ESRCH');
+    // ESRCH is the reaped process; every other failure (EPERM) is a live foreign owner.
+    return (error as { code?: unknown } | null)?.code !== 'ESRCH';
   }
 }
 
 /** Missing or corrupt lock files read unheld — a crash mid-write cannot wedge the repo. */
 const readLock = (path: string) =>
   Effect.gen(function* () {
-    const read = yield* Effect.result(readFileE(path));
+    const fs = yield* FileSystem.FileSystem;
+    const read = yield* Effect.result(fs.readFileString(path));
 
     if (Result.isFailure(read)) {
       return null;
@@ -80,15 +81,16 @@ const readLock = (path: string) =>
 /** One exclusive-create attempt; unexpected (non-EEXIST) write failures crash the acquire. */
 const createExclusive = (path: string, lock: LockFile) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const wrote = yield* Effect.result(
-      writeFileE({ path, data: JSON.stringify(lock), flag: 'wx' }),
+      fs.writeFileString(path, JSON.stringify(lock), { flag: 'wx' }),
     );
 
     if (Result.isSuccess(wrote)) {
       return true;
     }
 
-    if (isFsErrorCode(wrote.failure, 'EEXIST')) {
+    if (isAlreadyExists(wrote.failure)) {
       return false;
     }
 
@@ -120,6 +122,8 @@ function lockHeldFailure(repo: string, held: LockFile, maxWaitMs: number) {
  */
 const acquireOnce = (path: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+
     while (true) {
       if (yield* createExclusive(path, { pid: process.pid, at: toEpochMs(now()) })) {
         return;
@@ -128,7 +132,7 @@ const acquireOnce = (path: string) =>
       const held = yield* readLock(path);
 
       if (held === null || held.pid === process.pid || !pidAlive(held.pid)) {
-        yield* Effect.result(unlinkE(path));
+        yield* Effect.result(fs.remove(path, { force: true }));
         continue;
       }
 
@@ -162,7 +166,7 @@ export function withRepoLock<A, E, R>(
   repo: string,
   guarded: Effect.Effect<A, E, R>,
   timing: LockTiming = {},
-): Effect.Effect<A, E | LockHeldError, R> {
+): Effect.Effect<A, E | LockHeldError, R | FileSystem.FileSystem> {
   const pollMs = timing.pollMs ?? LOCK_POLL_MS;
   const maxWaitMs = timing.maxWaitMs ?? LOCK_MAX_WAIT_MS;
 
@@ -176,12 +180,16 @@ export function withRepoLock<A, E, R>(
   const tail = previous.then(() => turn);
   mutexTails.set(path, tail);
 
-  const unlinkRelease = Effect.result(unlinkE(path)).pipe(Effect.asVoid);
+  const unlinkRelease = Effect.result(
+    Effect.flatMap(FileSystem.FileSystem, (fs) => fs.remove(path, { force: true })),
+  ).pipe(Effect.asVoid);
 
   return Effect.gen(function* () {
     yield* Effect.promise(() => previous);
 
-    const made = yield* Effect.result(mkdirE(join(home, 'locks')));
+    const fs = yield* FileSystem.FileSystem;
+
+    const made = yield* Effect.result(fs.makeDirectory(join(home, 'locks'), { recursive: true }));
     if (Result.isFailure(made)) {
       return yield* Effect.die(made.failure);
     }
