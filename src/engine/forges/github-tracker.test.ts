@@ -1,5 +1,5 @@
 import { it } from '@effect/vitest';
-import { Effect, Layer, Schema } from 'effect';
+import { Effect, Layer } from 'effect';
 import * as HttpClient from 'effect/http/HttpClient';
 import * as HttpClientError from 'effect/http/HttpClientError';
 import * as HttpClientResponse from 'effect/http/HttpClientResponse';
@@ -7,7 +7,6 @@ import { describe, expect } from 'vite-plus/test';
 
 import {
   API_ROOT,
-  apiLayer,
   clientLayer,
   GitHubClientService,
   GithubApiRoot,
@@ -82,50 +81,33 @@ function transportLayer(outcomes: readonly ScriptedOutcome[]): ScriptedTransport
   return { calls, layer: Layer.succeed(HttpClient.HttpClient, client) };
 }
 
-/** The real tracker layer, backed by the real client over a scripted transport. */
+/** The real tracker layer, backed by the real client over a scripted transport. The API
+ * root override must reach the client layer itself — the client resolves it at build. */
 function trackerOver(transport: ScriptedTransport) {
   return Layer.provide(
     trackerLayer,
-    Layer.merge(
-      Layer.provide(clientLayer, transport.layer),
-      Layer.succeed(GithubApiRoot, API_ROOT),
+    Layer.provide(
+      clientLayer,
+      Layer.merge(transport.layer, Layer.succeed(GithubApiRoot, API_ROOT)),
     ),
   );
 }
 
 /**
- * One `client.json` call against the production `apiLayer` with the token scripted —
- * the service is read from the layer-built context, exactly as the composition does.
- */
-function apiCall<A>(
-  token: string,
-  json: (client: GitHubClient) => Effect.Effect<A, ApiError, never>,
-) {
-  return Effect.provide(
-    Effect.gen(function* () {
-      const client = yield* GitHubClientService;
-
-      return yield* json(client);
-    }),
-    Layer.provide(apiLayer, Layer.succeed(GithubToken, token)),
-  );
-}
-
-/**
- * One `client.json` call against `clientLayer` over a scripted transport, with the token
+ * One forge-client call against `clientLayer` over a scripted transport, with the token
  * scripted — the service is read from the layer-built context, exactly as the composition
  * does.
  */
 function apiCallOver<A>(
   transport: ScriptedTransport,
   token: string,
-  json: (client: GitHubClient) => Effect.Effect<A, ApiError, never>,
+  run: (client: GitHubClient) => Effect.Effect<A, ApiError, never>,
 ) {
   return Effect.provide(
     Effect.gen(function* () {
       const client = yield* GitHubClientService;
 
-      return yield* json(client);
+      return yield* run(client);
     }),
     Layer.provide(clientLayer, Layer.merge(transport.layer, Layer.succeed(GithubToken, token))),
   );
@@ -483,19 +465,14 @@ describe('ghTracker error taxonomy', () => {
 });
 
 describe('githubApi', () => {
-  // `fetch` to a URL with no DNS entry: the transport fails and the client wraps it as
-  // a `request failed` ApiError — the client never lets a network error escape raw.
-  it.effect('maps unreachable hosts into a request-failed ApiError', () =>
+  // The transport fails: the client wraps it as a `request failed` ApiError — the client
+  // never lets a network error escape raw.
+  it.effect('maps transport failures into a request-failed ApiError', () =>
     Effect.gen(function* () {
+      const transport = transportLayer([{ transport: 'EAI_AGAIN' }]);
+
       const error = yield* Effect.flip(
-        apiCall('gho_dummytoken', (client) =>
-          client.json({
-            method: 'GET',
-            url: 'https://api.github.invalid/repos/o/r/issues',
-            body: null,
-            schema: Schema.Unknown,
-          }),
-        ),
+        apiCallOver(transport, 'gho_dummytoken', (client) => client.listOpenIssues('o/r', 100)),
       );
 
       expect(error.status).toBe(null);
@@ -506,29 +483,15 @@ describe('githubApi', () => {
   it.effect('sends the bearer token, GitHub headers, and a body only for writes', () =>
     Effect.gen(function* () {
       const transport = transportLayer([
-        { status: 200, body: '{}' },
+        { status: 200, body: '[]' },
         { status: 200, body: '{}' },
       ]);
 
       yield* Effect.ignore(
-        apiCallOver(transport, 'gho_dummytoken', (client) =>
-          client.json({
-            method: 'GET',
-            url: 'https://api.test/repos/o/r/issues',
-            body: null,
-            schema: Schema.Struct({}),
-          }),
-        ),
+        apiCallOver(transport, 'gho_dummytoken', (client) => client.listOpenIssues('o/r', 100)),
       );
       yield* Effect.ignore(
-        apiCallOver(transport, 'gho_dummytoken', (client) =>
-          client.json({
-            method: 'POST',
-            url: 'https://api.test/repos/o/r/labels',
-            body: '{"labels":["x"]}',
-            schema: Schema.Struct({}),
-          }),
-        ),
+        apiCallOver(transport, 'gho_dummytoken', (client) => client.addLabels('o/r', 5, ['x'])),
       );
 
       expect(transport.calls[0]?.headers.get('Authorization')).toBe('Bearer gho_dummytoken');
