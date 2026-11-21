@@ -1,8 +1,7 @@
 import { basename, join } from 'node:path';
-import { Effect, Result } from 'effect';
+import { Effect, FileSystem, Option, Result } from 'effect';
 
-import { SkillPoolError } from '../../lib/errors.ts';
-import { cpE, fileExistsE, isMissing, mkdirE, readDirE } from '../../lib/fs.ts';
+import { isNotFound, SkillPoolError } from '../../lib/errors.ts';
 
 /**
  * The curated skill pool (stories 14–16): one directory per skill, one `SKILL.md`
@@ -25,15 +24,15 @@ export function poolRoot(home: string) {
 }
 
 /** The pool-root read: ENOENT is an empty pool, any other failure is a labeled error. */
-const poolSkills = (root: string) =>
+const poolSkills = (fs: FileSystem.FileSystem, root: string) =>
   Effect.gen(function* () {
-    const read = yield* Effect.result(readDirE(root));
+    const read = yield* Effect.result(fs.readDirectoryEntries(root));
 
     if (Result.isSuccess(read)) {
       return read.success;
     }
 
-    if (isMissing(read.failure)) {
+    if (isNotFound(read.failure)) {
       return [];
     }
 
@@ -43,17 +42,20 @@ const poolSkills = (root: string) =>
   });
 
 /** All pool skills, name order. The pool root itself is optional — an empty pool is valid. */
-export const listPoolSkills = (root: string): Effect.Effect<PoolSkill[], SkillPoolError> =>
+export const listPoolSkills = (
+  root: string,
+): Effect.Effect<PoolSkill[], SkillPoolError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
-    const entries = yield* poolSkills(root);
+    const fs = yield* FileSystem.FileSystem;
+    const entries = yield* poolSkills(fs, root);
 
     // The per-skill SKILL.md probes are pre-wrapped to an infallible match (a missing file
     // is just "not a skill"), so the fan-out's error channel is empty by construction.
     const candidates = yield* Effect.all(
       entries
-        .filter((entry) => entry.isDirectory())
+        .filter((entry) => entry.type === 'Directory')
         .map((entry) =>
-          Effect.map(fileExistsE(join(root, entry.name, 'SKILL.md')), (hasSkill) =>
+          Effect.map(hasFile(fs, join(root, entry.name, 'SKILL.md')), (hasSkill) =>
             hasSkill ? [{ name: entry.name, dir: join(root, entry.name) }] : [],
           ),
         ),
@@ -63,12 +65,22 @@ export const listPoolSkills = (root: string): Effect.Effect<PoolSkill[], SkillPo
     return candidates.flat().sort((a, b) => a.name.localeCompare(b.name));
   });
 
+/** The shared stat probe under the `is*` read: missing/unreadable paths read as not-a-kind. */
+function hasFile(fs: FileSystem.FileSystem, path: string) {
+  return Effect.map(Effect.option(fs.stat(path)), (info) =>
+    Option.isSome(info) && info.value.type === 'File',
+  );
+}
+
 /**
  * Fail-fast check that every declared skill exists in the pool — a flow naming a skill the
  * pool does not have stops the session before any tracker claim or worktree is created,
  * naming the fix. Undeclared pool skills are fine: the pool is curated once, flows enroll.
  */
-export const checkDeclaredSkills = (root: string, declared: readonly string[]) =>
+export const checkDeclaredSkills = (
+  root: string,
+  declared: readonly string[],
+): Effect.Effect<void, SkillPoolError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const pool = yield* listPoolSkills(root);
     const available = new Set(pool.map((skill) => skill.name));
@@ -99,12 +111,13 @@ export const stageSkills = (input: {
   readonly worktreePath: string;
   readonly agent: 'pi' | 'claude';
   readonly declared: readonly string[];
-}) =>
+}): Effect.Effect<string[], SkillPoolError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const pool = yield* listPoolSkills(input.poolRoot);
 
     const staging = join(input.worktreePath, STAGING_PATH_BY_AGENT[input.agent]);
-    const made = yield* Effect.result(mkdirE(staging));
+    const made = yield* Effect.result(fs.makeDirectory(staging, { recursive: true }));
     if (Result.isFailure(made)) {
       return yield* new SkillPoolError({
         message: `could not create the skill staging directory ${staging}: ${String(made.failure)}`,
@@ -124,7 +137,7 @@ export const stageSkills = (input: {
       }
 
       const copied = yield* Effect.result(
-        cpE({ path: skill.dir, to: join(staging, basename(skill.dir)) }),
+        fs.copy(skill.dir, join(staging, basename(skill.dir)), { overwrite: true }),
       );
       if (Result.isFailure(copied)) {
         return yield* new SkillPoolError({

@@ -1,7 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, FileSystem } from 'effect';
+import { NodeFileSystem } from '@effect/platform-node';
 import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
 
 import {
@@ -13,6 +14,11 @@ import {
 } from './skills.ts';
 
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+
+/** The pool reads ride the platform FileSystem service, provided here for every test. */
+const withFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
+  Effect.provide(effect, NodeFileSystem.layer);
+
 let root: string;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'seraphim-skills-'));
@@ -32,16 +38,16 @@ describe('listPoolSkills', () => {
     Effect.gen(function* () {
       yield* Effect.promise(() => seedSkill('verify'));
       yield* Effect.promise(() => seedSkill('implement'));
-      const pool = yield* listPoolSkills(poolRoot(root));
+      const pool = yield* withFs(listPoolSkills(poolRoot(root)));
       expect(pool.map((skill) => skill.name)).toEqual(['implement', 'verify']);
     }),
   );
   it.effect('ignores directories without a SKILL.md and reads an absent pool as empty', () =>
     Effect.gen(function* () {
       yield* Effect.promise(() => mkdir(join(root, 'skills', 'halfbuilt'), { recursive: true }));
-      const empty = yield* listPoolSkills(poolRoot(root));
+      const empty = yield* withFs(listPoolSkills(poolRoot(root)));
       expect(empty).toEqual([]);
-      const absent = yield* listPoolSkills(join(root, 'no-such-home', 'skills'));
+      const absent = yield* withFs(listPoolSkills(join(root, 'no-such-home', 'skills')));
       expect(absent).toEqual([]);
     }),
   );
@@ -50,7 +56,9 @@ describe('checkDeclaredSkills', () => {
   it.effect('fails fast naming the missing skill and the pool fix', () =>
     Effect.gen(function* () {
       yield* Effect.promise(() => seedSkill('implement'));
-      const error = yield* Effect.flip(checkDeclaredSkills(poolRoot(root), ['implement', 'tdd']));
+      const error = yield* Effect.flip(
+        withFs(checkDeclaredSkills(poolRoot(root), ['implement', 'tdd'])),
+      );
       expect(error.message).toContain('tdd');
       expect(error.message).toContain(poolRoot(root));
       expect(error.message).toContain('implement');
@@ -60,12 +68,12 @@ describe('checkDeclaredSkills', () => {
     Effect.gen(function* () {
       yield* Effect.promise(() => seedSkill('implement'));
       yield* Effect.promise(() => seedSkill('tdd'));
-      yield* checkDeclaredSkills(poolRoot(root), ['tdd', 'implement']);
+      yield* withFs(checkDeclaredSkills(poolRoot(root), ['tdd', 'implement']));
     }),
   );
   it.effect('accepts an explicitly empty declaration over any pool', () =>
     Effect.gen(function* () {
-      yield* checkDeclaredSkills(poolRoot(root), []);
+      yield* withFs(checkDeclaredSkills(poolRoot(root), []));
     }),
   );
 });
@@ -75,12 +83,14 @@ describe('stageSkills', () => {
       const worktree = join(root, 'worktree');
       yield* Effect.promise(() => mkdir(worktree, { recursive: true }));
       yield* Effect.promise(() => seedSkill('implement'));
-      yield* stageSkills({
+      yield* withFs(
+        stageSkills({
         poolRoot: poolRoot(root),
         worktreePath: worktree,
         agent: 'pi',
         declared: ['implement'],
-      });
+      }),
+      );
       expect(
         yield* Effect.promise(() =>
           readFile(join(worktree, STAGING_PATH_BY_AGENT['pi'], 'implement', 'SKILL.md'), 'utf8'),
@@ -100,12 +110,14 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => mkdir(stale, { recursive: true }));
       yield* Effect.promise(() => writeFile(join(stale, 'SKILL.md'), 'stale body'));
       yield* Effect.promise(() => seedSkill('tdd', 'fresh body'));
-      yield* stageSkills({
+      yield* withFs(
+        stageSkills({
         poolRoot: poolRoot(root),
         worktreePath: worktree,
         agent: 'claude',
         declared: ['tdd'],
-      });
+      }),
+      );
       expect(yield* Effect.promise(() => readFile(join(stale, 'SKILL.md'), 'utf8'))).toContain(
         'fresh body',
       );
@@ -115,12 +127,14 @@ describe('stageSkills', () => {
     Effect.gen(function* () {
       const worktree = join(root, 'worktree');
       yield* Effect.promise(() => mkdir(worktree, { recursive: true }));
-      const staged = yield* stageSkills({
+      const staged = yield* withFs(
+        stageSkills({
         poolRoot: poolRoot(root),
         worktreePath: worktree,
         agent: 'pi',
         declared: [],
-      });
+      }),
+      );
       expect(staged).toEqual([]);
       const entries = yield* Effect.promise(() =>
         readdir(join(worktree, STAGING_PATH_BY_AGENT['pi'])),
@@ -135,7 +149,7 @@ describe('listPoolSkills hostile pool', () => {
       // A file at the pool path: readdir fails with ENOTDIR, which is not the absent case.
       const notADir = join(root, 'skills');
       yield* Effect.promise(() => writeFile(notADir, 'not a directory'));
-      const error = yield* Effect.flip(listPoolSkills(poolRoot(root)));
+      const error = yield* Effect.flip(withFs(listPoolSkills(poolRoot(root))));
       expect(error.message).toContain('unreadable skill pool');
     }),
   );

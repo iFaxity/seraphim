@@ -1,9 +1,8 @@
-import { Context, Effect, Layer } from 'effect';
+import { Context, Effect, FileSystem, Layer, Option } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 
 import { cliRun, type ProcessSpawner } from '../../lib/cli-run.ts';
 import { GitError } from '../../lib/errors.ts';
-import { dirExistsE } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
 import { GitService } from '../core/services.ts';
 
@@ -46,11 +45,14 @@ function checkedOr(label: string, run: GitRun): Effect.Effect<GitRun, GitError> 
 /** Removes one worktree dir and its branch ref; a missing dir is nothing to remove. */
 function removeWorktree(
   runner: GitRunner,
+  fs: FileSystem.FileSystem,
   input: { readonly repoPath: string; readonly path: string },
 ): Effect.Effect<void, GitError> {
   return Effect.gen(function* () {
     // An already-gone worktree is nothing to remove — prune stays idempotent on a rerun.
-    if (!(yield* dirExistsE(input.path))) {
+    const stat = yield* Effect.option(fs.stat(input.path));
+
+    if (Option.isNone(stat) || stat.value.type !== 'Directory') {
       return;
     }
 
@@ -82,7 +84,7 @@ function deleteBranch(
  * Real `Git` adapter. Every operation maps one git invocation to `void` (the receipt-visible
  * state is the filesystem, not git's stdout) except `defaultBranch`, which reads `origin/HEAD`.
  */
-export function gitAdapter(runner: GitRunner) {
+export function gitAdapter(runner: GitRunner, fs: FileSystem.FileSystem) {
   return {
     defaultBranch: (repoPath: string) =>
       Effect.gen(function* () {
@@ -133,7 +135,7 @@ export function gitAdapter(runner: GitRunner) {
         yield* checkedOr('worktree creation failed', run);
       }),
     removeWorktree: (input: { readonly repoPath: string; readonly path: string }) =>
-      removeWorktree(runner, input),
+      removeWorktree(runner, fs, input),
     deleteBranch: (input: { readonly repoPath: string; readonly branch: string }) =>
       deleteBranch(runner, input),
     probeRemote: (url: string) =>
@@ -168,8 +170,17 @@ export const gitCliLayer: Layer.Layer<
   ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(processGit(spawner))),
 );
 
-/** The `Git` adapter wired over whatever runner the context provides. */
-export const gitLayer: Layer.Layer<GitService, never, GitRunnerService> = Layer.effect(
+/** The `Git` adapter wired over whatever runner and filesystem the context provides. */
+export const gitLayer: Layer.Layer<
   GitService,
-  GitRunnerService.use((runner) => Effect.succeed(gitAdapter(runner))),
+  never,
+  GitRunnerService | FileSystem.FileSystem
+> = Layer.effect(
+  GitService,
+  Effect.gen(function* () {
+    const runner = yield* GitRunnerService;
+    const fs = yield* FileSystem.FileSystem;
+
+    return gitAdapter(runner, fs);
+  }),
 );

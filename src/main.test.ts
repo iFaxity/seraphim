@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
 import { Cause, Effect, Exit, Layer } from 'effect';
+import { NodeFileSystem } from '@effect/platform-node';
 import { afterAll, describe, expect } from 'vite-plus/test';
 
 import { engine } from './engine/core/engine.ts';
@@ -38,6 +39,7 @@ function testLayer(
     FakeNotifier.layer(),
     FakeRuntime.layer(),
     Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
+    NodeFileSystem.layer,
   );
 
   if (docker == null) {
@@ -99,6 +101,7 @@ describe('engine', () => {
         FakeGit.layer(),
         FakeNotifier.layer(),
         FakeRuntime.layer(),
+        NodeFileSystem.layer,
       ) as Layer.Layer<CommandServices>;
       const exit = yield* Effect.exit(Effect.provide(engine(['prune']), homeless));
       expect(Exit.isFailure(exit)).toBe(true);

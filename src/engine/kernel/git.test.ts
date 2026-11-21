@@ -1,13 +1,17 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, FileSystem } from 'effect';
+import { NodeFileSystem } from '@effect/platform-node';
 import { describe, expect } from 'vite-plus/test';
 
 import { gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
 import { GitError } from '../../lib/errors.ts';
 import { mkdtemp } from 'node:fs/promises';
+
+/** The real fs the worktree probes run against — tests seed the tree directly. */
+const fs = Effect.runSync(Effect.provide(FileSystem.FileSystem, NodeFileSystem.layer));
 
 /** Scripts git's behavior per invocation pattern — the same contract the docker adapter fakes. */
 function fakeRunner(script: (args: readonly string[]) => GitRun): GitRunner & {
@@ -51,7 +55,7 @@ describe('gitAdapter.push', () => {
   it.effect('pushes the branch to origin from the session clone directory', () =>
     Effect.gen(function* () {
       const runner = pushRunner(() => run(0));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.push({ repoPath: '/home/x/repos/widgets', branch: 'seraphim/widgets/7-1' });
 
@@ -63,7 +67,7 @@ describe('gitAdapter.push', () => {
 
   it.effect('surfaces push failures with git diagnostics under the push label', () =>
     Effect.gen(function* () {
-      const git = gitAdapter(pushRunner(() => run(128, '', 'fatal: no upstream configured')));
+      const git = gitAdapter(pushRunner(() => run(128, '', 'fatal: no upstream configured')), fs);
 
       const error = yield* Effect.flip(
         git.push({ repoPath: '/x', branch: 'seraphim/widgets/7-1' }),
@@ -79,7 +83,7 @@ describe('gitAdapter.probeRemote', () => {
   it.effect('passes a ls-remote ping and succeeds on exit 0', () =>
     Effect.gen(function* () {
       const runner = fakeRunner(() => run(0, '', ''));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.probeRemote('https://example.invalid/acme/widgets.git');
 
@@ -93,6 +97,7 @@ describe('gitAdapter.probeRemote', () => {
     Effect.gen(function* () {
       const git = gitAdapter(
         fakeRunner(() => run(128, '', 'fatal: unable to access: could not resolve host')),
+        fs,
       );
 
       const error = yield* Effect.flip(git.probeRemote('https://down.invalid/repo.git'));
@@ -107,7 +112,7 @@ describe('gitAdapter.cloneIfMissing', () => {
   it.effect('clones when the target directory has no work tree', () =>
     Effect.gen(function* () {
       const runner = fakeRunner((args) => (args[0] == 'rev-parse' ? run(128) : run(0)));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.cloneIfMissing('/home/x/repos/widgets', 'https://example.invalid/widgets.git');
 
@@ -121,7 +126,7 @@ describe('gitAdapter.cloneIfMissing', () => {
   it.effect('skips the clone when the target already has a work tree', () =>
     Effect.gen(function* () {
       const runner = fakeRunner((args) => (args[0] == 'rev-parse' ? run(0, 'true\n') : run(1)));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.cloneIfMissing('/home/x/repos/widgets', 'https://example.invalid/widgets.git');
 
@@ -133,7 +138,7 @@ describe('gitAdapter.cloneIfMissing', () => {
 
   it.effect('surfaces clone stderr on failure', () =>
     Effect.gen(function* () {
-      const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: repository not found')));
+      const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: repository not found')), fs);
 
       const error = yield* Effect.flip(git.cloneIfMissing('/x', 'https://bad.invalid/r.git'));
 
@@ -147,13 +152,13 @@ describe('gitAdapter.pull', () => {
   it.effect('pulls fast-forward only and passes failures through', () =>
     Effect.gen(function* () {
       const runner = fakeRunner(() => run(0));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.pull('/home/x/repos/widgets');
 
       expect(runner.invocations).toEqual([['pull', '--ff-only']]);
 
-      const broken = gitAdapter(fakeRunner(() => run(1, '', 'error: cannot fast-forward')));
+      const broken = gitAdapter(fakeRunner(() => run(1, '', 'error: cannot fast-forward')), fs);
 
       const error = yield* Effect.flip(broken.pull('/x'));
 
@@ -167,7 +172,7 @@ describe('gitAdapter.createWorktree', () => {
   it.effect('creates a branch and worktree off origin/<base>', () =>
     Effect.gen(function* () {
       const runner = fakeRunner(() => run(0));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.createWorktree({
         repoPath: '/home/x/repos/widgets',
@@ -193,6 +198,7 @@ describe('gitAdapter.createWorktree', () => {
     Effect.gen(function* () {
       const git = gitAdapter(
         fakeRunner(() => run(128, '', "fatal: a branch named 'x' already exists")),
+        fs,
       );
 
       const error = yield* Effect.flip(
@@ -208,7 +214,7 @@ describe('gitAdapter.createWorktree', () => {
 describe('gitAdapter.defaultBranch', () => {
   it.effect('reads origin/HEAD and strips the remote prefix per the git contract', () =>
     Effect.gen(function* () {
-      const git = gitAdapter(fakeRunner(() => run(0, 'origin/trunk\n')));
+      const git = gitAdapter(fakeRunner(() => run(0, 'origin/trunk\n')), fs);
 
       const branch = yield* git.defaultBranch('/home/x/repos/widgets');
 
@@ -220,6 +226,7 @@ describe('gitAdapter.defaultBranch', () => {
     Effect.gen(function* () {
       const git = gitAdapter(
         fakeRunner(() => run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref')),
+        fs,
       );
 
       const error = yield* Effect.flip(git.defaultBranch('/x'));
@@ -235,7 +242,7 @@ describe('gitAdapter.removeWorktree', () => {
     Effect.gen(function* () {
       const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
       const runner = fakeRunner(() => run(0));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.removeWorktree({ repoPath: '/repos/widgets', path: worktree });
 
@@ -246,7 +253,7 @@ describe('gitAdapter.removeWorktree', () => {
   it.effect('skips the git call entirely when the worktree directory is already gone', () =>
     Effect.gen(function* () {
       const runner = fakeRunner(() => run(0));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       // A plain missing path — removeWorktree consults the filesystem before git.
       yield* git.removeWorktree({ repoPath: '/repos/widgets', path: '/no/such/dir' });
@@ -258,7 +265,7 @@ describe('gitAdapter.removeWorktree', () => {
   it.effect('surfaces git failures with diagnostics', () =>
     Effect.gen(function* () {
       const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
-      const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
+      const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')), fs);
 
       const error = yield* Effect.flip(
         git.removeWorktree({ repoPath: '/repos/widgets', path: worktree }),
@@ -276,7 +283,7 @@ describe('gitAdapter.deleteBranch', () => {
       const runner = fakeRunner((args) =>
         args[0] == 'branch' && args[1] == '--list' ? run(0, '  seraphim/widgets/7-1\n') : run(0),
       );
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
 
@@ -290,7 +297,7 @@ describe('gitAdapter.deleteBranch', () => {
   it.effect('skips the deletion when the branch no longer exists', () =>
     Effect.gen(function* () {
       const runner = fakeRunner(() => run(0, ''));
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       yield* git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' });
 
@@ -305,7 +312,7 @@ describe('gitAdapter.deleteBranch', () => {
           ? run(0, '  seraphim/widgets/7-1\n')
           : run(1, '', 'error: not fully merged'),
       );
-      const git = gitAdapter(runner);
+      const git = gitAdapter(runner, fs);
 
       const error = yield* Effect.flip(
         git.deleteBranch({ repoPath: '/repos/widgets', branch: 'seraphim/widgets/7-1' }),

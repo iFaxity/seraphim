@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from '@effect/vitest';
 import { Effect } from 'effect';
+import { NodeFileSystem } from '@effect/platform-node';
 import { describe, expect } from 'vite-plus/test';
 
 import { homeDeps } from './bootstrap.ts';
@@ -9,23 +10,27 @@ import { homeDeps } from './bootstrap.ts';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 
 /** Runs `homeDeps` against a throwaway home, restoring the ambient `SERAPHIM_HOME`. */
-const withHome = async (contents: string | null): Promise<string> => {
-  const home = await mkdtemp(join(tmpdir(), 'seraphim-env-'));
-  if (contents != null) {
-    await writeFile(join(home, '.env'), `${contents}\n`);
-  }
-  const previous = process.env['SERAPHIM_HOME'];
-  process.env['SERAPHIM_HOME'] = home;
-  try {
-    return homeDeps().token;
-  } finally {
-    if (previous === undefined) {
-      delete process.env['SERAPHIM_HOME'];
-    } else {
-      process.env['SERAPHIM_HOME'] = previous;
+const withHome = (contents: string | null) =>
+  Effect.gen(function* () {
+    const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-env-')));
+    if (contents != null) {
+      yield* Effect.promise(() => writeFile(join(home, '.env'), `${contents}\n`));
     }
-  }
-};
+    const previous = process.env['SERAPHIM_HOME'];
+    process.env['SERAPHIM_HOME'] = home;
+    const deps = yield* Effect.provide(homeDeps, NodeFileSystem.layer).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previous === undefined) {
+            delete process.env['SERAPHIM_HOME'];
+          } else {
+            process.env['SERAPHIM_HOME'] = previous;
+          }
+        }),
+      ),
+    );
+    return deps.token;
+  });
 
 describe('homeDeps dotenv boundary', () => {
   const envCases = [
@@ -39,14 +44,14 @@ describe('homeDeps dotenv boundary', () => {
   for (const [name, contents, expected] of envCases) {
     it.effect(name, () =>
       Effect.gen(function* () {
-        expect(yield* Effect.promise(() => withHome(contents))).toBe(expected);
+        expect(yield* withHome(contents)).toBe(expected);
       }),
     );
   }
 
   it.effect('a missing .env file yields an empty token', () =>
     Effect.gen(function* () {
-      expect(yield* Effect.promise(() => withHome(null))).toBe('');
+      expect(yield* withHome(null)).toBe('');
     }),
   );
 });
