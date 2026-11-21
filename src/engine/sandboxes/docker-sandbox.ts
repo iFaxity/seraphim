@@ -301,7 +301,9 @@ export function missingDockerfile(repo: string, dir: string) {
  * skipped rather than failing the hash: a lockfile appearing or disappearing is exactly the
  * content change the tag exists to track.
  */
-export function imageTagFor(dir: string): Effect.Effect<Option.Option<string>, never, FileSystem.FileSystem> {
+export function imageTagFor(
+  dir: string,
+): Effect.Effect<Option.Option<string>, never, FileSystem.FileSystem> {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const dockerfilePath = join(dir, 'Dockerfile');

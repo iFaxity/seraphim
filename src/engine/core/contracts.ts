@@ -1,5 +1,5 @@
-import { type Effect } from 'effect/Effect';
 import { FileSystem } from 'effect';
+import { type Effect } from 'effect/Effect';
 import { type ChildProcessSpawner } from 'effect/process';
 
 import {
@@ -163,10 +163,7 @@ export type AgentRuntime = {
  */
 export type Git = {
   readonly defaultBranch: (repoPath: string) => Effect<string, GitError, SpawnContext>;
-  readonly cloneIfMissing: (
-    repoPath: string,
-    url: string,
-  ) => Effect<void, GitError, SpawnContext>;
+  readonly cloneIfMissing: (repoPath: string, url: string) => Effect<void, GitError, SpawnContext>;
   readonly pull: (repoPath: string) => Effect<void, GitError, SpawnContext>;
   readonly createWorktree: (input: {
     readonly repoPath: string;

@@ -168,9 +168,6 @@ const gitCliLayer: Layer.Layer<GitRunnerService> = Layer.succeed(GitRunnerServic
 /** The `Git` adapter: git CLI wiring fused internally. The layer itself is self-contained;
  * the spawner and filesystem ride the adapter operations' R (honest, per the contract). */
 export const gitLayer: Layer.Layer<GitService> = Layer.provide(
-  Layer.effect(
-    GitService,
-    Effect.map(GitRunnerService, gitAdapter),
-  ),
+  Layer.effect(GitService, Effect.map(GitRunnerService, gitAdapter)),
   gitCliLayer,
 );

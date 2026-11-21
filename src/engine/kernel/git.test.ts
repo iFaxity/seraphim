@@ -16,11 +16,7 @@ import { mkdtemp } from 'node:fs/promises';
  * every case provides the Node driver itself — the tests seed the tree it probes.
  */
 const withStack = <A, E>(
-  effect: Effect.Effect<
-    A,
-    E,
-    FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
-  >,
+  effect: Effect.Effect<A, E, FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner>,
 ) => Effect.provide(effect, NodeServices.layer);
 
 /** Scripts git's behavior per invocation pattern — the same contract the docker adapter fakes. */
@@ -256,7 +252,9 @@ describe('gitAdapter.defaultBranch', () => {
     withStack(
       Effect.gen(function* () {
         const git = gitAdapter(
-          fakeRunner(() => run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref')),
+          fakeRunner(() =>
+            run(128, '', 'fatal: ref refs/remotes/origin/HEAD is not a symbolic ref'),
+          ),
         );
 
         const error = yield* Effect.flip(git.defaultBranch('/x'));

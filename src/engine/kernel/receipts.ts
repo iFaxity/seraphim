@@ -198,11 +198,7 @@ const listOneSession = (
   });
 
 /** One repo directory into session listings, or an empty array when it is unreadable. */
-const listRepoSessions = (
-  sessionsRoot: string,
-  repoName: string,
-  skipped: UnreadableCount,
-) =>
+const listRepoSessions = (sessionsRoot: string, repoName: string, skipped: UnreadableCount) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const dirs = yield* Effect.result(fs.readDirectoryEntries(join(sessionsRoot, repoName)));
@@ -404,10 +400,7 @@ export const writeReceipt = (
  * the raw fs `Error`: the callers own the labeled `ReceiptWriteError` mapping with their
  * per-site messages.
  */
-const writeAll = (
-  dir: string,
-  files: readonly { name: string; body: string }[],
-) =>
+const writeAll = (dir: string, files: readonly { name: string; body: string }[]) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const results = yield* Effect.all(

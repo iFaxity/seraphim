@@ -8,9 +8,7 @@ import { Effect, FileSystem, Option } from 'effect';
  */
 
 /** The path exists and is a regular file (false when absent, unreadable, or another kind). */
-export const fileExists = (
-  path: string,
-): Effect.Effect<boolean, never, FileSystem.FileSystem> =>
+export const fileExists = (path: string): Effect.Effect<boolean, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const info = yield* Effect.option(fs.stat(path));
@@ -19,9 +17,7 @@ export const fileExists = (
   });
 
 /** The path exists and is a directory (false when absent, unreadable, or another kind). */
-export const dirExists = (
-  path: string,
-): Effect.Effect<boolean, never, FileSystem.FileSystem> =>
+export const dirExists = (path: string): Effect.Effect<boolean, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const info = yield* Effect.option(fs.stat(path));

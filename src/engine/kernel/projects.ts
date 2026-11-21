@@ -213,7 +213,11 @@ const seedSlots = (dir: string, repo: string) =>
 /** Reads and schema-checks one `project.json`. Invalid shape is a ProjectError; never throws. */
 const readRecord = (
   dir: string,
-): Effect.Effect<Result.Result<ProjectRecord, ProjectError | PlatformError>, never, FileSystem.FileSystem> =>
+): Effect.Effect<
+  Result.Result<ProjectRecord, ProjectError | PlatformError>,
+  never,
+  FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const read = yield* Effect.result(fs.readFileString(`${dir}/${RECORD_FILE}`));

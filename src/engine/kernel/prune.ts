@@ -256,10 +256,7 @@ const readRepoOrphans = (
  * is optional — a factory that has never run a session has nothing to collect, so its
  * absence reads as an empty list; any other read failure is a real failure and propagates.
  */
-const listOrphanWorktrees = (
-  worktreesRoot: string,
-  isOrphan: (path: string) => boolean,
-) =>
+const listOrphanWorktrees = (worktreesRoot: string, isOrphan: (path: string) => boolean) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const repos = yield* Effect.result(fs.readDirectoryEntries(worktreesRoot));

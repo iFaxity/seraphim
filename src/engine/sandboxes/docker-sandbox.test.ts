@@ -17,11 +17,7 @@ import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
  * every case provides the Node driver itself — the tests seed the tree it probes.
  */
 const withStack = <A, E>(
-  effect: Effect.Effect<
-    A,
-    E,
-    FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
-  >,
+  effect: Effect.Effect<A, E, FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner>,
 ) => Effect.provide(effect, NodeServices.layer);
 
 /** The scripted handle one scripted spawn returns: instant exit with fixed streams. */
@@ -70,9 +66,7 @@ export function fakeDockerRunner(
   return {
     invocations,
     run: (args: readonly string[]) =>
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)(
-        cliDocker.run(args),
-      ),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)(cliDocker.run(args)),
   } satisfies DockerRunner & {
     invocations: string[][];
   };

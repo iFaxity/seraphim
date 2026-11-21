@@ -1,9 +1,8 @@
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, Fiber, Layer } from 'effect';
 import { TestClock } from 'effect/testing';
 import { describe, expect } from 'vite-plus/test';
-
-import { NodeServices } from '@effect/platform-node';
 
 import { FakeGit } from './git.ts';
 import { FakeNotifier } from './notifier.ts';

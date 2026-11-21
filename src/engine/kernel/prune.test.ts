@@ -195,10 +195,7 @@ describe('planPrune', () => {
         pruneLayer(fakeGit()),
       );
 
-      const someTag = yield* Effect.provide(
-        imageTagFor(projectDir),
-        NodeServices.layer,
-      );
+      const someTag = yield* Effect.provide(imageTagFor(projectDir), NodeServices.layer);
 
       if (Option.isNone(someTag)) {
         throw new Error('expected a tag for the seeded project');
