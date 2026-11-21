@@ -154,7 +154,7 @@ export function gitAdapter(runner: GitRunner, fs: FileSystem.FileSystem) {
 }
 
 /** The internal runner key — the adapter owns it; the composition root provides the CLI impl. */
-class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
+export class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
   'seraphim/kernel/GitRunner',
 ) {}
 
