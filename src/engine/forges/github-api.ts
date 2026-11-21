@@ -1,6 +1,7 @@
 import { Context, Effect, Layer, Option, Schema } from 'effect';
 import { FetchHttpClient, Headers, HttpBody, HttpClient, HttpClientRequest } from 'effect/http';
 import { schemaBodyJson } from 'effect/http/HttpClientResponse';
+
 import { ApiError, describeError } from '../../lib/errors.ts';
 
 /** The GitHub REST API root — every adapter URL composes from it, repo-scoped. */
