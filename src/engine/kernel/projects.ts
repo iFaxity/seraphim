@@ -64,19 +64,23 @@ const SLOTS = [
 type Slot = { readonly name: string; readonly body: string };
 
 /** Reads one project template's body; an unreadable template is a defect (fail-fast seeding). */
-function templateBody(fs: FileSystem.FileSystem, file: string) {
-  return fs.readFileString(
-    fileURLToPath(new URL(`../../../templates/project/${file}`, import.meta.url)),
-  );
+function templateBody(file: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+
+    return yield* fs.readFileString(
+      fileURLToPath(new URL(`../../../templates/project/${file}`, import.meta.url)),
+    );
+  });
 }
 
 /** Reads the slot templates once per registration — the old module-load read, re-homed onto
  * the service. Unreadable templates fail fast as a defect instead of seeding empty slots. */
-const projectSlots = (fs: FileSystem.FileSystem) =>
+const projectSlots = () =>
   Effect.gen(function* () {
     return yield* Effect.all(
       SLOTS.map((slot) =>
-        Effect.map(templateBody(fs, slot.file).pipe(Effect.orDie), (body): Slot => ({
+        Effect.map(templateBody(slot.file).pipe(Effect.orDie), (body): Slot => ({
           name: slot.name,
           body,
         })),
@@ -92,8 +96,9 @@ const projectSlots = (fs: FileSystem.FileSystem) =>
  */
 const HOME_TEMPLATES = fileURLToPath(new URL('../../../templates/home/', import.meta.url));
 
-const seedHome = (fs: FileSystem.FileSystem, home: string) =>
+const seedHome = (home: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const entries = yield* fs.readDirectoryEntries(HOME_TEMPLATES);
 
     for (const entry of entries) {
@@ -143,8 +148,9 @@ function checkedRepo(url: string, name: string | undefined) {
  * Creates the project directory and seeds the home ignore, before anything else touches
  * the filesystem. The first failure wins — nothing further is seeded.
  */
-const makeDirAndSeedHome = (fs: FileSystem.FileSystem, home: string, repo: string) =>
+const makeDirAndSeedHome = (home: string, repo: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const dir = projectPath(home, repo);
 
     const made = yield* Effect.result(fs.makeDirectory(dir, { recursive: true }));
@@ -154,7 +160,7 @@ const makeDirAndSeedHome = (fs: FileSystem.FileSystem, home: string, repo: strin
       });
     }
 
-    const seeded = yield* Effect.result(seedHome(fs, home));
+    const seeded = yield* Effect.result(seedHome(home));
     if (Result.isFailure(seeded)) {
       return yield* new ProjectError({
         message: `could not seed the home directory ${home}: ${String(seeded.failure)}`,
@@ -170,12 +176,12 @@ const makeDirAndSeedHome = (fs: FileSystem.FileSystem, home: string, repo: strin
  * aggregate fails only on a real write error.
  */
 const seedSlot = (
-  fs: FileSystem.FileSystem,
   dir: string,
   repo: string,
   slot: { readonly name: string; readonly body: string },
 ) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const wrote = yield* Effect.result(
       fs.writeFileString(`${dir}/${slot.name}`, slot.body, { flag: 'wx' }),
     );
@@ -194,22 +200,26 @@ const seedSlot = (
  * content — skipped, never clobbered (`wx`). First failure wins: one failed slot fails the
  * seed and nothing further is written.
  */
-const seedSlots = (fs: FileSystem.FileSystem, dir: string, repo: string) =>
+const seedSlots = (dir: string, repo: string) =>
   Effect.gen(function* () {
     // `Effect.all` fails fast — the first slot failure fails the whole seed, so every
     // element of the result is a seeded path by construction.
     return yield* Effect.all(
-      (yield* projectSlots(fs)).map((slot) => seedSlot(fs, dir, repo, slot)),
+      (yield* projectSlots()).map((slot) => seedSlot(dir, repo, slot)),
       { concurrency: 'unbounded' },
     );
   });
 
 /** Reads and schema-checks one `project.json`. Invalid shape is a ProjectError; never throws. */
 const readRecord = (
-  fs: FileSystem.FileSystem,
   dir: string,
-): Effect.Effect<Result.Result<ProjectRecord, ProjectError | PlatformError>> =>
+): Effect.Effect<
+  Result.Result<ProjectRecord, ProjectError | PlatformError>,
+  never,
+  FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const read = yield* Effect.result(fs.readFileString(`${dir}/${RECORD_FILE}`));
 
     if (Result.isFailure(read)) {
@@ -242,9 +252,9 @@ const readRecord = (
   });
 
 /** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
-const requireRegistered = (fs: FileSystem.FileSystem, home: string, repo: string) =>
+const requireRegistered = (home: string, repo: string) =>
   Effect.gen(function* () {
-    const read = yield* readRecord(fs, projectPath(home, repo));
+    const read = yield* readRecord(projectPath(home, repo));
 
     if (Result.isSuccess(read)) {
       return read.success;
@@ -262,8 +272,9 @@ const requireRegistered = (fs: FileSystem.FileSystem, home: string, repo: string
   });
 
 /** Persists one record atomically: temp file then rename, so readers never see a torn row. */
-const writeRecord = (fs: FileSystem.FileSystem, dir: string, record: ProjectRecord) =>
+const writeRecord = (dir: string, record: ProjectRecord) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const tmpPath = `${dir}/${RECORD_FILE}.tmp`;
 
     const wrote = yield* Effect.result(
@@ -293,7 +304,6 @@ const writeRecord = (fs: FileSystem.FileSystem, dir: string, record: ProjectReco
  */
 export const registerProject = (url: string, name?: string) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
     const home = yield* HomeService;
     const git = yield* GitService;
     const repo = yield* checkedRepo(url, name);
@@ -307,9 +317,9 @@ export const registerProject = (url: string, name?: string) =>
     }
 
     const dir = projectPath(home.home, repo);
-    yield* makeDirAndSeedHome(fs, home.home, repo);
+    yield* makeDirAndSeedHome(home.home, repo);
 
-    const existing = yield* readRecord(fs, dir);
+    const existing = yield* readRecord(dir);
 
     // Reactivation path: an inactive record re-registers with the new remote; an active one
     // is refused so a changed URL can never silently swap under a working project.
@@ -319,10 +329,10 @@ export const registerProject = (url: string, name?: string) =>
       });
     }
 
-    const artifacts = yield* seedSlots(fs, dir, repo);
+    const artifacts = yield* seedSlots(dir, repo);
 
     const record: ProjectRecord = { repo, remote: url, state: 'active', notify: null };
-    const wrote = yield* writeRecord(fs, dir, record);
+    const wrote = yield* writeRecord(dir, record);
 
     return { record: wrote, reactivated: Result.isSuccess(existing), artifacts };
   });
@@ -330,10 +340,9 @@ export const registerProject = (url: string, name?: string) =>
 /** Loads one project record. An absent record fails fast naming the register fix. */
 export const loadProject = (repo: string) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
     const home = yield* HomeService;
 
-    return yield* requireRegistered(fs, home.home, repo);
+    return yield* requireRegistered(home.home, repo);
   });
 
 /** Marks one project inactive in place — the record stays, nothing is deleted. */
@@ -341,9 +350,8 @@ export const deactivateProject = (
   repo: string,
 ): Effect.Effect<{ readonly repo: string }, ProjectError, HomeService | FileSystem.FileSystem> =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
     const home = yield* HomeService;
-    const read = yield* requireRegistered(fs, home.home, repo);
+    const read = yield* requireRegistered(home.home, repo);
 
     if (read.state == 'inactive') {
       return yield* new ProjectError({ message: `project '${repo}' is already inactive` });
@@ -356,7 +364,7 @@ export const deactivateProject = (
       notify: read.notify,
     };
 
-    return yield* writeRecord(fs, projectPath(home.home, repo), record);
+    return yield* writeRecord(projectPath(home.home, repo), record);
   });
 
 /** All registered projects, repo order. Corrupt records are skipped, never fatal. */
@@ -383,7 +391,7 @@ export const listProjects = () =>
     const listed = yield* Effect.all(
       dirs.success
         .filter((entry) => entry.type === 'Directory')
-        .map((entry) => readRecord(fs, `${root}/${entry.name}`)),
+        .map((entry) => readRecord(`${root}/${entry.name}`)),
       { concurrency: 'unbounded' },
     );
 

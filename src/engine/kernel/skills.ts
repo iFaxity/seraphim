@@ -25,8 +25,9 @@ export function poolRoot(home: string) {
 }
 
 /** The pool-root read: ENOENT is an empty pool, any other failure is a labeled error. */
-const poolSkills = (fs: FileSystem.FileSystem, root: string) =>
+const poolSkills = (root: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const read = yield* Effect.result(fs.readDirectoryEntries(root));
 
     if (Result.isSuccess(read)) {
@@ -47,8 +48,7 @@ export const listPoolSkills = (
   root: string,
 ): Effect.Effect<PoolSkill[], SkillPoolError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const entries = yield* poolSkills(fs, root);
+    const entries = yield* poolSkills(root);
 
     // The per-skill SKILL.md probes are pre-wrapped to an infallible match (a missing file
     // is just "not a skill"), so the fan-out's error channel is empty by construction.
@@ -56,7 +56,7 @@ export const listPoolSkills = (
       entries
         .filter((entry) => entry.type === 'Directory')
         .map((entry) =>
-          Effect.map(fileExists(fs, join(root, entry.name, 'SKILL.md')), (hasSkill) =>
+          Effect.map(fileExists(join(root, entry.name, 'SKILL.md')), (hasSkill) =>
             hasSkill ? [{ name: entry.name, dir: join(root, entry.name) }] : [],
           ),
         ),

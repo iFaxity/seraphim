@@ -1,3 +1,4 @@
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, Fiber, Layer } from 'effect';
 import { TestClock } from 'effect/testing';
@@ -38,6 +39,8 @@ const studioLayers = Layer.mergeAll(
   FakeGit.layer('trunk'),
   FakeNotifier.layer(),
   FakeRuntime.layer('cap-hit', 50),
+  // The CLI-backed contracts' honest R (spawner, filesystem) rides the context.
+  NodeServices.layer,
 );
 
 describe('fake Layers', () => {

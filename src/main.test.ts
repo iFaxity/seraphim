@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeFileSystem } from '@effect/platform-node';
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Cause, Effect, Exit, Layer } from 'effect';
 import { afterAll, describe, expect } from 'vite-plus/test';
@@ -39,7 +39,7 @@ function testLayer(
     FakeNotifier.layer(),
     FakeRuntime.layer(),
     Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
-    NodeFileSystem.layer,
+    NodeServices.layer,
   );
 
   if (docker == null) {
@@ -101,7 +101,7 @@ describe('engine', () => {
         FakeGit.layer(),
         FakeNotifier.layer(),
         FakeRuntime.layer(),
-        NodeFileSystem.layer,
+        NodeServices.layer,
       ) as Layer.Layer<CommandServices>;
       const exit = yield* Effect.exit(Effect.provide(engine(['prune']), homeless));
       expect(Exit.isFailure(exit)).toBe(true);

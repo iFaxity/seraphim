@@ -111,8 +111,9 @@ export function sessionDir(sessionsRoot: string, relDir: string) {
 }
 
 /** Reads one receipt directory's manifest. Invalid JSON or shape is a labeled read error. */
-const readManifest = (fs: FileSystem.FileSystem, sessionPath: string) =>
+const readManifest = (sessionPath: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const raw = yield* fs.readFileString(join(sessionPath, MANIFEST_FILE)).pipe(
       Effect.mapError(
         (failure) =>
@@ -178,7 +179,6 @@ type UnreadableCount = { count: number };
 
 /** One receipt directory into a listing, or an empty array when its manifest is unreadable. */
 const listOneSession = (
-  fs: FileSystem.FileSystem,
   sessionsRoot: string,
   repoName: string,
   dirName: string,
@@ -186,7 +186,7 @@ const listOneSession = (
 ) =>
   Effect.gen(function* () {
     const dir = join(sessionsRoot, repoName, dirName);
-    const read = yield* Effect.result(readManifest(fs, dir));
+    const read = yield* Effect.result(readManifest(dir));
 
     if (Result.isFailure(read)) {
       skipped.count++;
@@ -194,17 +194,13 @@ const listOneSession = (
       return [];
     }
 
-    return [{ repo: repoName, dir, manifest: read.success, lastLog: yield* lastLog(fs, dir) }];
+    return [{ repo: repoName, dir, manifest: read.success, lastLog: yield* lastLog(dir) }];
   });
 
 /** One repo directory into session listings, or an empty array when it is unreadable. */
-const listRepoSessions = (
-  fs: FileSystem.FileSystem,
-  sessionsRoot: string,
-  repoName: string,
-  skipped: UnreadableCount,
-) =>
+const listRepoSessions = (sessionsRoot: string, repoName: string, skipped: UnreadableCount) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const dirs = yield* Effect.result(fs.readDirectoryEntries(join(sessionsRoot, repoName)));
 
     if (Result.isFailure(dirs)) {
@@ -218,7 +214,7 @@ const listRepoSessions = (
     const listings = yield* Effect.all(
       dirs.success
         .filter((dirEntry) => dirEntry.type === 'Directory')
-        .map((dirEntry) => listOneSession(fs, sessionsRoot, repoName, dirEntry.name, skipped)),
+        .map((dirEntry) => listOneSession(sessionsRoot, repoName, dirEntry.name, skipped)),
       { concurrency: 'unbounded' },
     );
 
@@ -248,7 +244,7 @@ export const listSessions = (sessionsRoot: string) =>
     const listings = yield* Effect.all(
       repos.success
         .filter((repoEntry) => repoEntry.type === 'Directory')
-        .map((repoEntry) => listRepoSessions(fs, sessionsRoot, repoEntry.name, skipped)),
+        .map((repoEntry) => listRepoSessions(sessionsRoot, repoEntry.name, skipped)),
       { concurrency: 'unbounded' },
     );
 
@@ -261,8 +257,9 @@ export const listSessions = (sessionsRoot: string) =>
   });
 
 /** Last line of a session's `flow.log`, or null when there is none. */
-const lastLog = (fs: FileSystem.FileSystem, dir: string) =>
+const lastLog = (dir: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const read = yield* Effect.result(fs.readFileString(join(dir, 'flow.log')));
 
     if (Result.isFailure(read)) {
@@ -282,8 +279,9 @@ function toDiskTurn(turn: Turn) {
  * boundary so the persisted shape is always the checked one. Any failure is a labeled
  * `ReceiptWriteError` — the write contract's one error class.
  */
-const writeSessionManifest = (fs: FileSystem.FileSystem, dir: string, manifest: Session) =>
+const writeSessionManifest = (dir: string, manifest: Session) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const diskManifest = {
       ...manifest,
       startedAt: toEpochMs(manifest.startedAt),
@@ -328,16 +326,15 @@ const writeSessionManifest = (fs: FileSystem.FileSystem, dir: string, manifest: 
  * directory. Any failure is a labeled `ReceiptWriteError`.
  */
 const writeReceiptFiles = (
-  fs: FileSystem.FileSystem,
   dir: string,
   turns: readonly Turn[],
   logs: readonly string[],
   transcripts: readonly TranscriptFile[],
 ) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const turnWrite = yield* Effect.result(
       writeAll(
-        fs,
         dir,
         turns.map((turn) => ({
           name: `turn-${turn.index}.json`,
@@ -367,7 +364,6 @@ const writeReceiptFiles = (
     // Full conversation transcript per turn, alongside the turn record.
     const transcriptWrite = yield* Effect.result(
       writeAll(
-        fs,
         dir,
         transcripts.map((transcript) => ({ name: transcript.name, body: `${transcript.body}\n` })),
       ),
@@ -389,11 +385,10 @@ export const writeReceipt = (
   transcripts: readonly TranscriptFile[],
 ): Effect.Effect<void, ReceiptWriteError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
     const dir = sessionDir(sessionsRoot, relDir);
 
-    yield* writeSessionManifest(fs, dir, manifest);
-    yield* writeReceiptFiles(fs, dir, turns, logs, transcripts);
+    yield* writeSessionManifest(dir, manifest);
+    yield* writeReceiptFiles(dir, turns, logs, transcripts);
   });
 
 /**
@@ -405,12 +400,9 @@ export const writeReceipt = (
  * the raw fs `Error`: the callers own the labeled `ReceiptWriteError` mapping with their
  * per-site messages.
  */
-const writeAll = (
-  fs: FileSystem.FileSystem,
-  dir: string,
-  files: readonly { name: string; body: string }[],
-) =>
+const writeAll = (dir: string, files: readonly { name: string; body: string }[]) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const results = yield* Effect.all(
       files.map((file) => Effect.result(fs.writeFileString(join(dir, file.name), file.body))),
       { concurrency: 'unbounded' },

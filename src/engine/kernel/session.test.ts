@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeFileSystem } from '@effect/platform-node';
+import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Deferred, Duration, Effect, Fiber, Layer, Schema } from 'effect';
 import { TestClock } from 'effect/testing';
@@ -69,7 +69,7 @@ async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 
       Layer.mergeAll(
         Layer.succeed(HomeService, homeLayout(root)),
         Layer.succeed(GitService, fakeGit()),
-        NodeFileSystem.layer,
+        NodeServices.layer,
       ),
     ),
   );
@@ -145,7 +145,7 @@ function sessionLayers(overrides: FakeOverrides = {}) {
     Layer.succeed(AgentRuntimeService, overrides.runtime ?? fakeRuntime()),
     Layer.succeed(SandboxService, overrides.sandbox ?? fakeSandbox()),
     Layer.succeed(NotifierService, overrides.notifier ?? fakeNotifier()),
-    NodeFileSystem.layer,
+    NodeServices.layer,
   );
 
   // `mergeAll` widens the union instead of narrowing to the provided service set; the cast
@@ -242,7 +242,7 @@ describe('runSession', () => {
       yield* Effect.promise(() => seedProject(root, 'dormant'));
       yield* Effect.provide(
         deactivateProject('dormant'),
-        Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), NodeFileSystem.layer),
+        Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), NodeServices.layer),
       );
 
       const error = yield* sessionFailure({ repo: 'dormant', issueNumber: 9 });
@@ -1154,7 +1154,7 @@ describe('per-repo lock', () => {
       } finally {
         holder.kill('SIGKILL');
       }
-    }).pipe(Effect.provide(NodeFileSystem.layer)),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   // `it.live`: the holder's unlink lands on a real timer while the waiter polls on the live
@@ -1198,7 +1198,7 @@ describe('per-repo lock', () => {
       } finally {
         holder.kill('SIGKILL');
       }
-    }).pipe(Effect.provide(NodeFileSystem.layer)),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect('breaks and takes a stale lock left by a dead session', () =>

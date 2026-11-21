@@ -4,9 +4,6 @@ import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 
 import { describeError } from './errors.ts';
 
-/** The `ChildProcessSpawner` service shape the adapters compose over (not the Context key). */
-export type ProcessSpawner = ChildProcessSpawner.ChildProcessSpawner['Service'];
-
 /** Per-stream output cap: diagnostics only, never retained wholesale. */
 const MAX_STREAM_BYTES = 10 * 1024 * 1024;
 
@@ -74,7 +71,8 @@ function spawnFailure(
 
 /**
  * The shared CLI runner behind the git and docker adapters: one invocation per call, full
- * argv passthrough, per-stream capture, composed over the injected `ChildProcessSpawner`.
+ * argv passthrough, per-stream capture, resolved from the Effect context's
+ * `ChildProcessSpawner` — the runner yields the service itself, never receives it.
  * Spawn failures (a missing binary, an inaccessible cwd) surface as
  * `spawnErrorExitCode` with the failure message in `stderr` (only when nothing streamed);
  * signaled exits also surface as `spawnErrorExitCode`, keeping stderr exactly as captured,
@@ -82,15 +80,16 @@ function spawnFailure(
  * instead of leaking an error channel.
  */
 export function cliRun(
-  spawner: ProcessSpawner,
   binary: string,
   args: readonly string[],
   options: { readonly cwd?: string; readonly spawnErrorExitCode: number } = {
     spawnErrorExitCode: 127,
   },
-): Effect.Effect<CliRun> {
+): Effect.Effect<CliRun, never, ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.scoped(
     Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+
       // Spawn failures surface as PlatformError before any handle exists, so nothing has
       // streamed and the failure message fills stderr directly.
       const handle = yield* Effect.result(

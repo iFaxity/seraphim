@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { Context, Effect, FileSystem, Layer, Option } from 'effect';
-import { ChildProcessSpawner } from 'effect/process';
 
-import { cliRun, type ProcessSpawner } from '../../lib/cli-run.ts';
+import { cliRun } from '../../lib/cli-run.ts';
 import {
   DockerfileMissingError,
   ImageProvisionError,
@@ -12,7 +11,12 @@ import {
   WorktreeMissingError,
 } from '../../lib/errors.ts';
 import { dirExists, fileExists } from '../../lib/fs.ts';
-import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
+import {
+  type Sandbox,
+  type SandboxContext,
+  type SandboxExec,
+  type SpawnContext,
+} from '../core/contracts.ts';
 import { SandboxService } from '../core/services.ts';
 
 /**
@@ -40,10 +44,11 @@ export type DockerRun = {
 
 /**
  * The `docker` CLI surface the adapter needs. Injected so tests script docker's behavior
- * instead of shelling out; the production runner wraps the binary.
+ * instead of shelling out; the production runner wraps the binary. The spawner rides the
+ * run Effects' context — never a parameter.
  */
 export type DockerRunner = {
-  readonly run: (args: readonly string[]) => Effect.Effect<DockerRun>;
+  readonly run: (args: readonly string[]) => Effect.Effect<DockerRun, never, SpawnContext>;
 };
 
 /** Lockfile names that participate in the image's content hash, checked per project. */
@@ -65,7 +70,7 @@ function cachedImage(
   docker: DockerRunner,
   repo: string,
   tag: string,
-): Effect.Effect<Option.Option<Image>, ImageProvisionError> {
+): Effect.Effect<Option.Option<Image>, ImageProvisionError, SpawnContext> {
   return Effect.gen(function* () {
     const inspect = yield* docker.run(['image', 'inspect', '--format', '{{json .Id}}', tag]);
 
@@ -96,7 +101,7 @@ function buildImage(
   repo: string,
   dir: string,
   tag: string,
-): Effect.Effect<Image, ImageProvisionError> {
+): Effect.Effect<Image, ImageProvisionError, SpawnContext> {
   return Effect.gen(function* () {
     const build = yield* docker.run(['buildx', 'build', '--load', '-q', '-t', tag, dir]);
 
@@ -118,12 +123,12 @@ function buildImage(
  * runs against the project's current image even without a prior ensureImage.
  */
 function execArgs(
-  fs: FileSystem.FileSystem,
   projectsRoot: string,
   input: ExecInput,
-): Effect.Effect<string[], SandboxArgError> {
+): Effect.Effect<string[], SandboxArgError, SandboxContext> {
   return Effect.gen(function* () {
-    if (!(yield* dirExists(fs, input.worktreePath))) {
+    const worktreeExists = yield* dirExists(input.worktreePath);
+    if (!worktreeExists) {
       return yield* Effect.fail(
         new WorktreeMissingError({ message: `worktree not found: ${input.worktreePath}` }),
       );
@@ -149,11 +154,12 @@ function execArgs(
     // Credentials surface: the project's `.env` file, mounted only when it exists — the
     // `--env-file` argv is the adapter's contract; what agents do with the variables is not.
     const envFile = join(dir, '.env');
-    if (yield* fileExists(fs, envFile)) {
+    const envFileExists = yield* fileExists(envFile);
+    if (envFileExists) {
       args.push('--env-file', envFile);
     }
 
-    const tag = yield* imageTagFor(fs, dir);
+    const tag = yield* imageTagFor(dir);
 
     if (Option.isNone(tag)) {
       return yield* Effect.fail(new DockerfileMissingError(missingDockerfile(input.repo, dir)));
@@ -171,16 +177,19 @@ function execArgs(
  * which tags every failure `UnavailableError`.
  */
 function ensureImageFor(
-  fs: FileSystem.FileSystem,
   projectsRoot: string,
   docker: DockerRunner,
   repo: string,
-): Effect.Effect<Image, ImageProvisionError | DockerfileMissingError | InvalidRepoNameError> {
+): Effect.Effect<
+  Image,
+  ImageProvisionError | DockerfileMissingError | InvalidRepoNameError,
+  SandboxContext
+> {
   return Effect.gen(function* () {
     yield* validateRepoName(repo);
 
     const dir = join(projectsRoot, repo);
-    const tag = yield* imageTagFor(fs, dir);
+    const tag = yield* imageTagFor(dir);
 
     if (Option.isNone(tag)) {
       return yield* Effect.fail(new DockerfileMissingError(missingDockerfile(repo, dir)));
@@ -207,15 +216,14 @@ type SandboxArgError =
  * outcome — a nonzero exit code is the exec result, not a failure.
  */
 function execFor(
-  fs: FileSystem.FileSystem,
   projectsRoot: string,
   docker: DockerRunner,
   input: ExecInput,
-): Effect.Effect<SandboxExec, SandboxArgError> {
+): Effect.Effect<SandboxExec, SandboxArgError, SandboxContext> {
   return Effect.gen(function* () {
     yield* validateRepoName(input.repo);
 
-    const args = yield* execArgs(fs, projectsRoot, input);
+    const args = yield* execArgs(projectsRoot, input);
     const run = yield* docker.run(args);
 
     return {
@@ -241,9 +249,8 @@ function execFor(
 export function dockerSandbox(options: {
   readonly projectsRoot: string;
   readonly docker: DockerRunner;
-  readonly fs: FileSystem.FileSystem;
 }) {
-  const { projectsRoot, docker, fs } = options;
+  const { projectsRoot, docker } = options;
 
   return {
     // Backend failures (no Dockerfile, docker daemon down, malformed inspect) surface the
@@ -251,7 +258,7 @@ export function dockerSandbox(options: {
     // adapter-internal (exec re-derives the tag); the contract's success is void.
     ensureImage: (repo: string) =>
       Effect.mapError(
-        ensureImageFor(fs, projectsRoot, docker, repo),
+        ensureImageFor(projectsRoot, docker, repo),
         (error) => new UnavailableError({ cause: error }),
       ),
     exec: (input: {
@@ -260,7 +267,7 @@ export function dockerSandbox(options: {
       readonly command: readonly string[];
     }) =>
       Effect.mapError(
-        execFor(fs, projectsRoot, docker, input),
+        execFor(projectsRoot, docker, input),
         (error) => new UnavailableError({ cause: error }),
       ),
   } satisfies Sandbox;
@@ -297,12 +304,13 @@ export function missingDockerfile(repo: string, dir: string) {
  * content change the tag exists to track.
  */
 export function imageTagFor(
-  fs: FileSystem.FileSystem,
   dir: string,
-): Effect.Effect<Option.Option<string>> {
+): Effect.Effect<Option.Option<string>, never, FileSystem.FileSystem> {
   return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const dockerfilePath = join(dir, 'Dockerfile');
-    if (!(yield* fileExists(fs, dockerfilePath))) {
+    const dockerfileExists = yield* fileExists(dockerfilePath);
+    if (!dockerfileExists) {
       return Option.none();
     }
 
@@ -326,41 +334,31 @@ export function imageTagFor(
 
 /**
  * The production runner: one `docker` CLI invocation per `run` call, full argv passthrough
- * (the shared `cliRun` capture machinery over the injected spawner). A missing/unspawnable
+ * (the shared `cliRun` capture machinery over the context's spawner). A missing/unspawnable
  * binary reports as exit 127 — POSIX "command not found" — so callers keep one structured
  * failure shape.
  */
-export function cliDocker(spawner: ProcessSpawner): DockerRunner {
-  return {
-    run: (args) => cliRun(spawner, 'docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
-  };
-}
+export const cliDocker: DockerRunner = {
+  run: (args) => cliRun('docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
+};
 
 /** POSIX "command not found" — what a shell would report for an unresolvable binary. */
 const CLI_NOT_FOUND = 127;
 
-/** Production wiring: the real `docker` CLI subprocess runner, over the spawner the
- * composition root provides. */
-export const dockerCliLayer: Layer.Layer<
+/** Production wiring: the real `docker` CLI subprocess runner. The spawner rides the run
+ * Effects' context, so this layer is pure `Layer.succeed`. */
+export const dockerCliLayer: Layer.Layer<DockerRunnerService> = Layer.succeed(
   DockerRunnerService,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner
-> = Layer.effect(
-  DockerRunnerService,
-  ChildProcessSpawner.ChildProcessSpawner.use((spawner) => Effect.succeed(cliDocker(spawner))),
+  cliDocker,
 );
 
-/** The sandbox contract wired over the injected docker runner and filesystem. */
+/** The sandbox contract wired over the injected docker runner; the filesystem and spawner
+ * ride the adapter operations' R (honest, per the contract). */
 export function dockerSandboxLayer(
   projectsRoot: string,
-): Layer.Layer<SandboxService, never, DockerRunnerService | FileSystem.FileSystem> {
+): Layer.Layer<SandboxService, never, DockerRunnerService> {
   return Layer.effect(
     SandboxService,
-    Effect.gen(function* () {
-      const docker = yield* DockerRunnerService;
-      const fs = yield* FileSystem.FileSystem;
-
-      return dockerSandbox({ projectsRoot, docker, fs });
-    }),
+    Effect.map(DockerRunnerService, (docker) => dockerSandbox({ projectsRoot, docker })),
   );
 }
