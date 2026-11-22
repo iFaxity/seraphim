@@ -9,10 +9,7 @@ import { checkDeclaredSkills, stageSkills } from './skills.ts';
 import { createTurnEngine, type TurnAborted, type TurnEngine } from './turns.ts';
 
 import {
-  ClaimConflictError,
   describeError,
-  GitError,
-  LockHeldError,
   ProjectError,
   type ReceiptReadError,
   ReceiptWriteError,
@@ -28,10 +25,9 @@ import {
   type Notifier,
   type Sandbox,
   type Tracker,
-  type TrackerError,
 } from '../core/contracts.ts';
 import { HomeService, type Home } from '../core/env.ts';
-import { type FlowConfig, type SessionContext } from '../core/flow-api.ts';
+import { type SessionContext } from '../core/flow-api.ts';
 import {
   AgentRuntimeService,
   GitService,
@@ -161,7 +157,7 @@ type SessionRun = {
  * writes (nothing is persisted before the worktree exists). */
 type RunnableFlowError = Exclude<KernelFailure, ReceiptReadError | ReceiptWriteError>;
 
-const resolveRunnableFlow = (
+function resolveRunnableFlow(
   input: SessionInput,
 ): Effect.Effect<
   RunnableFlow & { tracker: Tracker; git: Git; runtime: AgentRuntime },
@@ -172,8 +168,8 @@ const resolveRunnableFlow = (
   | SandboxService
   | HomeService
   | FileSystem.FileSystem
-> =>
-  Effect.gen(function* () {
+> {
+  return Effect.gen(function* () {
     const tracker = yield* TrackerService;
     const git = yield* GitService;
     const runtime = yield* AgentRuntimeService;
@@ -204,6 +200,7 @@ const resolveRunnableFlow = (
       runtime: AgentRuntime;
     };
   });
+}
 
 /**
  * Runs one session end-to-end over injected adapters: preflight fail-fast, image ensure,
@@ -211,10 +208,10 @@ const resolveRunnableFlow = (
  * `ctx.run(prompt)` dispatch into the runtime, receipt files under the sessions root.
  * Failures stop for human takeover: state is recorded, branch retained.
  */
-export const runSession = (
+export function runSession(
   input: SessionInput,
-): Effect.Effect<{ readonly manifest: Session }, SessionError, SessionServices> =>
-  Effect.gen(function* () {
+): Effect.Effect<{ readonly manifest: Session }, SessionError, SessionServices> {
+  return Effect.gen(function* () {
     const home = yield* HomeService;
     const notifier = yield* NotifierService;
     const sandbox = yield* SandboxService;
@@ -226,10 +223,49 @@ export const runSession = (
     // repo — image build and clone/pull; the worktree and turn dispatch below stay outside it
     // (parallel issues per repo are the intended use case).
     const repoPath = join(home.reposRoot, input.repo);
-    const issue = yield* claimAndSyncIssue(input, repoPath, project.remote, tracker, git, sandbox);
 
-    const prepared = yield* prepareWorktree(home, input, flow.config, repoPath, git);
-    const { startedAt, relDir, worktreePath, branch } = prepared;
+    // Claim on pickup so concurrent sessions cannot double-run the same issue; the lock
+    // serializes the shared mutations (image build, clone/pull) so a locked or expired-wait
+    // repo fails fast without stranding a claimed issue.
+    const issue = yield* withRepoLock(
+      input.repo,
+      Effect.gen(function* () {
+        const claimed = yield* tracker.getIssue(input.repo, input.issueNumber);
+        yield* tracker.claim(claimed);
+        yield* sandbox.ensureImage(input.repo);
+        yield* git.cloneIfMissing(repoPath, project.remote);
+        yield* git.pull(repoPath);
+
+        return claimed;
+      }),
+    );
+
+    // Worktree off the default branch, owned only by the kernel; the flow's declared skills
+    // land at the runtime's project-level skills path before any turn runs, so the agent
+    // session discovers them without global installation. The worktree is host filesystem
+    // here; the sandbox bind-mounts it at /workspace.
+    const startedAt = now();
+    const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
+    const worktreePath = join(
+      home.worktreesRoot,
+      input.repo,
+      `${input.issueNumber}-${toEpochMs(startedAt)}`,
+    );
+    const defaultBranch = yield* git.defaultBranch(repoPath);
+
+    const branch = `seraphim/${input.repo}/${input.issueNumber}-${toEpochMs(startedAt)}`;
+    yield* git.createWorktree({
+      repoPath,
+      branch,
+      path: worktreePath,
+      baseBranch: defaultBranch,
+    });
+
+    yield* stageSkills({
+      worktreePath,
+      agent: flow.config.agent,
+      declared: flow.config.skills,
+    });
     const turnsEngine = yield* createTurnEngine({
       caps: flow.config.caps,
       agent: flow.config.agent,
@@ -272,6 +308,7 @@ export const runSession = (
 
     return yield* finalizeSessionReceipt(run, notifier, relDir, flowRun);
   });
+}
 
 /** Thrown by ctx.run when a turn fails or hits a cap — the flow stops, state is recorded. */
 class TurnAbortedError extends Error {
@@ -279,77 +316,6 @@ class TurnAbortedError extends Error {
     super(`turn aborted: ${exitState}`);
   }
 }
-
-/**
- * Claims the issue and synchronizes the repo, all under the repo lock. Claiming on pickup
- * means concurrent sessions cannot double-run the same issue; the lock serializes the shared
- * mutations (image build, clone/pull) so a locked or expired-wait repo fails fast without
- * stranding a claimed issue. Returns the claimed issue for the turn phase.
- */
-const claimAndSyncIssue = (
-  input: SessionInput,
-  repoPath: string,
-  remote: string,
-  tracker: Tracker,
-  git: Git,
-  sandbox: Sandbox,
-): Effect.Effect<
-  Issue,
-  TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
-  HomeService | FileSystem.FileSystem
-> =>
-  withRepoLock(
-    input.repo,
-    Effect.gen(function* () {
-      const issue = yield* tracker.getIssue(input.repo, input.issueNumber);
-      yield* tracker.claim(issue);
-      yield* sandbox.ensureImage(input.repo);
-      yield* git.cloneIfMissing(repoPath, remote);
-      yield* git.pull(repoPath);
-
-      return issue;
-    }),
-  );
-
-/**
- * Creates the session worktree off the repo's default branch and stages the flow's declared
- * skills into it. Declared skills land at the runtime's project-level skills path before any
- * turn runs, so the agent session discovers them without global installation.
- * The worktree is host filesystem here; the sandbox bind-mounts it at /workspace.
- */
-const prepareWorktree = (
-  home: Home,
-  input: SessionInput,
-  config: FlowConfig,
-  repoPath: string,
-  git: Git,
-) =>
-  Effect.gen(function* () {
-    const startedAt = now();
-    const relDir = sessionRelDir(input.repo, input.issueNumber, toEpochMs(startedAt));
-    const worktreePath = join(
-      home.worktreesRoot,
-      input.repo,
-      `${input.issueNumber}-${toEpochMs(startedAt)}`,
-    );
-    const defaultBranch = yield* git.defaultBranch(repoPath);
-
-    const branch = `seraphim/${input.repo}/${input.issueNumber}-${toEpochMs(startedAt)}`;
-    yield* git.createWorktree({
-      repoPath,
-      branch,
-      path: worktreePath,
-      baseBranch: defaultBranch,
-    });
-
-    yield* stageSkills({
-      worktreePath,
-      agent: config.agent,
-      declared: config.skills,
-    });
-
-    return { startedAt, relDir, worktreePath, branch };
-  });
 
 /**
  * Drafts the running-state manifest for one session: identity, branch, and the flow's
@@ -393,8 +359,8 @@ function createSessionManifest(
  * (recovery turns) must stay silent: a self-heal that never reaches a terminal state never
  * pages the operator.
  */
-const notifyOperator = (run: SessionRun, notifier: Notifier, event: NotifyEvent, detail: string) =>
-  notifier
+function notifyOperator(run: SessionRun, notifier: Notifier, event: NotifyEvent, detail: string) {
+  return notifier
     .notify({
       repo: run.input.repo,
       issueNumber: run.input.issueNumber,
@@ -407,6 +373,7 @@ const notifyOperator = (run: SessionRun, notifier: Notifier, event: NotifyEvent,
         Effect.sync(() => run.logs.push(`notify failed: ${describeError(error)}`)),
       ),
     );
+}
 
 /**
  * Builds the flow-facing `SessionContext` over the session's adapters and turn ledger:
@@ -426,8 +393,9 @@ function createFlowContext(
 
   // Each closure resolves the adapter it needs from the session's captured context — the
   // adapters ride the service stack, never the run struct.
-  const bridged = <A, E>(effect: Effect.Effect<A, E, SessionServices>) =>
-    Effect.runPromise(effect.pipe(Effect.provideContext(context)));
+  function bridged<A, E>(effect: Effect.Effect<A, E, SessionServices>) {
+    return Effect.runPromise(effect.pipe(Effect.provideContext(context)));
+  }
 
   return {
     repo: input.repo,
@@ -522,8 +490,8 @@ function abort(stateRef: Ref.Ref<SessionStateFields>, aborted: TurnAborted) {
  * `/workspace`. Returns the exit code; nonzero means the gate failed — the flow decides
  * what that means.
  */
-const runGateCommand = (run: SessionRun, sandbox: Sandbox, command: readonly string[]) =>
-  Effect.gen(function* () {
+function runGateCommand(run: SessionRun, sandbox: Sandbox, command: readonly string[]) {
+  return Effect.gen(function* () {
     const executed = yield* sandbox.exec({
       repo: run.input.repo,
       worktreePath: run.worktreePath,
@@ -543,6 +511,7 @@ const runGateCommand = (run: SessionRun, sandbox: Sandbox, command: readonly str
 
     return executed.exitCode;
   });
+}
 
 /**
  * The kernel's turn dispatch behind `ctx.run`: both caps gate before the prompt goes to
@@ -550,8 +519,8 @@ const runGateCommand = (run: SessionRun, sandbox: Sandbox, command: readonly str
  * Result, because flow code (`flow.run(ctx)`) is untrusted and must not be able to swallow
  * the abort; the tryPromise at the flow-run call site converts it back into the exit state.
  */
-const dispatchTurn = (run: SessionRun, runtime: AgentRuntime, prompt: string) =>
-  Effect.gen(function* () {
+function dispatchTurn(run: SessionRun, runtime: AgentRuntime, prompt: string) {
+  return Effect.gen(function* () {
     const { input, worktreePath, model, stateRef, turnsEngine } = run;
 
     // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
@@ -578,13 +547,14 @@ const dispatchTurn = (run: SessionRun, runtime: AgentRuntime, prompt: string) =>
       .record({ prompt, startedAt: gate.startedAt, outcome })
       .pipe(Effect.catch((aborted: TurnAborted) => abort(stateRef, aborted)));
   });
+}
 
 /**
  * Records the flow's exit state on the manifest, snapshots the turn ledger, and writes
  * the finalized receipt — endedAt plus the turn records — under the session's directory.
  * The manifest is the receipt; this only settles and persists it.
  */
-const finalizeSessionReceipt = (
+function finalizeSessionReceipt(
   run: SessionRun,
   notifier: Notifier,
   relDir: string,
@@ -593,8 +563,8 @@ const finalizeSessionReceipt = (
   { readonly manifest: Session },
   ReceiptWriteError,
   HomeService | FileSystem.FileSystem
-> =>
-  Effect.gen(function* () {
+> {
+  return Effect.gen(function* () {
     const { manifest, stateRef, turnsEngine, logs } = run;
 
     // The flow's own outcome is the last transition: a failure fails a still-running
@@ -628,3 +598,4 @@ const finalizeSessionReceipt = (
 
     return { manifest: finalManifest };
   });
+}

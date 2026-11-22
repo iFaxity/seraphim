@@ -8,29 +8,27 @@ import { Deferred, Duration, Effect, Fiber, Layer, Schema } from 'effect';
 import { TestClock } from 'effect/testing';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
-import { type CommandServices } from './command.ts';
 import { withRepoLock } from './lock.ts';
-import { deactivateProject, registerProject } from './projects.ts';
+import { deactivateProject } from './projects.ts';
 import { SessionManifestSchema, sessionDir, sessionRelDir } from './receipts.ts';
 import { runSession, type SessionError, type SessionInput } from './session.ts';
 
-import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
+import { fakeGit } from '../../../test/fakes/git.ts';
 import { fakeNotifier } from '../../../test/fakes/notifier.ts';
 import { fakeRuntime, type FakeRuntime } from '../../../test/fakes/runtime.ts';
 import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
+import {
+  fakeStack,
+  seedProject,
+  seedRemote,
+  type FakeOverrides,
+} from '../../../test/fakes/stack.ts';
 import { fakeTracker, type FakeTracker } from '../../../test/fakes/tracker.ts';
 import { UnavailableError } from '../../lib/errors.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import { type AgentRuntime, type Notifier, type Sandbox, type Tracker } from '../core/contracts.ts';
 import { engine } from '../core/engine.ts';
 import { HomeService, homeLayout } from '../core/env.ts';
-import {
-  AgentRuntimeService,
-  GitService,
-  NotifierService,
-  SandboxService,
-  TrackerService,
-} from '../core/services.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 /**
@@ -39,11 +37,6 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
  * cross-process lock polling interleaved with real fs reads, a real child process holding
  * the repo lock, and the internal lock-queue overlap window.
  */
-
-/** The remote seedProject registers; tests assert the session clones exactly this URL. */
-function seedRemote(repo: string) {
-  return `https://example.invalid/acme/${repo}.git`;
-}
 
 /**
  * A pid the kernel reads dead: a reaped child's pid — retried in the pathological case the
@@ -60,50 +53,6 @@ function deadPid() {
       return gone;
     }
   }
-}
-
-async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
-  await Effect.runPromise(
-    Effect.provide(
-      registerProject(seedRemote(repo), repo),
-      Layer.mergeAll(
-        Layer.succeed(HomeService, homeLayout(root)),
-        Layer.succeed(GitService, fakeGit()),
-        NodeServices.layer,
-      ),
-    ),
-  );
-
-  const projectDir = join(root, 'projects', repo);
-
-  await mkdir(projectDir, { recursive: true });
-  await writeFile(
-    join(projectDir, 'flow.ts'),
-    `const flow = {
-  config: { agent: '${agent}', model: 'test-model', skills: ['implement'], sandbox: 'docker', caps: { maxTurns: 10, wallClockMs: 60000 } },
-  run: async (ctx) => {
-    await ctx.run('implement issue');
-  },
-};
-
-export default flow;
-`,
-  );
-  await writeFile(join(projectDir, 'Dockerfile'), 'FROM node:26\n');
-  await seedSkillPool(root);
-
-  return projectDir;
-}
-
-/** Seeds one pool skill so the default flow declaration (`skills: ['implement']`) passes. */
-async function seedSkillPool(root: string, name = 'implement') {
-  const skillDir = join(root, 'skills', name);
-
-  await mkdir(skillDir, { recursive: true });
-  await writeFile(
-    join(skillDir, 'SKILL.md'),
-    '---\nname: implement\ndescription: non-interactive implementation skill\n---\n\nImplement the issue.\n',
-  );
 }
 
 /** Matches the composed fake's recording surface, so tests reach `calls` through the union. */
@@ -124,43 +73,15 @@ async function writeRepoLock(root: string, repo: string, lock: LockFileBody) {
 /** The lock record shape on disk (epoch-ms timestamp); test helpers only. */
 type LockFileBody = { readonly pid: number; readonly at: number };
 
-/** Per-test service overrides: any adapter contract the test drives its own fake for. */
-type FakeOverrides = {
-  readonly git?: FakeGit;
-  readonly tracker?: Tracker;
-  readonly sandbox?: Sandbox;
-  readonly runtime?: AgentRuntime;
-  readonly notifier?: Notifier;
-};
-
-/**
- * The test service stack: eager fake instances under `Layer.succeed`, so tests assert on the
- * recording fakes they built instead of pulling them back out of a layer.
- */
-function sessionLayers(overrides: FakeOverrides = {}) {
-  const stack = Layer.mergeAll(
-    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
-    Layer.succeed(GitService, overrides.git ?? fakeGit()),
-    Layer.succeed(TrackerService, overrides.tracker ?? fakeTracker()),
-    Layer.succeed(AgentRuntimeService, overrides.runtime ?? fakeRuntime()),
-    Layer.succeed(SandboxService, overrides.sandbox ?? fakeSandbox()),
-    Layer.succeed(NotifierService, overrides.notifier ?? fakeNotifier()),
-    NodeServices.layer,
-  );
-
-  // `mergeAll` widens the union instead of narrowing to the provided service set; the cast
-  // pins the stack to the composition the kernel surfaces — `CommandServices` covers both
-  // the `runSession` contract and the `engine` front door this suite drives.
-  return stack as unknown as Layer.Layer<CommandServices>;
+/** One session run over the fake stack. */
+function sessionOver(input: SessionInput, overrides: FakeOverrides = {}) {
+  return Effect.provide(runSession(input), fakeStack(root, { sessionsRoot, overrides }));
 }
 
-/** One session run over the fake stack. */
-const sessionOver = (input: SessionInput, overrides: FakeOverrides = {}) =>
-  Effect.provide(runSession(input), sessionLayers(overrides));
-
 /** The engine front door over the fake stack — an Outcome back, never a rejection. */
-const engineOutcome = (argv: readonly string[], overrides: FakeOverrides = {}) =>
-  Effect.provide(engine(argv), sessionLayers(overrides));
+function engineOutcome(argv: readonly string[], overrides: FakeOverrides = {}) {
+  return Effect.provide(engine(argv), fakeStack(root, { sessionsRoot, overrides }));
+}
 
 /** Narrowing tagged errors to their human detail without re-deriving failure prose. */
 function messageOf(error: SessionError): string {
@@ -168,8 +89,9 @@ function messageOf(error: SessionError): string {
 }
 
 /** Fails one session run out of its error channel, so the kernel's tagged error reaches the assertions. */
-const sessionFailure = (input: SessionInput, overrides: FakeOverrides = {}) =>
-  Effect.flip(sessionOver(input, overrides));
+function sessionFailure(input: SessionInput, overrides: FakeOverrides = {}) {
+  return Effect.flip(sessionOver(input, overrides));
+}
 
 let root: string;
 let sessionsRoot: string;

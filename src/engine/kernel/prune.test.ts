@@ -1,8 +1,7 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Cause, Effect, Exit, Layer, Option } from 'effect';
+import { Cause, Effect, Exit, Option } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
@@ -10,11 +9,10 @@ import { planPrune, runPrune } from './prune.ts';
 import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
 import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
-import { fakeSandbox, FakeSandbox } from '../../../test/fakes/sandbox.ts';
+import { fakeSandbox } from '../../../test/fakes/sandbox.ts';
+import { fakeStack, fakeStackWithoutDocker } from '../../../test/fakes/stack.ts';
 import { GitError } from '../../lib/errors.ts';
-import { homeLayout, HomeService } from '../core/env.ts';
-import { GitService } from '../core/services.ts';
-import { DockerRunnerService, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
+import { type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 let root: string;
@@ -30,17 +28,11 @@ afterEach(async () => {
   await rm(sessionsRoot, { recursive: true, force: true });
 });
 
-/** The prune layer stack over one home layout; omitting `docker` is the docker-absent case. */
+/** The prune layer over the shared fake stack; omitting `docker` is the docker-absent case. */
 function pruneLayer(git: FakeGit, docker?: DockerRunner) {
-  // NodeServices backs the git/docker CLI adapters' context-resolved spawner and fs.
-  const base = Layer.mergeAll(
-    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
-    Layer.succeed(GitService, git),
-    FakeSandbox.layer(),
-    NodeServices.layer,
-  );
-
-  return docker ? Layer.merge(base, Layer.succeed(DockerRunnerService, docker)) : base;
+  return docker
+    ? fakeStack(root, { sessionsRoot, docker, overrides: { git } })
+    : fakeStackWithoutDocker(root, { sessionsRoot, overrides: { git } });
 }
 
 /** Writes one receipt manifest directly — prune's input is the receipts tree, not a run. */
