@@ -1,6 +1,5 @@
 import { join } from 'node:path';
 import { Context, Effect, FileSystem, Ref, Result } from 'effect';
-import { ChildProcessSpawner } from 'effect/process';
 
 import { loadFlow, type LoadedFlow } from './flow.ts';
 import { withRepoLock } from './lock.ts';
@@ -30,7 +29,6 @@ import {
   type NotifyEvent,
   type Notifier,
   type Sandbox,
-  type SandboxContext,
   type Tracker,
   type TrackerError,
 } from '../core/contracts.ts';
@@ -72,8 +70,7 @@ export type SessionServices =
   | GitService
   | NotifierService
   | HomeService
-  | FileSystem.FileSystem
-  | ChildProcessSpawner.ChildProcessSpawner;
+  | FileSystem.FileSystem;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {
@@ -175,9 +172,9 @@ const resolveRunnableFlow = (
   | TrackerService
   | GitService
   | AgentRuntimeService
+  | SandboxService
   | HomeService
   | FileSystem.FileSystem
-  | ChildProcessSpawner.ChildProcessSpawner
 > =>
   Effect.gen(function* () {
     const home = yield* HomeService;
@@ -322,7 +319,7 @@ const claimAndSyncIssue = (
 ): Effect.Effect<
   Issue,
   TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
-  HomeService | SandboxContext
+  HomeService | FileSystem.FileSystem
 > =>
   withRepoLock(
     input.repo,
