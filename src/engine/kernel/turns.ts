@@ -157,7 +157,8 @@ export const createTurnEngine = (config: {
 
     // The deadline anchors to construction — the session's own start — not to the first
     // gate read, matching the original injected-clock semantics.
-    const deadline = (yield* Clock.currentTimeMillis) + caps.wallClockMs;
+    const now = yield* Clock.currentTimeMillis;
+    const deadline = now + caps.wallClockMs;
 
     function gate() {
       return Effect.gen(function* () {
@@ -167,7 +168,8 @@ export const createTurnEngine = (config: {
 
     function record({ prompt, startedAt, outcome }: TurnInput) {
       return Effect.gen(function* () {
-        const endedAt = fromEpochMs(yield* Clock.currentTimeMillis);
+        const endedMs = yield* Clock.currentTimeMillis;
+        const endedAt = fromEpochMs(endedMs);
         const exitState = Result.isSuccess(outcome)
           ? outcome.success.exitState
           : ('failed' as const);

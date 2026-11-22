@@ -117,9 +117,9 @@ describe('stageSkills', () => {
           declared: ['tdd'],
         }),
       );
-      expect(yield* Effect.promise(() => readFile(join(stale, 'SKILL.md'), 'utf8'))).toContain(
-        'fresh body',
-      );
+      const staleSkill = yield* Effect.promise(() => readFile(join(stale, 'SKILL.md'), 'utf8'));
+
+      expect(staleSkill).toContain('fresh body');
     }),
   );
   it.effect('stages nothing for an empty declaration', () =>

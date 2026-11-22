@@ -73,6 +73,20 @@ rules immediately.
 
 - Match `GLOSSARY.md` and its `_Avoid_` terms.
 
+## Calls
+
+- Hoist factory and builder invocations out of argument lists into named locals, so each
+  construction step reads in order:
+
+  ```ts
+  const listing = dockerListing(tags);
+  const layer = pruneLayer(git, listing);
+  yield * Effect.provide(planPrune, layer);
+  ```
+
+  Trivial leaves stay inline: `join(a, b)`, literals, `Effect.gen`/`Effect.succeed`.
+  The same hoist covers `yield*` and `await` — an in-flight effect is never an argument.
+
 ## Comments
 
 - Doc comments explain why, not what — a constraint, a rejected alternative, a spec/ADR citation.

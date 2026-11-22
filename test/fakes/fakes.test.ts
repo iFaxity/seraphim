@@ -71,7 +71,9 @@ describe('fake Layers', () => {
       Effect.gen(function* () {
         const git = yield* GitService;
 
-        expect(yield* git.defaultBranch('/repos/x')).toBe('trunk');
+        const branch = yield* git.defaultBranch('/repos/x');
+
+        expect(branch).toBe('trunk');
 
         yield* git.push({ repoPath: '/repos/x', branch: 'seraphim/x/1' });
 

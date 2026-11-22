@@ -202,10 +202,10 @@ const seedSlots = (dir: string, repo: string) =>
   Effect.gen(function* () {
     // `Effect.all` fails fast — the first slot failure fails the whole seed, so every
     // element of the result is a seeded path by construction.
-    return yield* Effect.all(
-      (yield* projectSlots()).map((slot) => seedSlot(dir, repo, slot)),
-      { concurrency: 'unbounded' },
-    );
+    const slots = yield* projectSlots();
+    const seeds = slots.map((slot) => seedSlot(dir, repo, slot));
+
+    return yield* Effect.all(seeds, { concurrency: 'unbounded' });
   });
 
 /** Reads and schema-checks one `project.json`. Invalid shape is a ProjectError; never throws. */

@@ -55,7 +55,8 @@ const resolvePoolRoot = (home: string): Effect.Effect<string, never, FileSystem.
     const fs = yield* FileSystem.FileSystem;
     const homePool = poolRoot(home);
 
-    const present = Option.isSome(yield* Effect.option(fs.stat(homePool)));
+    const stat = yield* Effect.option(fs.stat(homePool));
+    const present = Option.isSome(stat);
 
     return present ? homePool : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
   });
@@ -73,8 +74,10 @@ export function poolRoot(home: string) {
 export function homeServiceLayer(
   home: string,
 ): Layer.Layer<HomeService, never, FileSystem.FileSystem> {
+  const pool = resolvePoolRoot(home);
+
   return Layer.effect(
     HomeService,
-    Effect.map(resolvePoolRoot(home), (poolRoot) => ({ ...homeLayout(home), poolRoot })),
+    Effect.map(pool, (poolRoot) => ({ ...homeLayout(home), poolRoot })),
   );
 }

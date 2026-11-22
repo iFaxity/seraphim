@@ -63,16 +63,15 @@ function deadPid() {
 }
 
 async function seedProject(root: string, repo: string, agent: 'pi' | 'claude' = 'pi') {
-  await Effect.runPromise(
-    Effect.provide(
-      registerProject(seedRemote(repo), repo),
-      Layer.mergeAll(
-        Layer.succeed(HomeService, homeLayout(root)),
-        Layer.succeed(GitService, fakeGit()),
-        NodeServices.layer,
-      ),
-    ),
+  const remote = seedRemote(repo);
+  const registration = registerProject(remote, repo);
+  const layer = Layer.mergeAll(
+    Layer.succeed(HomeService, homeLayout(root)),
+    Layer.succeed(GitService, fakeGit()),
+    NodeServices.layer,
   );
+
+  await Effect.runPromise(Effect.provide(registration, layer));
 
   const projectDir = join(root, 'projects', repo);
 
@@ -138,8 +137,9 @@ type FakeOverrides = {
  * recording fakes they built instead of pulling them back out of a layer.
  */
 function sessionLayers(overrides: FakeOverrides = {}) {
+  const homeWithSessionsRoot = { ...homeLayout(root), sessionsRoot };
   const stack = Layer.mergeAll(
-    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
+    Layer.succeed(HomeService, homeWithSessionsRoot),
     Layer.succeed(GitService, overrides.git ?? fakeGit()),
     Layer.succeed(TrackerService, overrides.tracker ?? fakeTracker()),
     Layer.succeed(AgentRuntimeService, overrides.runtime ?? fakeRuntime()),
@@ -155,12 +155,18 @@ function sessionLayers(overrides: FakeOverrides = {}) {
 }
 
 /** One session run over the fake stack. */
-const sessionOver = (input: SessionInput, overrides: FakeOverrides = {}) =>
-  Effect.provide(runSession(input), sessionLayers(overrides));
+const sessionOver = (input: SessionInput, overrides: FakeOverrides = {}) => {
+  const layer = sessionLayers(overrides);
+
+  return Effect.provide(runSession(input), layer);
+};
 
 /** The engine front door over the fake stack — an Outcome back, never a rejection. */
-const engineOutcome = (argv: readonly string[], overrides: FakeOverrides = {}) =>
-  Effect.provide(engine(argv), sessionLayers(overrides));
+const engineOutcome = (argv: readonly string[], overrides: FakeOverrides = {}) => {
+  const layer = sessionLayers(overrides);
+
+  return Effect.provide(engine(argv), layer);
+};
 
 /** Narrowing tagged errors to their human detail without re-deriving failure prose. */
 function messageOf(error: SessionError): string {
@@ -240,10 +246,9 @@ describe('runSession', () => {
   it.effect('fails fast for an inactive project, naming the re-register fix', () =>
     Effect.gen(function* () {
       yield* Effect.promise(() => seedProject(root, 'dormant'));
-      yield* Effect.provide(
-        deactivateProject('dormant'),
-        Layer.mergeAll(Layer.succeed(HomeService, homeLayout(root)), NodeServices.layer),
-      );
+      const home = Layer.succeed(HomeService, homeLayout(root));
+      const layer = Layer.mergeAll(home, NodeServices.layer);
+      yield* Effect.provide(deactivateProject('dormant'), layer);
 
       const error = yield* sessionFailure({ repo: 'dormant', issueNumber: 9 });
 
@@ -1108,64 +1113,72 @@ describe('per-repo lock', () => {
         expect(new Set(git.worktrees.map((worktree) => worktree.branch)).size).toBe(2);
 
         // Both sessions released the lock on completion
-        expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
+        const lockGone = yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')));
+
+        expect(lockGone).toBe(false);
       }),
   );
 
   // `it.live`: the wait cap polls the kernel's Effect Clock (`Effect.sleep` cadence) — a
   // TestClock would freeze the retry schedule and hang the test; the live clock is required
   // (see file head).
-  it.live('fails naming pid and holding age once the lock wait cap is spent on a live holder', () =>
-    Effect.gen(function* () {
-      // A live holder means another live process: a real child, killed once the test ends.
-      const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
-      const holderPid = holder.pid;
+  it.live(
+    'fails naming pid and holding age once the lock wait cap is spent on a live holder',
+    () => {
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(HomeService, homeLayout(root)),
+      );
 
-      if (holderPid == null) {
-        throw new Error('could not spawn the lock-holder process');
-      }
+      return Effect.gen(function* () {
+        // A live holder means another live process: a real child, killed once the test ends.
+        const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
+        const holderPid = holder.pid;
 
-      try {
-        // The wait cap polls on the kernel's own Clock — here the live one, since the poll
-        // loop interleaves real fs reads, which a TestClock cannot advance deterministically.
-        // The awaited signal is the LockHeldError itself, not a fixed wait: the cap shortens
-        // the wait (pollMs 50, spent in ~100ms) and the holder's write is backdated 120s, so
-        // the failure lands at holding-age ≈120s either way.
-        const nowMs = toEpochMs(now());
-        const lockPath = yield* Effect.promise(() =>
-          writeRepoLock(root, 'demo', { pid: holderPid, at: nowMs - 120_000 }),
-        );
+        if (holderPid == null) {
+          throw new Error('could not spawn the lock-holder process');
+        }
 
-        const error = yield* Effect.flip(
-          withRepoLock('demo', Effect.succeed(1), {
-            pollMs: 50,
-            maxWaitMs: 100,
-          }),
-        );
+        try {
+          // The wait cap polls on the kernel's own Clock — here the live one, since the poll
+          // loop interleaves real fs reads, which a TestClock cannot advance deterministically.
+          // The awaited signal is the LockHeldError itself, not a fixed wait: the cap shortens
+          // the wait (pollMs 50, spent in ~100ms) and the holder's write is backdated 120s, so
+          // the failure lands at holding-age ≈120s either way.
+          const nowMs = toEpochMs(now());
+          const lockPath = yield* Effect.promise(() =>
+            writeRepoLock(root, 'demo', { pid: holderPid, at: nowMs - 120_000 }),
+          );
 
-        expect(messageOf(error)).toContain(
-          `repo 'demo' is locked by a live session (pid ${holderPid}, holding for 120s)`,
-        );
+          const error = yield* Effect.flip(
+            withRepoLock('demo', Effect.succeed(1), {
+              pollMs: 50,
+              maxWaitMs: 100,
+            }),
+          );
 
-        // The live holder's lock is left alone
-        expect(yield* Effect.promise(() => readFile(lockPath, 'utf8'))).toContain(
-          `"pid":${holderPid}`,
-        );
-      } finally {
-        holder.kill('SIGKILL');
-      }
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(NodeServices.layer, Layer.succeed(HomeService, homeLayout(root))),
-      ),
-    ),
+          expect(messageOf(error)).toContain(
+            `repo 'demo' is locked by a live session (pid ${holderPid}, holding for 120s)`,
+          );
+
+          // The live holder's lock is left alone
+          const lockFile = yield* Effect.promise(() => readFile(lockPath, 'utf8'));
+
+          expect(lockFile).toContain(`"pid":${holderPid}`);
+        } finally {
+          holder.kill('SIGKILL');
+        }
+      }).pipe(Effect.provide(layer));
+    },
   );
 
   // `it.live`: the holder's unlink lands on a real timer while the waiter polls on the live
   // Effect Clock (`Effect.sleep` cadence, frozen by a TestClock); the two must share one
   // timeline (see file head).
-  it.live('hands a cross-process waiter the lock once the holder releases', () =>
-    Effect.gen(function* () {
+  it.live('hands a cross-process waiter the lock once the holder releases', () => {
+    const layer = Layer.mergeAll(NodeServices.layer, Layer.succeed(HomeService, homeLayout(root)));
+
+    return Effect.gen(function* () {
       // A live holder means another live process: a real child, killed once the test ends.
       const holder = spawn('sleep', ['30'], { stdio: 'ignore' });
       const holderPid = holder.pid;
@@ -1193,16 +1206,14 @@ describe('per-repo lock', () => {
         expect(heldPid).toBe(process.pid);
 
         // Scoped acquisition releases on exit — nothing manual to forget
-        expect(yield* Effect.sync(() => existsSync(lockPath))).toBe(false);
+        const lockGone = yield* Effect.sync(() => existsSync(lockPath));
+
+        expect(lockGone).toBe(false);
       } finally {
         holder.kill('SIGKILL');
       }
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(NodeServices.layer, Layer.succeed(HomeService, homeLayout(root))),
-      ),
-    ),
-  );
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect('breaks and takes a stale lock left by a dead session', () =>
     Effect.gen(function* () {
@@ -1217,7 +1228,9 @@ describe('per-repo lock', () => {
       expect(git.worktrees).toHaveLength(1);
 
       // Taken by this run, released cleanly on completion
-      expect(yield* Effect.sync(() => existsSync(lockPath))).toBe(false);
+      const lockGone = yield* Effect.sync(() => existsSync(lockPath));
+
+      expect(lockGone).toBe(false);
     }),
   );
 
@@ -1243,7 +1256,9 @@ describe('per-repo lock', () => {
       const following = yield* sessionOver({ repo: 'demo', issueNumber: 7 }, { tracker, git });
 
       expect(following.manifest.state).toBe('completed');
-      expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
+      const lockGone = yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')));
+
+      expect(lockGone).toBe(false);
     }),
   );
 
@@ -1256,7 +1271,9 @@ describe('per-repo lock', () => {
       const { manifest } = yield* sessionOver({ repo: 'demo', issueNumber: 7 });
 
       expect(manifest.state).toBe('completed');
-      expect(yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')))).toBe(false);
+      const lockGone = yield* Effect.sync(() => existsSync(join(root, 'locks', 'demo.lock')));
+
+      expect(lockGone).toBe(false);
     }),
   );
 });

@@ -67,7 +67,8 @@ function stashRoot(prefix: string): Promise<string> {
 describe('engine', () => {
   it.effect('parses empty argv as the top-level help view', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
       const outcome = yield* Effect.provide(engine([]), layer);
 
       expect(outcome).toMatchObject({ kind: 'help' });
@@ -76,7 +77,8 @@ describe('engine', () => {
 
   it.effect('rejects unknown commands as a failure result', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
       const outcome = yield* Effect.provide(engine(['frobnicate']), layer);
 
       expect(outcome).toMatchObject({ kind: 'error', message: /unknown command 'frobnicate'/ });
@@ -85,7 +87,8 @@ describe('engine', () => {
 
   it.effect('rejects unknown options as a failure result, not a throw', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
       const outcome = yield* Effect.provide(engine(['--verbose']), layer);
 
       expect(outcome).toMatchObject({ kind: 'error', message: /unrecognized option '--verbose'/ });
@@ -94,7 +97,8 @@ describe('engine', () => {
 
   it.effect('reports unimplemented commands as an outcome, not prose', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
       const outcome = yield* Effect.provide(engine(['tick']), layer);
 
       expect(outcome).toEqual({ kind: 'unimplemented', command: 'tick' });
@@ -123,7 +127,8 @@ describe('engine', () => {
 
   it.effect('validates run arguments and reports the error outcome', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
       const missingRepo = yield* Effect.provide(engine(['run']), layer);
       const negativeIssue = yield* Effect.provide(engine(['run', 'x/y', '-5']), layer);
       const strayFlag = yield* Effect.provide(engine(['run', 'x/y', '7', '--wat']), layer);
@@ -148,7 +153,8 @@ describe('engine', () => {
 describe('cli rendering', () => {
   it.effect('renders the command table for empty argv', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
       const out = yield* Effect.promise(() => main([], layer));
 
       ['run', 'status', 'prune', 'tick', 'help'].forEach((name) => {
@@ -159,28 +165,31 @@ describe('cli rendering', () => {
 
   it.effect('renders usage for a specific command', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      expect(yield* Effect.promise(() => main(['help', 'run'], layer))).toMatch(
-        /run <repo> <issue#>/,
-      );
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
+      const usage = yield* Effect.promise(() => main(['help', 'run'], layer));
+
+      expect(usage).toMatch(/run <repo> <issue#>/);
     }),
   );
 
   it.effect('renders unknown-command errors once', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      expect(yield* Effect.promise(() => main(['frobnicate'], layer))).toMatch(
-        /^error: unknown command 'frobnicate'$/,
-      );
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
+      const outcome = yield* Effect.promise(() => main(['frobnicate'], layer));
+
+      expect(outcome).toMatch(/^error: unknown command 'frobnicate'$/);
     }),
   );
 
   it.effect('renders one clean error line for unrecognized options', () =>
     Effect.gen(function* () {
-      const layer = testLayer(yield* Effect.promise(() => stashRoot('seraphim-help-')));
-      expect(yield* Effect.promise(() => main(['--verbose'], layer))).toMatch(
-        /^error: unrecognized option '--verbose'$/,
-      );
+      const home = yield* Effect.promise(() => stashRoot('seraphim-help-'));
+      const layer = testLayer(home);
+      const outcome = yield* Effect.promise(() => main(['--verbose'], layer));
+
+      expect(outcome).toMatch(/^error: unrecognized option '--verbose'$/);
     }),
   );
 });
@@ -262,7 +271,9 @@ describe('projects listing', () => {
       root = yield* Effect.promise(() => stashRoot('seraphim-list-'));
       layer = envFor();
 
-      expect(yield* Effect.promise(() => main(['list'], layer))).toBe('no projects');
+      const listed = yield* Effect.promise(() => main(['list'], layer));
+
+      expect(listed).toBe('no projects');
     }),
   );
 
@@ -334,9 +345,9 @@ describe('prune rendering', () => {
       root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       layer = envFor();
 
-      expect(yield* Effect.promise(() => main(['prune'], layer))).toBe(
-        'nothing eligible for cleanup',
-      );
+      const outcome = yield* Effect.promise(() => main(['prune'], layer));
+
+      expect(outcome).toBe('nothing eligible for cleanup');
     }),
   );
 
@@ -351,9 +362,9 @@ describe('prune rendering', () => {
       expect(result).toContain('└─ #1 —');
       expect(result).toContain('nothing deleted: rerun with --confirm');
       // The non-interactive listing must not have deleted the receipt.
-      expect(yield* Effect.promise(() => readFile(join(dir, 'manifest.json'), 'utf8'))).toContain(
-        '"completed"',
-      );
+      const manifest = yield* Effect.promise(() => readFile(join(dir, 'manifest.json'), 'utf8'));
+
+      expect(manifest).toContain('"completed"');
     }),
   );
 
@@ -408,9 +419,9 @@ describe('prune rendering', () => {
       root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       layer = envFor();
 
-      expect(yield* Effect.promise(() => main(['prune', '--wat'], layer))).toBe(
-        "error: unrecognized option '--wat'",
-      );
+      const outcome = yield* Effect.promise(() => main(['prune', '--wat'], layer));
+
+      expect(outcome).toBe("error: unrecognized option '--wat'");
     }),
   );
 });
