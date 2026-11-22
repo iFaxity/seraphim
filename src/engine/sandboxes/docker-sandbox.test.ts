@@ -7,7 +7,13 @@ import { Effect, FileSystem, Option, Sink, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
-import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
+import {
+  cliDocker,
+  dockerSandbox,
+  imageTagFor,
+  type DockerRunner,
+  type RawDockerRunner,
+} from './docker-sandbox.ts';
 
 import { UnavailableError } from '../../lib/errors.ts';
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
@@ -84,7 +90,7 @@ function countingDocker() {
     return cliDocker.run(args);
   }
 
-  return { run, builds } satisfies DockerRunner & { builds: string[][] };
+  return { run, builds } satisfies RawDockerRunner & { builds: string[][] };
 }
 
 let projectsRoot: string;

@@ -7,6 +7,9 @@ import { dirExists } from '../../lib/fs.ts';
 import { type Git } from '../core/contracts.ts';
 import { GitService } from '../core/services.ts';
 
+/** The process spawner the CLI runner resolves — platform machinery, sealed at the layer. */
+export type GitSpawnContext = ChildProcessSpawner.ChildProcessSpawner;
+
 /**
  * The real `Git` adapter over the git CLI: one subprocess per operation, full argv
  * passthrough. Registration's remote probe (`ls-remote`) and the session's clone/pull/worktree
@@ -154,7 +157,7 @@ export function gitAdapter(runner: GitRunner) {
         const run = yield* runner.run(['push', 'origin', input.branch], input.repoPath);
         yield* checkedOr('push failed', run);
       }),
-  } satisfies Git;
+  };
 }
 
 /** The internal runner key — the adapter owns it; the composition root never sees it. */
@@ -166,9 +169,38 @@ class GitRunnerService extends Context.Service<GitRunnerService, GitRunner>()(
  * context, so this layer is pure `Layer.succeed`. */
 const gitCliLayer: Layer.Layer<GitRunnerService> = Layer.succeed(GitRunnerService, processGit);
 
-/** The `Git` adapter: git CLI wiring fused internally. The layer itself is self-contained;
- * the spawner and filesystem ride the adapter operations' R (honest, per the contract). */
-export const gitLayer: Layer.Layer<GitService> = Layer.provide(
-  Layer.effect(GitService, Effect.map(GitRunnerService, gitAdapter)),
-  gitCliLayer,
-);
+/** The `Git` adapter: git CLI wiring fused internally. The layer demands the platform
+ * drivers (the spawner behind the CLI runner, the filesystem of the presence probe) in its
+ * own R and seals them at build time — the `Git` contract's operations carry no machinery. */
+export const gitLayer: Layer.Layer<GitService, never, GitSpawnContext | FileSystem.FileSystem> =
+  Layer.effect(
+    GitService,
+    Effect.gen(function* () {
+      const runner = yield* GitRunnerService;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fs = yield* FileSystem.FileSystem;
+
+      const env = Context.add(
+        Context.make(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        FileSystem.FileSystem,
+        fs,
+      ) as Context.Context<GitSpawnContext>;
+
+      const raw = gitAdapter(runner);
+
+      const seal = <A>(
+        op: Effect.Effect<A, GitError, GitSpawnContext | FileSystem.FileSystem>,
+      ): Effect.Effect<A, GitError> => Effect.provide(op, env) as Effect.Effect<A, GitError>;
+
+      return {
+        defaultBranch: (repoPath) => seal(raw.defaultBranch(repoPath)),
+        cloneIfMissing: (repoPath, url) => seal(raw.cloneIfMissing(repoPath, url)),
+        pull: (repoPath) => seal(raw.pull(repoPath)),
+        createWorktree: (input) => seal(raw.createWorktree(input)),
+        removeWorktree: (input) => seal(raw.removeWorktree(input)),
+        deleteBranch: (input) => seal(raw.deleteBranch(input)),
+        probeRemote: (url) => seal(raw.probeRemote(url)),
+        push: (input) => seal(raw.push(input)),
+      } satisfies Git;
+    }),
+  ).pipe(Layer.provide(gitCliLayer));
