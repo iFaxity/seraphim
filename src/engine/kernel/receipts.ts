@@ -5,6 +5,7 @@ import { type TranscriptFile } from './turns.ts';
 
 import { isNotFound, ReceiptReadError, ReceiptWriteError } from '../../lib/errors.ts';
 import { fromEpochMs, toEpochMs } from '../../lib/time.ts';
+import { HomeService } from '../core/env.ts';
 
 /**
  * Receipts are the filesystem-as-database (ADR-0001): a schema-validated session manifest
@@ -222,8 +223,20 @@ const listRepoSessions = (sessionsRoot: string, repoName: string, skipped: Unrea
   });
 
 /** All sessions across all repos under the receipts root, newest first. */
-export const listSessions = (sessionsRoot: string) =>
+export type SessionsListing = {
+  readonly sessions: readonly SessionListing[];
+  /** Manifests skipped as unreadable — counted, not fatal. */
+  readonly skipped: number;
+};
+
+export const listSessions = (): Effect.Effect<
+  SessionsListing,
+  ReceiptReadError,
+  HomeService | FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
+    const home = yield* HomeService;
+    const sessionsRoot = home.sessionsRoot;
     const fs = yield* FileSystem.FileSystem;
     const repos = yield* Effect.result(fs.readDirectoryEntries(sessionsRoot));
 
@@ -377,15 +390,15 @@ const writeReceiptFiles = (
   });
 
 export const writeReceipt = (
-  sessionsRoot: string,
   relDir: string,
   manifest: Session,
   turns: readonly Turn[],
   logs: readonly string[],
   transcripts: readonly TranscriptFile[],
-): Effect.Effect<void, ReceiptWriteError, FileSystem.FileSystem> =>
+): Effect.Effect<void, ReceiptWriteError, HomeService | FileSystem.FileSystem> =>
   Effect.gen(function* () {
-    const dir = sessionDir(sessionsRoot, relDir);
+    const home = yield* HomeService;
+    const dir = sessionDir(home.sessionsRoot, relDir);
 
     yield* writeSessionManifest(dir, manifest);
     yield* writeReceiptFiles(dir, turns, logs, transcripts);

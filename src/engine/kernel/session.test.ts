@@ -139,7 +139,7 @@ type FakeOverrides = {
  */
 function sessionLayers(overrides: FakeOverrides = {}) {
   const stack = Layer.mergeAll(
-    Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
+    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
     Layer.succeed(GitService, overrides.git ?? fakeGit()),
     Layer.succeed(TrackerService, overrides.tracker ?? fakeTracker()),
     Layer.succeed(AgentRuntimeService, overrides.runtime ?? fakeRuntime()),
@@ -1137,7 +1137,7 @@ describe('per-repo lock', () => {
         );
 
         const error = yield* Effect.flip(
-          withRepoLock(homeLayout(root).home, 'demo', Effect.succeed(1), {
+          withRepoLock('demo', Effect.succeed(1), {
             pollMs: 50,
             maxWaitMs: 100,
           }),
@@ -1154,7 +1154,11 @@ describe('per-repo lock', () => {
       } finally {
         holder.kill('SIGKILL');
       }
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, Layer.succeed(HomeService, homeLayout(root))),
+      ),
+    ),
   );
 
   // `it.live`: the holder's unlink lands on a real timer while the waiter polls on the live
@@ -1181,15 +1185,10 @@ describe('per-repo lock', () => {
         setTimeout(() => unlinkSync(lockPath), 5).unref?.();
 
         // The waiter acquires once the file is gone; the guarded effect answers with our pid.
-        const heldPid = yield* withRepoLock(
-          homeLayout(root).home,
-          'demo',
-          Effect.succeed(process.pid),
-          {
-            pollMs: 1,
-            maxWaitMs: 60_000,
-          },
-        );
+        const heldPid = yield* withRepoLock('demo', Effect.succeed(process.pid), {
+          pollMs: 1,
+          maxWaitMs: 60_000,
+        });
 
         expect(heldPid).toBe(process.pid);
 
@@ -1198,7 +1197,11 @@ describe('per-repo lock', () => {
       } finally {
         holder.kill('SIGKILL');
       }
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, Layer.succeed(HomeService, homeLayout(root))),
+      ),
+    ),
   );
 
   it.effect('breaks and takes a stale lock left by a dead session', () =>

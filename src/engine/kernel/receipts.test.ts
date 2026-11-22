@@ -2,17 +2,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Effect, FileSystem } from 'effect';
+import { Effect, FileSystem, Layer } from 'effect';
 import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { MANIFEST_FILE, type Session, type Turn, writeReceipt } from './receipts.ts';
 
 import { fromEpochMs } from '../../lib/time.ts';
+import { HomeService, homeLayout } from '../core/env.ts';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 
-/** The receipt writes ride the platform FileSystem service, provided here for every test. */
-const withFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
-  Effect.provide(effect, NodeFileSystem.layer);
+/** The receipt writes ride the platform FileSystem and the home layout, provided per test.
+ * The temp root doubles as the sessions root, so the layout's root is overridden. */
+const withFs = <A, E>(
+  effect: Effect.Effect<A, E, FileSystem.FileSystem | HomeService>,
+  root: string,
+) =>
+  Effect.provide(
+    effect,
+    Layer.mergeAll(
+      NodeFileSystem.layer,
+      Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot: root }),
+    ),
+  );
 
 const startedAt = fromEpochMs(1_000);
 const endedAt = fromEpochMs(2_000);
@@ -62,7 +73,7 @@ describe('writeReceipt', () => {
   it.effect('writes the manifest with epoch-ms timestamps and turns as disk JSON', () =>
     Effect.gen(function* () {
       const { root, cleanup } = yield* Effect.promise(() => tempRoot());
-      yield* withFs(writeReceipt(root, 'seraphim/37-1000', session(), [turn(1)], [], []));
+      yield* withFs(writeReceipt('seraphim/37-1000', session(), [turn(1)], [], []), root);
       const manifest = JSON.parse(
         yield* Effect.promise(() =>
           readFile(join(root, 'seraphim/37-1000', MANIFEST_FILE), 'utf8'),
@@ -90,13 +101,13 @@ describe('writeReceipt', () => {
       const dir = 'seraphim/37-1000';
       yield* withFs(
         writeReceipt(
-          root,
           dir,
           session(),
           [turn(1), turn(2)],
           ['gate: echo → exit 0'],
           [{ name: 'session.transcript.md', body: '# session' }],
         ),
+        root,
       );
       const files = (yield* Effect.promise(() => readdir(join(root, dir)))).sort();
       expect(files).toEqual([
@@ -113,7 +124,7 @@ describe('writeReceipt', () => {
         yield* Effect.promise(() => readFile(join(root, dir, 'session.transcript.md'), 'utf8')),
       ).toBe('# session\n');
       const noLogs = 'seraphim/38-2000';
-      yield* withFs(writeReceipt(root, noLogs, session({ issueNumber: 38 }), [turn(1)], [], []));
+      yield* withFs(writeReceipt(noLogs, session({ issueNumber: 38 }), [turn(1)], [], []), root);
       expect(yield* Effect.promise(() => readdir(join(root, noLogs)))).not.toContain('flow.log');
       yield* Effect.promise(() => cleanup());
     }),
@@ -123,7 +134,7 @@ describe('writeReceipt', () => {
       const { root, cleanup } = yield* Effect.promise(() => tempRoot());
       const bad = session({ agent: '' });
       const error = yield* Effect.flip(
-        withFs(writeReceipt(root, 'seraphim/37-1000', bad, [turn(1)], [], [])),
+        withFs(writeReceipt('seraphim/37-1000', bad, [turn(1)], [], []), root),
       );
       expect(error).toBeInstanceOf(Error);
       expect(error.message).toContain('session manifest invalid');

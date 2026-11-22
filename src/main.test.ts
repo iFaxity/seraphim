@@ -38,7 +38,7 @@ function testLayer(
     FakeGit.layer(),
     FakeNotifier.layer(),
     FakeRuntime.layer(),
-    Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
+    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
     NodeServices.layer,
   );
 

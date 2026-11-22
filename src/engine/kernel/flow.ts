@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { Effect, FileSystem, Result, Schema } from 'effect';
 
 import { FlowError } from '../../lib/errors.ts';
+import { HomeService } from '../core/env.ts';
 import { FlowConfigSchema, type FlowConfig, type SessionContext } from '../core/flow-api.ts';
 
 /**
@@ -30,10 +31,11 @@ function flowPath(home: string, repo: string) {
  * untrusted boundary (CODING_STANDARDS: Schema where untrusted input crosses an edge), so the
  * dynamic import's default export is schema-checked before the engine touches it.
  */
-export const loadFlow = (home: string, repo: string) =>
+export const loadFlow = (repo: string) =>
   Effect.gen(function* () {
+    const home = yield* HomeService;
     const fs = yield* FileSystem.FileSystem;
-    const path = flowPath(home, repo);
+    const path = flowPath(home.home, repo);
 
     const read = yield* Effect.result(fs.readFileString(path));
 
