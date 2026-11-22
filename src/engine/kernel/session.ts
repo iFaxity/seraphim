@@ -12,13 +12,13 @@ import { createTurnEngine, type TurnAborted, type TurnEngine } from './turns.ts'
 import {
   ClaimConflictError,
   describeError,
-  DockerfileMissingError,
   GitError,
   LockHeldError,
   ProjectError,
   type ReceiptReadError,
   ReceiptWriteError,
   UnavailableError,
+  DockerfileMissingError,
 } from '../../lib/errors.ts';
 import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
@@ -30,6 +30,7 @@ import {
   type NotifyEvent,
   type Notifier,
   type Sandbox,
+  type SandboxContext,
   type Tracker,
   type TrackerError,
 } from '../core/contracts.ts';
@@ -167,7 +168,6 @@ type SessionRun = {
 type RunnableFlowError = Exclude<KernelFailure, ReceiptReadError | ReceiptWriteError>;
 
 const resolveRunnableFlow = (
-  home: Home,
   input: SessionInput,
 ): Effect.Effect<
   RunnableFlow & { tracker: Tracker; git: Git; runtime: AgentRuntime },
@@ -180,6 +180,7 @@ const resolveRunnableFlow = (
   | ChildProcessSpawner.ChildProcessSpawner
 > =>
   Effect.gen(function* () {
+    const home = yield* HomeService;
     const tracker = yield* TrackerService;
     const git = yield* GitService;
     const runtime = yield* AgentRuntimeService;
@@ -192,8 +193,8 @@ const resolveRunnableFlow = (
       });
     }
 
-    const flow = yield* loadFlow(home.home, input.repo);
-    yield* checkDeclaredSkills(home.poolRoot, flow.config.skills);
+    const flow = yield* loadFlow(input.repo);
+    yield* checkDeclaredSkills(flow.config.skills);
     yield* checkPreflight(home, input.repo);
 
     if (!runtime.available(flow.config.agent)) {
@@ -244,22 +245,14 @@ export const runSession = (
     const notifier = yield* NotifierService;
     const sandbox = yield* SandboxService;
 
-    const resolved = yield* resolveRunnableFlow(home, input);
+    const resolved = yield* resolveRunnableFlow(input);
     const { project, flow, tracker, git } = resolved;
 
     // The repo lock serializes only the shared mutations across concurrent sessions on one
     // repo — image build and clone/pull; the worktree and turn dispatch below stay outside it
     // (parallel issues per repo are the intended use case).
     const repoPath = join(home.reposRoot, input.repo);
-    const issue = yield* claimAndSyncIssue(
-      home,
-      input,
-      repoPath,
-      project.remote,
-      tracker,
-      git,
-      sandbox,
-    );
+    const issue = yield* claimAndSyncIssue(input, repoPath, project.remote, tracker, git, sandbox);
 
     const prepared = yield* prepareWorktree(home, input, flow.config, repoPath, git);
     const { startedAt, relDir, worktreePath, branch } = prepared;
@@ -320,7 +313,6 @@ class TurnAbortedError extends Error {
  * stranding a claimed issue. Returns the claimed issue for the turn phase.
  */
 const claimAndSyncIssue = (
-  home: Home,
   input: SessionInput,
   repoPath: string,
   remote: string,
@@ -330,10 +322,9 @@ const claimAndSyncIssue = (
 ): Effect.Effect<
   Issue,
   TrackerError | ClaimConflictError | UnavailableError | GitError | LockHeldError,
-  FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
+  HomeService | SandboxContext
 > =>
   withRepoLock(
-    home.home,
     input.repo,
     Effect.gen(function* () {
       const issue = yield* tracker.getIssue(input.repo, input.issueNumber);
@@ -378,7 +369,6 @@ const prepareWorktree = (
     });
 
     yield* stageSkills({
-      poolRoot: home.poolRoot,
       worktreePath,
       agent: config.agent,
       declared: config.skills,
@@ -625,9 +615,13 @@ const finalizeSessionReceipt = (
   notifier: Notifier,
   relDir: string,
   flowRun: Result.Result<void, Error>,
-): Effect.Effect<{ readonly manifest: Session }, ReceiptWriteError, FileSystem.FileSystem> =>
+): Effect.Effect<
+  { readonly manifest: Session },
+  ReceiptWriteError,
+  HomeService | FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
-    const { home, manifest, stateRef, turnsEngine, logs } = run;
+    const { manifest, stateRef, turnsEngine, logs } = run;
 
     // The flow's own outcome is the last transition: a failure fails a still-running
     // session, a clean return completes it, and an already-terminal state stays sticky.
@@ -656,7 +650,7 @@ const finalizeSessionReceipt = (
       );
     }
 
-    yield* writeReceipt(home.sessionsRoot, relDir, finalManifest, turns, logs, transcripts);
+    yield* writeReceipt(relDir, finalManifest, turns, logs, transcripts);
 
     return { manifest: finalManifest };
   });

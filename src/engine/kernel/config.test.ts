@@ -2,11 +2,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Effect, FileSystem, Result } from 'effect';
+import { Effect, FileSystem, Layer, Result } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { loadKernelConfig } from './config.ts';
 
+import { HomeService, homeLayout } from '../core/env.ts';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 
 let home: string;
@@ -19,15 +20,18 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-/** The config read rides the platform FileSystem service, provided here for every test. */
-const withFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
-  Effect.provide(effect, NodeFileSystem.layer);
+/** The config read rides the platform FileSystem and the home layout, provided per test. */
+const withFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | HomeService>) =>
+  Effect.provide(
+    effect,
+    Layer.mergeAll(NodeFileSystem.layer, Layer.succeed(HomeService, homeLayout(home))),
+  );
 
 describe('loadKernelConfig', () => {
   it.effect('defaults to no notify channel and a 30-minute crash staleness threshold', () =>
     withFs(
       Effect.gen(function* () {
-        const config = yield* loadKernelConfig(home);
+        const config = yield* loadKernelConfig();
 
         expect(config.notify).toBeNull();
         expect(config.crashStaleMs).toBe(30 * 60_000);
@@ -48,7 +52,7 @@ describe('loadKernelConfig', () => {
           ),
         );
 
-        const config = yield* loadKernelConfig(home);
+        const config = yield* loadKernelConfig();
 
         expect(config.notify).toEqual({
           url: 'https://ntfy.invalid/seraphim',
@@ -67,7 +71,7 @@ describe('loadKernelConfig', () => {
           writeFile(join(home, 'config.json'), JSON.stringify({ notify: null })),
         );
 
-        const config = yield* loadKernelConfig(home);
+        const config = yield* loadKernelConfig();
 
         expect(config).toEqual({ notify: null, crashStaleMs: 30 * 60_000 });
       }),
@@ -85,7 +89,7 @@ describe('loadKernelConfig', () => {
           ),
         );
 
-        const failure = yield* Effect.result(loadKernelConfig(home));
+        const failure = yield* Effect.result(loadKernelConfig());
 
         expect(Result.isFailure(failure)).toBe(true);
 
@@ -102,7 +106,7 @@ describe('loadKernelConfig', () => {
         yield* Effect.promise(() => mkdir(home, { recursive: true }));
         yield* Effect.promise(() => writeFile(join(home, 'config.json'), '{not json'));
 
-        const failure = yield* Effect.result(loadKernelConfig(home));
+        const failure = yield* Effect.result(loadKernelConfig());
 
         expect(Result.isFailure(failure)).toBe(true);
 

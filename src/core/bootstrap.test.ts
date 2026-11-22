@@ -2,11 +2,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { readBootstrap } from './bootstrap.ts';
 
+import { homeServiceLayer } from '../engine/core/env.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 
 const homes: string[] = [];
@@ -26,7 +27,13 @@ const withHome = (contents: string | null) =>
     }
     const previous = process.env['SERAPHIM_HOME'];
     process.env['SERAPHIM_HOME'] = home;
-    const boot = yield* Effect.provide(readBootstrap, NodeFileSystem.layer).pipe(
+    const boot = yield* Effect.provide(
+      readBootstrap,
+      Layer.mergeAll(
+        NodeFileSystem.layer,
+        homeServiceLayer(home).pipe(Layer.provide(NodeFileSystem.layer)),
+      ),
+    ).pipe(
       Effect.ensuring(
         Effect.sync(() => {
           if (previous === undefined) {

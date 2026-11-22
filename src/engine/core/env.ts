@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { Context } from 'effect';
+import { fileURLToPath } from 'node:url';
+import { Context, Effect, FileSystem, Layer, Option } from 'effect';
 
 /**
  * The engine-wide filesystem identity (ADR-0002): one home directory on disk from which
@@ -29,19 +30,51 @@ export type Home = {
 export class HomeService extends Context.Service<HomeService, Home>()('seraphim/core/Home') {}
 
 /**
- * Derives the layout from one home directory. Overrides exist for the tests' split temp
- * roots (sessions/pool on their own tmpdirs) — production composition passes only `home`.
+ * Derives the layout from one home directory. Tests that need split temp roots spread the
+ * result and override the affected roots inline — production composition passes only `home`.
  */
-export function homeLayout(
-  home: string,
-  overrides: { readonly sessionsRoot?: string; readonly poolRoot?: string } = {},
-): Home {
+export function homeLayout(home: string): Home {
   return {
     home,
     projectsRoot: join(home, 'projects'),
-    sessionsRoot: overrides.sessionsRoot ?? join(home, 'sessions'),
-    poolRoot: overrides.poolRoot ?? join(home, 'skills'),
+    sessionsRoot: join(home, 'sessions'),
+    poolRoot: join(home, 'skills'),
     reposRoot: join(home, 'repos'),
     worktreesRoot: join(home, 'worktrees'),
   };
+}
+
+/**
+ * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
+ * exists, else the pool shipped in this checkout — a fresh install curates the factory's
+ * own skills from day one, and a home skills directory overrides it wholesale. An
+ * unreadable probe reads as absent (the shipped pool fallback).
+ */
+const resolvePoolRoot = (home: string): Effect.Effect<string, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const homePool = poolRoot(home);
+
+    const present = Option.isSome(yield* Effect.option(fs.stat(homePool)));
+
+    return present ? homePool : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
+  });
+
+/** Where the curated pool lives in the central directory. */
+export function poolRoot(home: string) {
+  return join(home, 'skills');
+}
+
+/**
+ * Production wiring for the filesystem identity: derives the layout from one home
+ * directory, probing the shipped-pool fallback for `poolRoot`. The composition root (or a
+ * test) supplies the home string; the platform FileSystem rides the layer's R.
+ */
+export function homeServiceLayer(
+  home: string,
+): Layer.Layer<HomeService, never, FileSystem.FileSystem> {
+  return Layer.effect(
+    HomeService,
+    Effect.map(resolvePoolRoot(home), (poolRoot) => ({ ...homeLayout(home), poolRoot })),
+  );
 }

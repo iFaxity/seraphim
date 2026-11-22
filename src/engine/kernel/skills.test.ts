@@ -2,22 +2,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Effect, FileSystem } from 'effect';
+import { Effect, FileSystem, Layer } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import {
   checkDeclaredSkills,
   listPoolSkills,
-  poolRoot,
   STAGING_PATH_BY_AGENT,
   stageSkills,
 } from './skills.ts';
 
+import { HomeService, homeLayout, poolRoot } from '../core/env.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
-/** The pool reads ride the platform FileSystem service, provided here for every test. */
-const withFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
-  Effect.provide(effect, NodeFileSystem.layer);
+/** The pool reads ride the platform FileSystem and the home layout, provided per test. */
+const withFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | HomeService>) =>
+  Effect.provide(
+    effect,
+    Layer.mergeAll(NodeFileSystem.layer, Layer.succeed(HomeService, homeLayout(root))),
+  );
 
 let root: string;
 beforeEach(async () => {
@@ -56,9 +59,7 @@ describe('checkDeclaredSkills', () => {
   it.effect('fails fast naming the missing skill and the pool fix', () =>
     Effect.gen(function* () {
       yield* Effect.promise(() => seedSkill('implement'));
-      const error = yield* Effect.flip(
-        withFs(checkDeclaredSkills(poolRoot(root), ['implement', 'tdd'])),
-      );
+      const error = yield* Effect.flip(withFs(checkDeclaredSkills(['implement', 'tdd'])));
       expect(error.message).toContain('tdd');
       expect(error.message).toContain(poolRoot(root));
       expect(error.message).toContain('implement');
@@ -68,12 +69,12 @@ describe('checkDeclaredSkills', () => {
     Effect.gen(function* () {
       yield* Effect.promise(() => seedSkill('implement'));
       yield* Effect.promise(() => seedSkill('tdd'));
-      yield* withFs(checkDeclaredSkills(poolRoot(root), ['tdd', 'implement']));
+      yield* withFs(checkDeclaredSkills(['tdd', 'implement']));
     }),
   );
   it.effect('accepts an explicitly empty declaration over any pool', () =>
     Effect.gen(function* () {
-      yield* withFs(checkDeclaredSkills(poolRoot(root), []));
+      yield* withFs(checkDeclaredSkills([]));
     }),
   );
 });
@@ -85,7 +86,6 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => seedSkill('implement'));
       yield* withFs(
         stageSkills({
-          poolRoot: poolRoot(root),
           worktreePath: worktree,
           agent: 'pi',
           declared: ['implement'],
@@ -112,7 +112,6 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => seedSkill('tdd', 'fresh body'));
       yield* withFs(
         stageSkills({
-          poolRoot: poolRoot(root),
           worktreePath: worktree,
           agent: 'claude',
           declared: ['tdd'],
@@ -129,7 +128,6 @@ describe('stageSkills', () => {
       yield* Effect.promise(() => mkdir(worktree, { recursive: true }));
       const staged = yield* withFs(
         stageSkills({
-          poolRoot: poolRoot(root),
           worktreePath: worktree,
           agent: 'pi',
           declared: [],

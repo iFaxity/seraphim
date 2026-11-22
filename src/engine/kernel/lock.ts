@@ -3,6 +3,7 @@ import { Clock, Effect, FileSystem, Result, Schedule } from 'effect';
 
 import { isAlreadyExists, LockHeldError } from '../../lib/errors.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
+import { HomeService } from '../core/env.ts';
 
 /**
  * Per-repo lock serializing exactly the shared mutations across concurrent sessions on one
@@ -163,50 +164,53 @@ const takeFileLock = (path: string, repo: string, pollMs: number, maxWaitMs: num
  * stay in `R`.
  */
 export function withRepoLock<A, E, R>(
-  home: string,
   repo: string,
   guarded: Effect.Effect<A, E, R>,
   timing: LockTiming = {},
-): Effect.Effect<A, E | LockHeldError, R | FileSystem.FileSystem> {
+): Effect.Effect<A, E | LockHeldError, R | HomeService | FileSystem.FileSystem> {
   const pollMs = timing.pollMs ?? LOCK_POLL_MS;
   const maxWaitMs = timing.maxWaitMs ?? LOCK_MAX_WAIT_MS;
 
-  // Repo names cannot start with '.' (registration validates a plain directory name) — and
-  // now nothing hidden rides along: the lock is a plain named file in `locks/`.
-  const path = join(home, 'locks', `${repo}.lock`);
+  return Effect.flatMap(HomeService, (home) => {
+    // Repo names cannot start with '.' (registration validates a plain directory name) — and
+    // now nothing hidden rides along: the lock is a plain named file in `locks/`.
+    const path = join(home.home, 'locks', `${repo}.lock`);
 
-  // In-process FIFO: one tail per lock path, resolved when the current holder releases.
-  const previous = mutexTails.get(path) ?? Promise.resolve();
-  const { promise: turn, resolve: releaseTurn } = Promise.withResolvers<void>();
-  const tail = previous.then(() => turn);
-  mutexTails.set(path, tail);
+    // In-process FIFO: one tail per lock path, resolved when the current holder releases.
+    const previous = mutexTails.get(path) ?? Promise.resolve();
+    const { promise: turn, resolve: releaseTurn } = Promise.withResolvers<void>();
+    const tail = previous.then(() => turn);
+    mutexTails.set(path, tail);
 
-  const unlinkRelease = Effect.result(
-    Effect.flatMap(FileSystem.FileSystem, (fs) => fs.remove(path, { force: true })),
-  ).pipe(Effect.asVoid);
+    const unlinkRelease = Effect.result(
+      Effect.flatMap(FileSystem.FileSystem, (fs) => fs.remove(path, { force: true })),
+    ).pipe(Effect.asVoid);
 
-  return Effect.gen(function* () {
-    yield* Effect.promise(() => previous);
+    return Effect.gen(function* () {
+      yield* Effect.promise(() => previous);
 
-    const fs = yield* FileSystem.FileSystem;
+      const fs = yield* FileSystem.FileSystem;
 
-    const made = yield* Effect.result(fs.makeDirectory(join(home, 'locks'), { recursive: true }));
-    if (Result.isFailure(made)) {
-      return yield* Effect.die(made.failure);
-    }
+      const made = yield* Effect.result(
+        fs.makeDirectory(join(home.home, 'locks'), { recursive: true }),
+      );
+      if (Result.isFailure(made)) {
+        return yield* Effect.die(made.failure);
+      }
 
-    return yield* Effect.flatMap(takeFileLock(path, repo, pollMs, maxWaitMs), () =>
-      Effect.ensuring(guarded, unlinkRelease),
+      return yield* Effect.flatMap(takeFileLock(path, repo, pollMs, maxWaitMs), () =>
+        Effect.ensuring(guarded, unlinkRelease),
+      );
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          releaseTurn();
+
+          if (mutexTails.get(path) == tail) {
+            mutexTails.delete(path);
+          }
+        }),
+      ),
     );
-  }).pipe(
-    Effect.ensuring(
-      Effect.sync(() => {
-        releaseTurn();
-
-        if (mutexTails.get(path) == tail) {
-          mutexTails.delete(path);
-        }
-      }),
-    ),
-  );
+  });
 }

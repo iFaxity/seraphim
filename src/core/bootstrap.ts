@@ -1,10 +1,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ConfigProvider, Effect, FileSystem, Option, Schema } from 'effect';
 
+import { HomeService } from '../engine/core/env.ts';
 import { loadKernelConfig, type NotifyChannel } from '../engine/kernel/config.ts';
-import { poolRoot } from '../engine/kernel/skills.ts';
 import { describeError, HomeEnvError, KernelConfigError } from '../lib/errors.ts';
 
 /**
@@ -81,37 +80,21 @@ export const seraphimHome = (): string =>
 /**
  * The failing bootstrap edge: the home `.env` forge token and the global kernel config,
  * read against the platform FileSystem. The home layout itself is not derived here — the
- * HomeService layer owns it.
+ * HomeService layer owns it (and this edge resolves it from the context).
  */
 export const readBootstrap: Effect.Effect<
   Bootstrap,
   KernelConfigError | HomeEnvError,
-  FileSystem.FileSystem
+  HomeService | FileSystem.FileSystem
 > = Effect.gen(function* () {
-  const home = seraphimHome();
   const fs = yield* FileSystem.FileSystem;
+  const home = yield* HomeService;
 
-  const envContents = Option.getOrNull(yield* Effect.option(fs.readFileString(join(home, '.env'))));
+  const envContents = Option.getOrNull(
+    yield* Effect.option(fs.readFileString(join(home.home, '.env'))),
+  );
   const env = yield* loadHomeEnv(envContents);
-  const config = yield* loadKernelConfig(home);
+  const config = yield* loadKernelConfig();
 
   return { token: env['GH_TOKEN'], notify: config.notify };
 });
-
-/**
- * The curated pool the kernel enforces against: the operator's `<home>/skills` when it
- * exists, else the pool shipped in this checkout — a fresh install curates the factory's
- * own skills from day one, and a home skills directory overrides it wholesale. An
- * unreadable probe reads as absent (the shipped pool fallback).
- */
-export const resolvePoolRoot = (
-  home: string,
-): Effect.Effect<string, never, FileSystem.FileSystem> =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const homePool = poolRoot(home);
-
-    const present = Option.isSome(yield* Effect.option(fs.stat(homePool)));
-
-    return present ? homePool : join(fileURLToPath(new URL('../..', import.meta.url)), 'skills');
-  });
