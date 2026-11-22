@@ -1,9 +1,9 @@
 import { NodeFileSystem, NodeChildProcessSpawner } from '@effect/platform-node';
 import { Effect, Layer, ManagedRuntime, Path, Result } from 'effect';
 
-import { readBootstrap, resolvePoolRoot, seraphimHome, type Bootstrap } from './core/bootstrap.ts';
+import { readBootstrap, seraphimHome, type Bootstrap } from './core/bootstrap.ts';
 import { engine } from './engine/core/engine.ts';
-import { HomeService, homeLayout } from './engine/core/env.ts';
+import { homeLayout, homeServiceLayer } from './engine/core/env.ts';
 import { apiLayer, GithubToken } from './engine/forges/github-api.ts';
 import { trackerLayer } from './engine/forges/github-tracker.ts';
 import { type CommandServices } from './engine/kernel/command.ts';
@@ -25,7 +25,13 @@ import { describeError } from './lib/errors.ts';
 export async function main(argv: readonly string[], layer?: Layer.Layer<CommandServices>) {
   if (layer == null) {
     const bootResult = await Effect.runPromise(
-      Effect.provide(Effect.result(readBootstrap), NodeFileSystem.layer),
+      Effect.provide(
+        Effect.result(readBootstrap),
+        Layer.mergeAll(
+          NodeFileSystem.layer,
+          homeServiceLayer(seraphimHome()).pipe(Layer.provide(NodeFileSystem.layer)),
+        ),
+      ),
     );
 
     if (Result.isFailure(bootResult)) {
@@ -94,15 +100,11 @@ function adaptersLayer(boot: Bootstrap, projectsRoot: string) {
  */
 function engineStack(boot: Bootstrap): Layer.Layer<CommandServices> {
   const home = seraphimHome();
-  const layout = homeLayout(home);
   const fs = NodeFileSystem.layer;
 
-  const adapters = adaptersLayer(boot, layout.projectsRoot);
+  const adapters = adaptersLayer(boot, homeLayout(home).projectsRoot);
 
-  const homeService = Layer.effect(
-    HomeService,
-    Effect.map(resolvePoolRoot(home), (poolRoot) => ({ ...layout, poolRoot })),
-  ).pipe(Layer.provide(fs));
+  const homeService = homeServiceLayer(home).pipe(Layer.provide(fs));
 
   // The Node ChildProcessSpawner driver backs the CLI runners the adapters' operations
   // resolve from the Effect context at run time (never parameters); its own fs/path deps

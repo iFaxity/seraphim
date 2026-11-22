@@ -89,7 +89,7 @@ export const planPrune: Effect.Effect<
   const home = yield* HomeService;
   const docker = yield* Effect.serviceOption(DockerRunnerService);
 
-  const listed = yield* listSessions(home.sessionsRoot);
+  const listed = yield* listSessions();
 
   const sessions = listed.sessions
     .filter((entry) => entry.manifest.state == 'completed')

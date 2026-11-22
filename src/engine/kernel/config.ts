@@ -1,6 +1,7 @@
 import { Effect, FileSystem, Result, Schema } from 'effect';
 
 import { isNotFound, KernelConfigError } from '../../lib/errors.ts';
+import { HomeService } from '../core/env.ts';
 
 /**
  * The global kernel config: one schema-validated record at `<home>/config.json`, read once
@@ -51,12 +52,15 @@ const defaultConfig: KernelConfig = { notify: null, crashStaleMs: CRASH_STALE_MS
  * `KernelConfigError` naming the fix — the operator configured something, so fail fast
  * instead of guessing.
  */
-export const loadKernelConfig = (
-  home: string,
-): Effect.Effect<KernelConfig, KernelConfigError, FileSystem.FileSystem> =>
+export const loadKernelConfig = (): Effect.Effect<
+  KernelConfig,
+  KernelConfigError,
+  HomeService | FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const path = `${home}/config.json`;
+    const home = yield* HomeService;
+    const path = `${home.home}/config.json`;
     const read = yield* Effect.result(fs.readFileString(path));
 
     if (Result.isFailure(read)) {

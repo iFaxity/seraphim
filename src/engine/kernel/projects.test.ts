@@ -114,7 +114,10 @@ describe('registerProject', () => {
 
       yield* Effect.provide(registerProject(REMOTE), projectLayer(git));
 
-      const flow = yield* Effect.provide(loadFlow(root, 'widgets'), fsLayer);
+      const flow = yield* Effect.provide(
+        loadFlow('widgets'),
+        Layer.mergeAll(fsLayer, Layer.succeed(HomeService, homeLayout(root))),
+      );
 
       expect(flow.config.agent).toBe('pi');
       expect(typeof flow.run).toBe('function');

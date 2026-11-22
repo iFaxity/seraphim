@@ -37,7 +37,7 @@ afterEach(async () => {
 function pruneLayer(git: FakeGit, docker?: DockerRunner) {
   // NodeServices backs the git/docker CLI adapters' context-resolved spawner and fs.
   const base = Layer.mergeAll(
-    Layer.succeed(HomeService, homeLayout(root, { sessionsRoot })),
+    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
     Layer.succeed(GitService, git),
     NodeServices.layer,
   );

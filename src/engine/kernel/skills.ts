@@ -3,6 +3,7 @@ import { Effect, FileSystem, Result } from 'effect';
 
 import { isNotFound, SkillPoolError } from '../../lib/errors.ts';
 import { fileExists } from '../../lib/fs.ts';
+import { HomeService } from '../core/env.ts';
 
 /**
  * The curated skill pool (stories 14–16): one directory per skill, one `SKILL.md`
@@ -18,11 +19,6 @@ export type PoolSkill = {
   readonly name: string;
   readonly dir: string;
 };
-
-/** Where the curated pool lives in the central directory. */
-export function poolRoot(home: string) {
-  return join(home, 'skills');
-}
 
 /** The pool-root read: ENOENT is an empty pool, any other failure is a labeled error. */
 const poolSkills = (root: string) =>
@@ -72,10 +68,11 @@ export const listPoolSkills = (
  * naming the fix. Undeclared pool skills are fine: the pool is curated once, flows enroll.
  */
 export const checkDeclaredSkills = (
-  root: string,
   declared: readonly string[],
-): Effect.Effect<void, SkillPoolError, FileSystem.FileSystem> =>
+): Effect.Effect<void, SkillPoolError, HomeService | FileSystem.FileSystem> =>
   Effect.gen(function* () {
+    const home = yield* HomeService;
+    const root = home.poolRoot;
     const pool = yield* listPoolSkills(root);
     const available = new Set(pool.map((skill) => skill.name));
     const missing = [...new Set(declared)].filter((name) => !available.has(name));
@@ -101,14 +98,14 @@ export const STAGING_PATH_BY_AGENT: Record<'pi' | 'claude', string> = {
  * Overwrites in place: the pool is the single source, the worktree copy is disposable.
  */
 export const stageSkills = (input: {
-  readonly poolRoot: string;
   readonly worktreePath: string;
   readonly agent: 'pi' | 'claude';
   readonly declared: readonly string[];
-}): Effect.Effect<string[], SkillPoolError, FileSystem.FileSystem> =>
+}): Effect.Effect<string[], SkillPoolError, HomeService | FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const pool = yield* listPoolSkills(input.poolRoot);
+    const home = yield* HomeService;
+    const pool = yield* listPoolSkills(home.poolRoot);
 
     const staging = join(input.worktreePath, STAGING_PATH_BY_AGENT[input.agent]);
     const made = yield* Effect.result(fs.makeDirectory(staging, { recursive: true }));

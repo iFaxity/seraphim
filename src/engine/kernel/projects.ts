@@ -74,8 +74,8 @@ function templateBody(file: string) {
 
 /** Reads the slot templates once per registration — the old module-load read, re-homed onto
  * the service. Unreadable templates fail fast as a defect instead of seeding empty slots. */
-function projectSlots() {
-  return Effect.gen(function* () {
+const projectSlots = () =>
+  Effect.gen(function* () {
     return yield* Effect.all(
       SLOTS.map((slot) =>
         Effect.map(templateBody(slot.file).pipe(Effect.orDie), (body): Slot => ({
@@ -86,7 +86,6 @@ function projectSlots() {
       { concurrency: 'unbounded' },
     );
   });
-}
 
 /**
  * Seeds every file in `templates/home/` into the home directory — a template file's name is

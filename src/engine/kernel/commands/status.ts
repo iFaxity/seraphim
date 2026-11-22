@@ -2,7 +2,6 @@ import { Effect } from 'effect';
 import { Flag } from 'effect/cli';
 
 import { toEpochMs } from '../../../lib/time.ts';
-import { HomeService } from '../../core/env.ts';
 import { command, parseFlags } from '../command.ts';
 import { listSessions, type SessionListing, type SessionState } from '../receipts.ts';
 
@@ -51,8 +50,7 @@ export const statusCommand = command({
   parse: parseFlags({ json: Flag.Boolean('json').pipe(Flag.withDefault(false)) }),
   execute: (values: { json: boolean }) =>
     Effect.gen(function* () {
-      const home = yield* HomeService;
-      const listed = yield* listSessions(home.sessionsRoot);
+      const listed = yield* listSessions();
 
       const sessions: SessionLine[] = listed.sessions.map(toSessionLine);
 
