@@ -27,12 +27,10 @@ const withHome = (contents: string | null) =>
     }
     const previous = process.env['SERAPHIM_HOME'];
     process.env['SERAPHIM_HOME'] = home;
+    const homeLayer = homeServiceLayer(home).pipe(Layer.provide(NodeFileSystem.layer));
     const boot = yield* Effect.provide(
       readBootstrap,
-      Layer.mergeAll(
-        NodeFileSystem.layer,
-        homeServiceLayer(home).pipe(Layer.provide(NodeFileSystem.layer)),
-      ),
+      Layer.mergeAll(NodeFileSystem.layer, homeLayer),
     ).pipe(
       Effect.ensuring(
         Effect.sync(() => {
@@ -59,14 +57,18 @@ describe('readBootstrap dotenv boundary', () => {
   for (const [name, contents, expected] of envCases) {
     it.effect(name, () =>
       Effect.gen(function* () {
-        expect(yield* withHome(contents)).toBe(expected);
+        const token = yield* withHome(contents);
+
+        expect(token).toBe(expected);
       }),
     );
   }
 
   it.effect('a missing .env file yields an empty token', () =>
     Effect.gen(function* () {
-      expect(yield* withHome(null)).toBe('');
+      const token = yield* withHome(null);
+
+      expect(token).toBe('');
     }),
   );
 });

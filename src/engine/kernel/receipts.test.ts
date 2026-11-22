@@ -109,7 +109,8 @@ describe('writeReceipt', () => {
         ),
         root,
       );
-      const files = (yield* Effect.promise(() => readdir(join(root, dir)))).sort();
+      const listed = yield* Effect.promise(() => readdir(join(root, dir)));
+      const files = listed.sort();
       expect(files).toEqual([
         'flow.log',
         'manifest.json',
@@ -117,15 +118,17 @@ describe('writeReceipt', () => {
         'turn-1.json',
         'turn-2.json',
       ]);
-      expect(yield* Effect.promise(() => readFile(join(root, dir, 'flow.log'), 'utf8'))).toBe(
-        'gate: echo → exit 0\n',
-      );
+      const log = yield* Effect.promise(() => readFile(join(root, dir, 'flow.log'), 'utf8'));
+
+      expect(log).toBe('gate: echo → exit 0\n');
       expect(
         yield* Effect.promise(() => readFile(join(root, dir, 'session.transcript.md'), 'utf8')),
       ).toBe('# session\n');
       const noLogs = 'seraphim/38-2000';
       yield* withFs(writeReceipt(noLogs, session({ issueNumber: 38 }), [turn(1)], [], []), root);
-      expect(yield* Effect.promise(() => readdir(join(root, noLogs)))).not.toContain('flow.log');
+      const kept = yield* Effect.promise(() => readdir(join(root, noLogs)));
+
+      expect(kept).not.toContain('flow.log');
       yield* Effect.promise(() => cleanup());
     }),
   );

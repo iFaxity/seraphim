@@ -76,10 +76,14 @@ describe('turn engine: gate', () => {
         model: 'm',
       });
 
-      expect(Result.isSuccess(yield* Effect.result(eng.gate))).toBe(true);
+      const allowed = yield* Effect.result(eng.gate);
+
+      expect(Result.isSuccess(allowed)).toBe(true);
       const at = yield* now;
       yield* eng.record({ prompt: 'one', startedAt: at, outcome: Result.succeed(completed()) });
-      expect(Result.isSuccess(yield* Effect.result(eng.gate))).toBe(true);
+      const denied = yield* Effect.result(eng.gate);
+
+      expect(Result.isSuccess(denied)).toBe(true);
       yield* eng.record({ prompt: 'two', startedAt: at, outcome: Result.succeed(completed()) });
       expect(eng.snapshot().turns).toHaveLength(2);
     }),

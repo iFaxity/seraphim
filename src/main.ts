@@ -24,14 +24,10 @@ import { describeError } from './lib/errors.ts';
  */
 export async function main(argv: readonly string[], layer?: Layer.Layer<CommandServices>) {
   if (layer == null) {
+    const homeLayer = homeServiceLayer(seraphimHome()).pipe(Layer.provide(NodeFileSystem.layer));
+    const bootLayer = Layer.mergeAll(NodeFileSystem.layer, homeLayer);
     const bootResult = await Effect.runPromise(
-      Effect.provide(
-        Effect.result(readBootstrap),
-        Layer.mergeAll(
-          NodeFileSystem.layer,
-          homeServiceLayer(seraphimHome()).pipe(Layer.provide(NodeFileSystem.layer)),
-        ),
-      ),
+      Effect.provide(Effect.result(readBootstrap), bootLayer),
     );
 
     if (Result.isFailure(bootResult)) {
@@ -102,9 +98,11 @@ function engineStack(boot: Bootstrap): Layer.Layer<CommandServices> {
   const home = seraphimHome();
   const fs = NodeFileSystem.layer;
 
-  const adapters = adaptersLayer(boot, homeLayout(home).projectsRoot);
+  const projectsRoot = homeLayout(home).projectsRoot;
+  const adapters = adaptersLayer(boot, projectsRoot);
 
-  const homeService = homeServiceLayer(home).pipe(Layer.provide(fs));
+  const homeLayer = homeServiceLayer(home);
+  const homeService = homeLayer.pipe(Layer.provide(fs));
 
   // The Node ChildProcessSpawner driver backs the CLI runners the adapters' operations
   // resolve from the Effect context at run time (never parameters); its own fs/path deps

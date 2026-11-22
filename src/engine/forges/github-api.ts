@@ -243,24 +243,30 @@ export const clientLayer: Layer.Layer<GitHubClientService, never, HttpClient.Htt
             }),
             (read) => read.data,
           ),
-        addLabels: (repo, issueNumber, labels) =>
-          Effect.asVoid(
+        addLabels: (repo, issueNumber, labels) => {
+          const payload = JSON.stringify(encodeLabelsBody({ labels: [...labels] }));
+
+          return Effect.asVoid(
             send({
               url: issuesUrl(repo, `/${issueNumber}/labels`, root),
               method: 'POST',
-              body: JSON.stringify(encodeLabelsBody({ labels: [...labels] })),
+              body: payload,
               schema: Schema.Unknown,
             }),
-          ),
-        addComment: (repo, issueNumber, body) =>
-          Effect.asVoid(
+          );
+        },
+        addComment: (repo, issueNumber, body) => {
+          const payload = JSON.stringify(encodeCommentBody({ body }));
+
+          return Effect.asVoid(
             send({
               url: issuesUrl(repo, `/${issueNumber}/comments`, root),
               method: 'POST',
-              body: JSON.stringify(encodeCommentBody({ body })),
+              body: payload,
               schema: Schema.Unknown,
             }),
-          ),
+          );
+        },
         createDraftPull: (repo, input) =>
           Effect.map(
             send({

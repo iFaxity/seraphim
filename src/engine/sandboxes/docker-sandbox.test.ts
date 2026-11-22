@@ -317,9 +317,10 @@ describe('dockerSandbox.exec', () => {
 // Integration tier — runs only when a docker daemon answers: exec a trivial command, prove
 // the second ensureImage is a cache hit, a lockfile change rebuilds, and the host stays clean.
 // The live tier drives the real Node spawner driver; the fake tiers script their own spawners.
-const dockerReady =
-  (await Effect.runPromise(Effect.provide(cliDocker.run(['info']), NodeServices.layer)))
-    .exitCode === 0;
+const infoRun = await Effect.runPromise(
+  Effect.provide(cliDocker.run(['info']), NodeServices.layer),
+);
+const dockerReady = infoRun.exitCode === 0;
 
 describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout: 30_000 }, () => {
   let root: string;
@@ -408,7 +409,9 @@ describe('imageTagFor', () => {
         const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
         fixtureDirs.push(dir);
 
-        expect(Option.isNone(yield* imageTagFor(dir))).toBe(true);
+        const tag = yield* imageTagFor(dir);
+
+        expect(Option.isNone(tag)).toBe(true);
       }),
     ),
   );

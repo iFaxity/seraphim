@@ -90,9 +90,8 @@ export const readBootstrap: Effect.Effect<
   const fs = yield* FileSystem.FileSystem;
   const home = yield* HomeService;
 
-  const envContents = Option.getOrNull(
-    yield* Effect.option(fs.readFileString(join(home.home, '.env'))),
-  );
+  const envOrNone = yield* Effect.option(fs.readFileString(join(home.home, '.env')));
+  const envContents = Option.getOrNull(envOrNone);
   const env = yield* loadHomeEnv(envContents);
   const config = yield* loadKernelConfig();
 
