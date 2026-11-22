@@ -289,15 +289,14 @@ export function runSession(
       notifyTarget: project.notify?.target ?? null,
     };
 
-    // The flow runs as an untrusted promise inside the session's context: ctx closures
-    // dispatch through the same service stack (Clock included), so a TestClock at the
-    // composition root governs the turn budgets the flow dispatches under.
+    // The flow runs as an untrusted promise across the flow boundary: ctx closures dispatch
+    // through the same service stack (Clock included), so a TestClock at the composition
+    // root governs the turn budgets the flow dispatches under.
     const context = yield* Effect.context<SessionServices>();
-    const ctx = createFlowContext(run, { issue, branch, repoPath }, context);
+    const boundary = flowBoundary(context, stateRef);
+    const ctx = createFlowContext(run, { issue, branch, repoPath }, boundary);
 
-    const flowRun = yield* Effect.result(
-      Effect.tryPromise({ try: () => flow.run(ctx), catch: (error) => error as Error }),
-    );
+    const flowRun = yield* boundary.exit(flow.run(ctx));
 
     return yield* finalizeSessionReceipt(run, notifier, relDir, flowRun);
   });
@@ -379,16 +378,12 @@ function notifyOperator(run: SessionRun, notifier: Notifier, event: NotifyEvent,
 function createFlowContext(
   run: SessionRun,
   identity: { readonly issue: Issue; readonly branch: string; readonly repoPath: string },
-  context: Context.Context<SessionServices>,
+  boundary: FlowBoundary,
 ): SessionContext {
   const { input, worktreePath, stateRef } = run;
   const { issue, branch, repoPath } = identity;
 
-  // Each closure resolves the adapter it needs from the session's captured context — the
-  // adapters ride the service stack, never the run struct.
-  function bridged<A, E>(effect: Effect.Effect<A, E, SessionServices>) {
-    return Effect.runPromise(effect.pipe(Effect.provideContext(context)));
-  }
+  const bridged = boundary.bridge;
 
   return {
     repo: input.repo,
@@ -453,29 +448,56 @@ function createFlowContext(
         Effect.gen(function* () {
           const runtime = yield* AgentRuntimeService;
 
-          return yield* dispatchTurn(run, runtime, prompt);
+          return yield* dispatchTurn(run, runtime, prompt, boundary);
         }),
       ),
   };
 }
 
-/**
- * Transitions the session state on one abort, then fails with the promise-boundary error so
- * the flow stops. One helper so every abort records the same way — the manifest is the
- * receipt, and the transcript (engine-side) tells the human what the flow wanted next.
- * Called exactly once per dispatch failure: the caller short-circuits on the failure, so
- * there is no double-abort (a repeated abort re-derives the same terminal state).
- */
-function abort(stateRef: Ref.Ref<SessionStateFields>, aborted: TurnAborted) {
-  const event =
-    aborted.exitState === 'cap-hit'
-      ? { kind: 'turn-aborted' as const, exitState: 'cap-hit' as const, reason: aborted.reason }
-      : { kind: 'turn-aborted' as const, exitState: 'failed' as const };
+/** The three policies the promise edge owns: bridge Effect work into flow-facing promises,
+ * abort (record the state transition, smuggle the stop through the rejection), and exit
+ * (map the flow promise's rejection back into the kernel's Result channel). */
+type FlowBoundary = {
+  readonly bridge: <A, E>(effect: Effect.Effect<A, E, SessionServices>) => Promise<A>;
+  readonly abort: (aborted: TurnAborted) => Effect.Effect<never, TurnAbortedError>;
+  readonly exit: <A>(flowPromise: Promise<A>) => Effect.Effect<Result.Result<A, Error>>;
+}
 
-  return Ref.modify(
-    stateRef,
-    (fields) => [new TurnAbortedError(aborted.exitState), transitionState(fields, event)] as const,
-  ).pipe(Effect.flatMap(Effect.fail));
+/**
+ * The flow boundary: the one seam where promise-land flow code meets the Effect kernel.
+ * Owning all three policies in one place means the edge cannot drift — a bridge without
+ * the exit mapping, or an abort that skips the transition, stops compiling. `abort` runs
+ * exactly once per dispatch failure: the caller short-circuits on the failure, so there is
+ * no double-abort (a repeated abort re-derives the same terminal state).
+ */
+function flowBoundary(
+  context: Context.Context<SessionServices>,
+  stateRef: Ref.Ref<SessionStateFields>,
+): FlowBoundary {
+  function bridge<A, E>(effect: Effect.Effect<A, E, SessionServices>) {
+    return Effect.runPromise(effect.pipe(Effect.provideContext(context)));
+  }
+
+  function abort(aborted: TurnAborted) {
+    const event =
+      aborted.exitState === 'cap-hit'
+        ? { kind: 'turn-aborted' as const, exitState: 'cap-hit' as const, reason: aborted.reason }
+        : { kind: 'turn-aborted' as const, exitState: 'failed' as const };
+
+    return Ref.modify(
+      stateRef,
+      (fields) =>
+        [new TurnAbortedError(aborted.exitState), transitionState(fields, event)] as const,
+    ).pipe(Effect.flatMap(Effect.fail));
+  }
+
+  function exit<A>(flowPromise: Promise<A>) {
+    return Effect.result(
+      Effect.tryPromise({ try: () => flowPromise, catch: (error) => error as Error }),
+    );
+  }
+
+  return { bridge, abort, exit };
 }
 
 /**
@@ -512,15 +534,20 @@ function runGateCommand(run: SessionRun, sandbox: Sandbox, command: readonly str
  * Result, because flow code (`flow.run(ctx)`) is untrusted and must not be able to swallow
  * the abort; the tryPromise at the flow-run call site converts it back into the exit state.
  */
-function dispatchTurn(run: SessionRun, runtime: AgentRuntime, prompt: string) {
+function dispatchTurn(
+  run: SessionRun,
+  runtime: AgentRuntime,
+  prompt: string,
+  boundary: FlowBoundary,
+) {
   return Effect.gen(function* () {
-    const { input, worktreePath, model, stateRef, turnsEngine } = run;
+    const { input, worktreePath, model, turnsEngine } = run;
 
     // Both caps gate before dispatch: the boundary is the kernel's, and flow code must
     // not be able to dispatch past a budget by catching the abort (spec: caps live in
     // the kernel, invisible to flows). A completed turn's burn shows up at the next gate.
     const gate = yield* turnsEngine.gate.pipe(
-      Effect.catch((aborted: TurnAborted) => abort(stateRef, aborted)),
+      Effect.catch((aborted: TurnAborted) => boundary.abort(aborted)),
     );
 
     // The runtime sees the AFK preamble, the flow's prompt does not — the kernel owns the
@@ -538,7 +565,7 @@ function dispatchTurn(run: SessionRun, runtime: AgentRuntime, prompt: string) {
     // Failures always stop for human takeover — no recovery, no further turns.
     yield* turnsEngine
       .record({ prompt, startedAt: gate.startedAt, outcome })
-      .pipe(Effect.catch((aborted: TurnAborted) => abort(stateRef, aborted)));
+      .pipe(Effect.catch((aborted: TurnAborted) => boundary.abort(aborted)));
   });
 }
 
