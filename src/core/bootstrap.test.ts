@@ -3,16 +3,24 @@ import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { describe, expect } from 'vite-plus/test';
+import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { readBootstrap } from './bootstrap.ts';
 
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+
+const homes: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(homes.map((home) => rm(home, { recursive: true, force: true })));
+  homes.length = 0;
+});
 
 /** Runs `readBootstrap` against a throwaway home, restoring the ambient `SERAPHIM_HOME`. */
 const withHome = (contents: string | null) =>
   Effect.gen(function* () {
     const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-env-')));
+    homes.push(home);
     if (contents != null) {
       yield* Effect.promise(() => writeFile(join(home, '.env'), `${contents}\n`));
     }

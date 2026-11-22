@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Cause, Effect, Exit, Layer } from 'effect';
-import { afterAll, describe, expect } from 'vite-plus/test';
+import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { engine } from './engine/core/engine.ts';
 import { HomeService, homeLayout } from './engine/core/env.ts';
@@ -50,8 +50,18 @@ function testLayer(
 }
 
 /** A throwaway engine home for the test Layer's HomeService. */
+const stashes: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(stashes.map((dir) => rm(dir, { recursive: true, force: true })));
+  stashes.length = 0;
+});
+
 function stashRoot(prefix: string): Promise<string> {
-  return mkdtemp(join(tmpdir(), prefix));
+  return mkdtemp(join(tmpdir(), prefix)).then((path) => {
+    stashes.push(path);
+    return path;
+  });
 }
 
 describe('engine', () => {
@@ -179,15 +189,9 @@ describe('status listing', () => {
   let root: string;
   let layer: Layer.Layer<CommandServices>;
 
-  afterAll(async () => {
-    if (root) {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   it.effect('renders one line per session from the receipts directory', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-status-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-status-'));
       layer = testLayer(root, { sessionsRoot: join(root, 'sessions') });
       const repo = 'demo';
       const dir = join(root, 'sessions', repo, '7-1727414400000');
@@ -231,7 +235,7 @@ describe('status listing', () => {
 
   it.effect('lists no sessions when the receipts root is missing', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-missing-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-missing-'));
       const json = yield* Effect.promise(() =>
         main(
           ['status', '--json'],
@@ -249,19 +253,13 @@ describe('projects listing', () => {
   let root: string;
   let layer: Layer.Layer<CommandServices>;
 
-  afterAll(async () => {
-    if (root) {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   function envFor() {
     return testLayer(root);
   }
 
   it.effect('renders an empty project list', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-list-'));
       layer = envFor();
 
       expect(yield* Effect.promise(() => main(['list'], layer))).toBe('no projects');
@@ -270,7 +268,7 @@ describe('projects listing', () => {
 
   it.effect('renders registered projects with state and remote', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-list-'));
       layer = envFor();
 
       const registered = yield* Effect.provide(registerProject(REMOTE), layer);
@@ -287,7 +285,7 @@ describe('projects listing', () => {
 
   it.effect('renders json output for the projects outcome', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-list-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-list-'));
 
       const result = yield* Effect.promise(() => main(['list', '--json'], envFor()));
 
@@ -299,12 +297,6 @@ describe('projects listing', () => {
 describe('prune rendering', () => {
   let root: string;
   let layer: Layer.Layer<CommandServices>;
-
-  afterAll(async () => {
-    if (root) {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 
   function envFor() {
     return testLayer(root, { sessionsRoot: join(root, 'sessions') });
@@ -339,7 +331,7 @@ describe('prune rendering', () => {
 
   it.effect('renders an empty prune plan as nothing eligible', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       layer = envFor();
 
       expect(yield* Effect.promise(() => main(['prune'], layer))).toBe(
@@ -350,7 +342,7 @@ describe('prune rendering', () => {
 
   it.effect('renders the plan and refuses deletion without a TTY confirmation', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       layer = envFor();
       const dir = yield* Effect.promise(() => seedCompletedSession());
 
@@ -367,7 +359,7 @@ describe('prune rendering', () => {
 
   it.effect('deletes with --confirm and renders the removal summary', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       layer = envFor();
       const dir = yield* Effect.promise(() => seedCompletedSession());
 
@@ -386,7 +378,7 @@ describe('prune rendering', () => {
 
   it.effect('groups stale images under their project in the tree', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       const docker: DockerRunner = {
         run: (args) =>
           Effect.succeed(
@@ -413,7 +405,7 @@ describe('prune rendering', () => {
 
   it.effect('rejects invalid prune flags with a clean error', () =>
     Effect.gen(function* () {
-      root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-prune-')));
+      root = yield* Effect.promise(() => stashRoot('seraphim-prune-'));
       layer = envFor();
 
       expect(yield* Effect.promise(() => main(['prune', '--wat'], layer))).toBe(

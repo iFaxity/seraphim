@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, FileSystem } from 'effect';
-import { describe, expect } from 'vite-plus/test';
+import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { MANIFEST_FILE, type Session, type Turn, writeReceipt } from './receipts.ts';
 
@@ -46,8 +46,16 @@ function session(overrides: Partial<Session> = {}): Session {
     ...overrides,
   };
 }
+const tempRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempRoots.map((root) => rm(root, { recursive: true, force: true })));
+  tempRoots.length = 0;
+});
+
 async function tempRoot() {
   const root = await mkdtemp(join(tmpdir(), 'receipts-'));
+  tempRoots.push(root);
   return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 describe('writeReceipt', () => {

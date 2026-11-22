@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Cause, Effect, Exit, Layer, Option } from 'effect';
-import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { registerProject } from './projects.ts';
 import { planPrune, runPrune } from './prune.ts';
@@ -28,7 +28,7 @@ beforeEach(async () => {
   sessionsRoot = await mkdtemp(join(tmpdir(), 'seraphim-prune-sessions-'));
 });
 
-afterAll(async () => {
+afterEach(async () => {
   await rm(root, { recursive: true, force: true });
   await rm(sessionsRoot, { recursive: true, force: true });
 });

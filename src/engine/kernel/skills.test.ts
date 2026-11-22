@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, FileSystem } from 'effect';
-import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import {
   checkDeclaredSkills,
@@ -23,7 +23,7 @@ let root: string;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'seraphim-skills-'));
 });
-afterAll(async () => {
+afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 async function seedSkill(name: string, body = 'do the thing') {

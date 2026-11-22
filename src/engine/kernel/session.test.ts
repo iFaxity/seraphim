@@ -6,7 +6,7 @@ import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Deferred, Duration, Effect, Fiber, Layer, Schema } from 'effect';
 import { TestClock } from 'effect/testing';
-import { afterAll, beforeEach, describe, expect } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { type CommandServices } from './command.ts';
 import { withRepoLock } from './lock.ts';
@@ -179,7 +179,7 @@ beforeEach(async () => {
   sessionsRoot = await mkdtemp(join(tmpdir(), 'seraphim-sessions-'));
 });
 
-afterAll(async () => {
+afterEach(async () => {
   await rm(root, { recursive: true, force: true });
   await rm(sessionsRoot, { recursive: true, force: true });
 });
