@@ -283,6 +283,17 @@ export function dockerSandbox(options: {
         execFor(projectsRoot, docker, input),
         (error) => new UnavailableError({ cause: error }),
       ),
+    probe: (repo: string) =>
+      Effect.gen(function* () {
+        const has = yield* fileExists(join(projectsRoot, repo, 'Dockerfile'));
+
+        if (!has) {
+          return yield* new UnavailableError({
+            cause: new DockerfileMissingError(missingDockerfile(repo, projectsRoot)),
+          });
+        }
+      }),
+    currentTag: (repo: string) => imageTagFor(join(projectsRoot, repo)),
   };
 }
 
@@ -303,7 +314,7 @@ function validateRepoName(repo: string): Effect.Effect<string, InvalidRepoNameEr
  * The missing-Dockerfile diagnostic shared by ensureImage, execArguments, and the session's
  * pre-claim preflight — one site owns the wording, every consumer emits it.
  */
-export function missingDockerfile(repo: string, dir: string) {
+function missingDockerfile(repo: string, dir: string) {
   return { message: `no Dockerfile for '${repo}': expected ${join(dir, 'Dockerfile')}` };
 }
 
@@ -369,7 +380,8 @@ export const dockerCliLayer: Layer.Layer<DockerRunnerService, never, SpawnContex
     const env = Context.make(ChildProcessSpawner.ChildProcessSpawner, spawner);
 
     return {
-      run: (args) => Effect.provide(cliDocker.run(args), env),
+      run: (args) =>
+        Effect.provide(cliDocker.run(args), env),
     };
   }),
 );
@@ -401,6 +413,8 @@ export function dockerSandboxLayer(
       return {
         ensureImage: (repo) => seal(raw.ensureImage(repo)),
         exec: (input) => seal(raw.exec(input)),
+        probe: (repo) => seal(raw.probe(repo)),
+        currentTag: (repo) => seal(raw.currentTag(repo)),
       } satisfies Sandbox;
     }),
   );

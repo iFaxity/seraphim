@@ -10,14 +10,11 @@ import { planPrune, runPrune } from './prune.ts';
 import { MANIFEST_FILE, sessionDir, sessionRelDir } from './receipts.ts';
 
 import { fakeGit, type FakeGit } from '../../../test/fakes/git.ts';
+import { fakeSandbox, FakeSandbox } from '../../../test/fakes/sandbox.ts';
 import { GitError } from '../../lib/errors.ts';
 import { homeLayout, HomeService } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
-import {
-  DockerRunnerService,
-  type DockerRunner,
-  imageTagFor,
-} from '../sandboxes/docker-sandbox.ts';
+import { DockerRunnerService, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 let root: string;
@@ -39,6 +36,7 @@ function pruneLayer(git: FakeGit, docker?: DockerRunner) {
   const base = Layer.mergeAll(
     Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
     Layer.succeed(GitService, git),
+    FakeSandbox.layer(),
     NodeServices.layer,
   );
 
@@ -195,7 +193,8 @@ describe('planPrune', () => {
         pruneLayer(fakeGit()),
       );
 
-      const someTag = yield* Effect.provide(imageTagFor(projectDir), NodeServices.layer);
+      const sandbox = fakeSandbox();
+      const someTag = yield* sandbox.currentTag('demo');
 
       if (Option.isNone(someTag)) {
         throw new Error('expected a tag for the seeded project');

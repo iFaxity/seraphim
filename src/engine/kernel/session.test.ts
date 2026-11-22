@@ -282,7 +282,22 @@ export default flow;
       yield* Effect.promise(() => seedProject(root, 'nodocker'));
       yield* Effect.promise(() => rm(join(root, 'projects', 'nodocker', 'Dockerfile')));
 
-      const error = yield* sessionFailure({ repo: 'nodocker', issueNumber: 2 });
+      // The probe is the contract's fail-fast edge: the injected fake fails it with the
+      // diagnostic wording the real docker adapter owns.
+      const error = yield* sessionFailure(
+        { repo: 'nodocker', issueNumber: 2 },
+        {
+          sandbox: {
+            ...fakeSandbox(),
+            probe: () =>
+              Effect.fail(
+                new UnavailableError({
+                  message: "no Dockerfile for 'nodocker': expected Dockerfile",
+                }),
+              ),
+          },
+        },
+      );
 
       expect(messageOf(error)).toMatch(/no Dockerfile for 'nodocker'/);
     }),
