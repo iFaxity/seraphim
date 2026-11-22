@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { Context, Effect, FileSystem, Layer, Option } from 'effect';
+import { ChildProcessSpawner } from 'effect/process';
 
 import { cliRun } from '../../lib/cli-run.ts';
 import {
@@ -11,13 +12,17 @@ import {
   WorktreeMissingError,
 } from '../../lib/errors.ts';
 import { dirExists, fileExists } from '../../lib/fs.ts';
-import {
-  type Sandbox,
-  type SandboxContext,
-  type SandboxExec,
-  type SpawnContext,
-} from '../core/contracts.ts';
+import { type Sandbox, type SandboxExec } from '../core/contracts.ts';
 import { SandboxService } from '../core/services.ts';
+
+/**
+ * The platform machinery the docker adapter's operations resolve: the process spawner behind
+ * the docker CLI runner, plus the filesystem the adapter probes for worktrees, env files, and
+ * Dockerfile content hashes. Sealed inside the adapter's Layer — the `Sandbox` contract
+ * carries behaviour only.
+ */
+export type SpawnContext = ChildProcessSpawner.ChildProcessSpawner;
+export type SandboxContext = SpawnContext | FileSystem.FileSystem;
 
 /**
  * The docker CLI runner as a service key — internal to the sandbox adapter (`cliDocker`),
@@ -43,11 +48,19 @@ export type DockerRun = {
 };
 
 /**
- * The `docker` CLI surface the adapter needs. Injected so tests script docker's behavior
- * instead of shelling out; the production runner wraps the binary. The spawner rides the
- * run Effects' context — never a parameter.
+ * The sealed `docker` CLI surface — the runner the kernel-facing layers provide, its
+ * platform R closed. Fake runners (R = never) satisfy it directly.
  */
 export type DockerRunner = {
+  readonly run: (args: readonly string[]) => Effect.Effect<DockerRun, never>;
+};
+
+/**
+ * The runner surface the adapter internally drives: the platform R may still ride the runs,
+ * and the sealing layers compose over whichever runner they build. `DockerRunner` satisfies
+ * it; the raw `cliDocker` needs the wider type.
+ */
+export type RawDockerRunner = {
   readonly run: (args: readonly string[]) => Effect.Effect<DockerRun, never, SpawnContext>;
 };
 
@@ -67,7 +80,7 @@ type ExecInput = {
  * so it fails instead of reading as absence.
  */
 function cachedImage(
-  docker: DockerRunner,
+  docker: RawDockerRunner,
   repo: string,
   tag: string,
 ): Effect.Effect<Option.Option<Image>, ImageProvisionError, SpawnContext> {
@@ -97,7 +110,7 @@ function cachedImage(
  * whatever driver the host has.
  */
 function buildImage(
-  docker: DockerRunner,
+  docker: RawDockerRunner,
   repo: string,
   dir: string,
   tag: string,
@@ -178,7 +191,7 @@ function execArgs(
  */
 function ensureImageFor(
   projectsRoot: string,
-  docker: DockerRunner,
+  docker: RawDockerRunner,
   repo: string,
 ): Effect.Effect<
   Image,
@@ -217,7 +230,7 @@ type SandboxArgError =
  */
 function execFor(
   projectsRoot: string,
-  docker: DockerRunner,
+  docker: RawDockerRunner,
   input: ExecInput,
 ): Effect.Effect<SandboxExec, SandboxArgError, SandboxContext> {
   return Effect.gen(function* () {
@@ -248,7 +261,7 @@ function execFor(
  */
 export function dockerSandbox(options: {
   readonly projectsRoot: string;
-  readonly docker: DockerRunner;
+  readonly docker: RawDockerRunner;
 }) {
   const { projectsRoot, docker } = options;
 
@@ -270,7 +283,7 @@ export function dockerSandbox(options: {
         execFor(projectsRoot, docker, input),
         (error) => new UnavailableError({ cause: error }),
       ),
-  } satisfies Sandbox;
+  };
 }
 
 /** Repo names compose asset paths and image tags — anything path-shaped is a caller bug. */
@@ -333,32 +346,62 @@ export function imageTagFor(
 }
 
 /**
- * The production runner: one `docker` CLI invocation per `run` call, full argv passthrough
- * (the shared `cliRun` capture machinery over the context's spawner). A missing/unspawnable
- * binary reports as exit 127 — POSIX "command not found" — so callers keep one structured
- * failure shape.
+ * The raw production runner: one `docker` CLI invocation per `run` call, full argv
+ * passthrough (the shared `cliRun` capture machinery over the context's spawner). A
+ * missing/unspawnable binary reports as exit 127 — POSIX "command not found" — so callers
+ * keep one structured failure shape. Exported for the adapter's own tests, which script the
+ * spawner directly; consumers get the sealed `DockerRunner` from `dockerCliLayer`.
  */
-export const cliDocker: DockerRunner = {
+export const cliDocker: {
+  readonly run: (args: readonly string[]) => Effect.Effect<DockerRun, never, SpawnContext>;
+} = {
   run: (args) => cliRun('docker', args, { spawnErrorExitCode: CLI_NOT_FOUND }),
 };
 
 /** POSIX "command not found" — what a shell would report for an unresolvable binary. */
 const CLI_NOT_FOUND = 127;
 
-/** Production wiring: the real `docker` CLI subprocess runner. The spawner rides the run
- * Effects' context, so this layer is pure `Layer.succeed`. */
-export const dockerCliLayer: Layer.Layer<DockerRunnerService> = Layer.succeed(
+/** Production wiring: the real `docker` CLI subprocess runner. The spawner is resolved at
+ * layer build — the runner's platform R is sealed, so consumers carry no machinery. */
+export const dockerCliLayer: Layer.Layer<DockerRunnerService, never, SpawnContext> = Layer.effect(
   DockerRunnerService,
-  cliDocker,
+  Effect.map(ChildProcessSpawner.ChildProcessSpawner, (spawner) => {
+    const env = Context.make(ChildProcessSpawner.ChildProcessSpawner, spawner);
+
+    return {
+      run: (args) => Effect.provide(cliDocker.run(args), env),
+    };
+  }),
 );
 
-/** The sandbox contract wired over the injected docker runner; the filesystem and spawner
- * ride the adapter operations' R (honest, per the contract). */
+/** The sandbox contract wired over the injected docker runner. The layer demands the
+ * platform drivers (spawner behind the CLI, filesystem of the probes) in its own R and
+ * seals them at build time — the `Sandbox` contract's operations carry no machinery. */
 export function dockerSandboxLayer(
   projectsRoot: string,
-): Layer.Layer<SandboxService, never, DockerRunnerService> {
+): Layer.Layer<SandboxService, never, DockerRunnerService | SandboxContext> {
   return Layer.effect(
     SandboxService,
-    Effect.map(DockerRunnerService, (docker) => dockerSandbox({ projectsRoot, docker })),
+    Effect.gen(function* () {
+      const docker = yield* DockerRunnerService;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fs = yield* FileSystem.FileSystem;
+
+      const env = Context.add(
+        Context.make(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        FileSystem.FileSystem,
+        fs,
+      ) as Context.Context<SandboxContext>;
+
+      const raw = dockerSandbox({ projectsRoot, docker });
+
+      const seal = <A, E>(op: Effect.Effect<A, E, SandboxContext>): Effect.Effect<A, E> =>
+        Effect.provide(op, env);
+
+      return {
+        ensureImage: (repo) => seal(raw.ensureImage(repo)),
+        exec: (input) => seal(raw.exec(input)),
+      } satisfies Sandbox;
+    }),
   );
 }

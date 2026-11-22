@@ -1,6 +1,5 @@
 import { join } from 'node:path';
 import { Effect, FileSystem, Result } from 'effect';
-import { ChildProcessSpawner } from 'effect/process';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
@@ -84,7 +83,7 @@ type PruneContext = {
 export const planPrune: Effect.Effect<
   PrunePlan,
   ProjectError | ReceiptReadError,
-  PruneServices | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
+  PruneServices | FileSystem.FileSystem
 > = Effect.gen(function* () {
   const home = yield* HomeService;
   const docker = yield* Effect.serviceOption(DockerRunnerService);
@@ -177,7 +176,8 @@ const pruneOrphan = (ctx: PruneContext, path: string) =>
     }
   });
 
-/** Untags every stale image; docker's exit code is the failure record. */
+/** Untags every stale image; docker's exit code is the failure record. The runner resolves
+ * sealed (its platform R closed at the layer edge), so the command's R carries no machinery. */
 const pruneImages = (docker: DockerRunner, images: readonly PruneImage[], failed: string[]) =>
   Effect.gen(function* () {
     for (const image of images) {
@@ -196,11 +196,7 @@ const pruneImages = (docker: DockerRunner, images: readonly PruneImage[], failed
  */
 export const runPrune = (
   plan: PrunePlan,
-): Effect.Effect<
-  PruneDone,
-  never,
-  PruneServices | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
-> =>
+): Effect.Effect<PruneDone, never, PruneServices | FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const home = yield* HomeService;
     const git = yield* GitService;

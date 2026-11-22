@@ -80,10 +80,9 @@ function baseDepsLayer(boot: Bootstrap) {
   );
 }
 
-/** The adapter stack: tracker, git, notifier, and the sandbox-backed pi runtime. */
+/** The adapter stack: tracker, git, notifier, and the sandbox-backed pi runtime. The
+ * sandbox consumes the raw docker runner; prune consumes the kernel-facing sealed one. */
 function adaptersLayer(boot: Bootstrap, projectsRoot: string) {
-  // The sandbox builds on the docker CLI runner and keeps it in the merged output —
-  // prune's plan needs the runner itself, not only what sandbox built on top of it.
   const sandbox = Layer.provideMerge(dockerSandboxLayer(projectsRoot), dockerCliLayer);
   const withRuntime = Layer.provideMerge(runtimeLayer(TURN_WALL_CLOCK_MS), sandbox);
   return Layer.mergeAll(trackerLayer, gitLayer, notifierLayer(), withRuntime).pipe(
@@ -102,16 +101,19 @@ function engineStack(boot: Bootstrap): Layer.Layer<CommandServices> {
   const home = seraphimHome();
   const fs = NodeFileSystem.layer;
 
-  const adapters = adaptersLayer(boot, homeLayout(home).projectsRoot);
+  // The platform drivers back the CLI-backed adapters AND the kernel's own fs reads — the
+  // spawner is sealed inside the adapter Layers at build, so only the filesystem appears
+  // in the stack the commands resolve.
+  const platform = Layer.mergeAll(
+    fs,
+    NodeChildProcessSpawner.layer.pipe(Layer.provide(Layer.mergeAll(fs, Path.layer))),
+  );
+
+  const adapters = adaptersLayer(boot, homeLayout(home).projectsRoot).pipe(Layer.provide(platform));
 
   const homeService = homeServiceLayer(home).pipe(Layer.provide(fs));
 
-  // The Node ChildProcessSpawner driver backs the CLI runners the adapters' operations
-  // resolve from the Effect context at run time (never parameters); its own fs/path deps
-  // memoize onto the same fs layer, so one driver instance rides the stack.
-  const spawner = NodeChildProcessSpawner.layer.pipe(Layer.provide(Layer.mergeAll(fs, Path.layer)));
-
-  return Layer.mergeAll(adapters, fs, homeService, spawner);
+  return Layer.mergeAll(adapters, fs, homeService);
 }
 
 /** Runs one more engine dispatch on the caller's runtime — the prune confirm pass. */
