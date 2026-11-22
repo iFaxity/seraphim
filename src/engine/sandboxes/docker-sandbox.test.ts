@@ -5,12 +5,12 @@ import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, FileSystem, Option, Sink, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
-import { beforeEach, describe, expect } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { cliDocker, dockerSandbox, imageTagFor, type DockerRunner } from './docker-sandbox.ts';
 
 import { UnavailableError } from '../../lib/errors.ts';
-import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 
 /**
  * The adapter resolves the filesystem and the process spawner from the Effect context, so
@@ -89,8 +89,16 @@ function countingDocker() {
 
 let projectsRoot: string;
 
+const fixtureDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(fixtureDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+  fixtureDirs.length = 0;
+});
+
 beforeEach(async () => {
   projectsRoot = await mkdtemp(join(tmpdir(), 'seraphim-docker-'));
+  fixtureDirs.push(projectsRoot);
 });
 
 /** Seeds one project directory with a Dockerfile under a given projects root. */
@@ -318,6 +326,7 @@ describe.skipIf(!dockerReady)('dockerSandbox against the real daemon', { timeout
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'seraphim-docker-live-'));
+    fixtureDirs.push(root);
   });
 
   it.live(
@@ -397,6 +406,7 @@ describe('imageTagFor', () => {
     withStack(
       Effect.gen(function* () {
         const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-tagless-')));
+        fixtureDirs.push(dir);
 
         expect(Option.isNone(yield* imageTagFor(dir))).toBe(true);
       }),

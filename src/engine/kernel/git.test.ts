@@ -4,12 +4,19 @@ import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
 import { Effect, FileSystem } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
-import { describe, expect } from 'vite-plus/test';
+import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { gitAdapter, type GitRun, type GitRunner } from './git.ts';
 
 import { GitError } from '../../lib/errors.ts';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+
+const worktrees: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(worktrees.map((dir) => rm(dir, { recursive: true, force: true })));
+  worktrees.length = 0;
+});
 
 /**
  * The adapter resolves the filesystem and the process spawner from the Effect context, so
@@ -271,6 +278,7 @@ describe('gitAdapter.removeWorktree', () => {
     withStack(
       Effect.gen(function* () {
         const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
+        worktrees.push(worktree);
         const runner = fakeRunner(() => run(0));
         const git = gitAdapter(runner);
 
@@ -299,6 +307,7 @@ describe('gitAdapter.removeWorktree', () => {
     withStack(
       Effect.gen(function* () {
         const worktree = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'seraphim-git-wt-')));
+        worktrees.push(worktree);
         const git = gitAdapter(fakeRunner(() => run(128, '', 'fatal: is a main working tree')));
 
         const error = yield* Effect.flip(
