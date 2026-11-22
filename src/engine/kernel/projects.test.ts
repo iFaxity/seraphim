@@ -2,7 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { it } from '@effect/vitest';
-import { Cause, Effect, Exit, Layer } from 'effect';
+import { Cause, Effect, Exit, Layer, Schema } from 'effect';
 import { afterEach, beforeEach, describe, expect } from 'vite-plus/test';
 
 import { type CommandServices } from './command.ts';
@@ -78,7 +78,7 @@ describe('registerProject', () => {
         expect.arrayContaining(['project.json', 'flow.ts', 'Dockerfile', '.env']),
       );
 
-      const stored = ProjectRecordSchema.parse(
+      const stored = Schema.decodeUnknownSync(ProjectRecordSchema)(
         JSON.parse(
           yield* Effect.promise(() =>
             readFile(join(root, 'projects', 'widgets', 'project.json'), 'utf8'),

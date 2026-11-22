@@ -1,38 +1,36 @@
 import { fileURLToPath } from 'node:url';
-import { Effect, FileSystem, Result } from 'effect';
+import { Effect, FileSystem, Result, Schema } from 'effect';
 import { type PlatformError } from 'effect/PlatformError';
-import { z } from 'zod';
 
 import { describeError, isAlreadyExists, isNotFound, ProjectError } from '../../lib/errors.ts';
 import { HomeService } from '../core/env.ts';
 import { GitService } from '../core/services.ts';
 
 /**
- * Projects are the filesystem-as-database (ADR-0001): one zod-validated record per project at
- * `projects/<repo>/project.json`, sitting beside the project's flow file, Dockerfile, and env
- * slots in the central directory. Registration is the write edge; sessions read it to resolve
- * the clone remote, so the schema is the machine contract.
+ * Projects are the filesystem-as-database (ADR-0001): one schema-validated record per project
+ * at `projects/<repo>/project.json`, sitting beside the project's flow file, Dockerfile, and
+ * env slots in the central directory. Registration is the write edge; sessions read it to
+ * resolve the clone remote, so the schema is the machine contract.
  */
 
-export const ProjectRecordSchema = z.object({
-  repo: z.string().min(1),
-  remote: z.string().min(1),
-  state: z.enum(['active', 'inactive']),
+const UrlStringSchema = Schema.String.check(
+  Schema.makeFilter((value: string) => /^https?:\/\/\S+$/.test(value)),
+);
+
+export const ProjectRecordSchema = Schema.Struct({
+  repo: Schema.NonEmptyString,
+  remote: Schema.NonEmptyString,
+  state: Schema.Literals(['active', 'inactive']),
   /**
    * Nullable per-project notifier override: a non-null target reroutes this project's pages
    * to its own channel. Unset/null keeps the global kernel config's channel — the default
    * still holds. The target is a full URL; the global channel's bearer token rides it, so it
    * must be a topic on the same channel host.
    */
-  notify: z
-    .object({
-      target: z.string().url(),
-    })
-    .nullable()
-    .default(null),
+  notify: Schema.optionalKey(Schema.NullOr(Schema.Struct({ target: UrlStringSchema }))),
 });
 
-export type ProjectRecord = z.infer<typeof ProjectRecordSchema>;
+export type ProjectRecord = Schema.Schema.Type<typeof ProjectRecordSchema>;
 
 const RECORD_FILE = 'project.json';
 
@@ -76,8 +74,8 @@ function templateBody(file: string) {
 
 /** Reads the slot templates once per registration — the old module-load read, re-homed onto
  * the service. Unreadable templates fail fast as a defect instead of seeding empty slots. */
-const projectSlots = () =>
-  Effect.gen(function* () {
+function projectSlots() {
+  return Effect.gen(function* () {
     return yield* Effect.all(
       SLOTS.map((slot) =>
         Effect.map(templateBody(slot.file).pipe(Effect.orDie), (body): Slot => ({
@@ -88,6 +86,7 @@ const projectSlots = () =>
       { concurrency: 'unbounded' },
     );
   });
+}
 
 /**
  * Seeds every file in `templates/home/` into the home directory — a template file's name is
@@ -240,15 +239,24 @@ const readRecord = (
       return Result.fail(json.failure);
     }
 
-    const parsed = ProjectRecordSchema.safeParse(json.success);
-
-    return parsed.success
-      ? Result.succeed(parsed.data)
-      : Result.fail(
+    // Schema.decodeUnknownSync throws on an invalid shape; the caught throw turns into the
+    // ProjectError the read contract publishes, keeping the parse never-throws.
+    const parsed = yield* Effect.result(
+      Effect.try({
+        try: () => Schema.decodeUnknownSync(ProjectRecordSchema)(json.success),
+        catch: (error) =>
           new ProjectError({
-            message: `invalid project record in ${dir}: ${parsed.error.message}`,
+            message: `invalid project record in ${dir}: ${(error as Error).message}`,
           }),
-        );
+      }),
+    );
+
+    if (Result.isFailure(parsed)) {
+      return Result.fail(parsed.failure);
+    }
+
+    // An absent notify normalizes to null — the decoded shape is total, like the write edge.
+    return Result.succeed({ ...parsed.success, notify: parsed.success.notify ?? null });
   });
 
 /** Reads one registered record, mapping an absent one to the fail-fast that names the fix. */
