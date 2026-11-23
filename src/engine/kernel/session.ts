@@ -34,6 +34,7 @@ import {
   NotifierService,
   SandboxService,
   TrackerService,
+  type KernelServices,
 } from '../core/services.ts';
 
 /**
@@ -53,17 +54,9 @@ export type SessionInput = {
  * (sessions never read other sessions' receipts). Tags survive to the composition root. */
 export type SessionError = Exclude<KernelFailure, ReceiptReadError>;
 
-/** The services one session run resolves: the adapter contracts plus the home layout.
- * The CLI-backed adapters' honest R (spawner, filesystem) rides this stack too — the
- * session resolves them from the context, never threads them through parameters. */
-export type SessionServices =
-  | TrackerService
-  | SandboxService
-  | AgentRuntimeService
-  | GitService
-  | NotifierService
-  | HomeService
-  | FileSystem.FileSystem;
+/** The services one session run resolves: the kernel behaviour stack. The session resolves
+ * its adapters from the context, never threads them through parameters. */
+export type SessionServices = KernelServices;
 
 /** A project whose flow is runnable end to end: registered, active, skills present, adapter up. */
 type RunnableFlow = {
