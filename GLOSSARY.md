@@ -56,6 +56,10 @@ _Avoid_: skill registry, skill store
 A worktree directory under the worktrees root that no session manifest references — left behind by a crashed run and listed by `prune` as eligible.
 _Avoid_: dangling worktree, stray worktree
 
+**Flow boundary**:
+The one seam in `session.ts` where promise-land flow code meets the Effect kernel: bridging ctx calls into the session's service stack, aborting a turn through the state transition plus promise rejection, and mapping the flow promise's outcome back into the kernel's result channel. All three policies live in one helper so the edge cannot drift.
+_Avoid_: bridge helper, abort smuggler, promise glue
+
 **Turn engine**:
 The kernel module owning cap enforcement and the turn ledger: gate before dispatch, record after, transcripts per turn and per session. Kernel-internal — no adapter implements it; caps live in the kernel, invisible to flow code.
 _Avoid_: turn manager, cap checker, budget guard
