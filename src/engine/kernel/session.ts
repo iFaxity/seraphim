@@ -17,9 +17,7 @@ import {
   type ReceiptReadError,
   ReceiptWriteError,
   UnavailableError,
-  DockerfileMissingError,
 } from '../../lib/errors.ts';
-import { fileExists } from '../../lib/fs.ts';
 import { now, toEpochMs } from '../../lib/time.ts';
 import {
   type KernelFailure,
@@ -41,7 +39,6 @@ import {
   SandboxService,
   TrackerService,
 } from '../core/services.ts';
-import { missingDockerfile } from '../sandboxes/docker-sandbox.ts';
 
 /**
  * Preceded to every prompt: the whole stack is AFK (spec Further Notes) — the agent must
@@ -177,7 +174,6 @@ const resolveRunnableFlow = (
   | FileSystem.FileSystem
 > =>
   Effect.gen(function* () {
-    const home = yield* HomeService;
     const tracker = yield* TrackerService;
     const git = yield* GitService;
     const runtime = yield* AgentRuntimeService;
@@ -190,9 +186,11 @@ const resolveRunnableFlow = (
       });
     }
 
+    const sandbox = yield* SandboxService;
+
     const flow = yield* loadFlow(input.repo);
     yield* checkDeclaredSkills(flow.config.skills);
-    yield* checkPreflight(home, input.repo);
+    yield* sandbox.probe(input.repo);
 
     if (!runtime.available(flow.config.agent)) {
       return yield* new UnavailableError({
@@ -205,27 +203,6 @@ const resolveRunnableFlow = (
       git: Git;
       runtime: AgentRuntime;
     };
-  });
-
-/**
- * Fails fast on missing Dockerfile-shaped prerequisites before the issue is claimed — the
- * sandbox's own checks stay the enforcement point at the exec/ensureImage edge; this only
- * moves the failure ahead of the claim so a broken project never consumes an issue. The
- * diagnostic wording lives once, in the sandbox module.
- */
-const checkPreflight = (home: Home, repo: string) =>
-  Effect.gen(function* () {
-    const dockerfilePath = join(home.projectsRoot, repo, 'Dockerfile');
-    const hasDockerfile = yield* fileExists(dockerfilePath);
-
-    if (!hasDockerfile) {
-      const missing = missingDockerfile(repo, home.projectsRoot);
-
-      return yield* new UnavailableError({
-        message: missing.message,
-        cause: new DockerfileMissingError(missing),
-      });
-    }
   });
 
 /**

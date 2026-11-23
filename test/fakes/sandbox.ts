@@ -1,4 +1,4 @@
-import { Effect, Layer } from 'effect';
+import { Effect, Layer, Option } from 'effect';
 
 import { type Sandbox } from '../../src/engine/core/contracts.ts';
 import { SandboxService } from '../../src/engine/core/services.ts';
@@ -22,6 +22,13 @@ export function fakeSandbox() {
 
       return Effect.succeed({ command: input.command, exitCode: 0, stdout: '', stderr: '' });
     },
+    // Default fake: prerequisites hold. The real adapter's missing-Dockerfile fail-fast is
+    // covered by the docker adapter's own tests; suites inject a failing probe to drive the
+    // kernel's pre-claim abort.
+    probe: () => Effect.void,
+    // The fake's content hash is deterministic per repo — the current-tag identity prune
+    // compares against.
+    currentTag: (repo: string) => Effect.succeed(Option.some(`seraphim/${repo}:fake`)),
   } satisfies FakeSandbox;
 }
 

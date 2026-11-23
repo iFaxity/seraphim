@@ -1,4 +1,5 @@
 import { type Effect } from 'effect/Effect';
+import type * as Option from 'effect/Option';
 
 import {
   type AuthError,
@@ -110,10 +111,11 @@ export type SandboxExec = {
 
 /**
  * Sandbox contract: per-project image build/cache and exec with the session worktree mounted.
- * The kernel asserts success and never inspects the built identity; v1 ships a real docker
- * adapter plus the fake tests inject. Platform machinery (the process spawner behind the
- * docker CLI, the filesystem the adapter probes) is sealed inside the adapter's Layer —
- * the interface carries behaviour only.
+ * Success is the observable; the built identity is exposed read-only through `currentTag`
+ * (the identity check `prune` needs) while the hashing scheme stays adapter-internal. v1
+ * ships a real docker adapter plus the fake tests inject. Platform machinery (the process
+ * spawner behind the docker CLI, the filesystem the adapter probes) is sealed inside the
+ * adapter's Layer — the interface carries behaviour only.
  */
 export type Sandbox = {
   /** Builds/caches the image the session's execs run against; success is the observable. */
@@ -123,6 +125,17 @@ export type Sandbox = {
     readonly worktreePath: string;
     readonly command: readonly string[];
   }) => Effect<SandboxExec, UnavailableError>;
+  /**
+   * Fail-fast probe of the sandbox-shaped prerequisites of one project (Dockerfile present).
+   * Runs before a tracker claim so a broken project never consumes an issue; the diagnostic
+   * wording lives here, the one place that owns it.
+   */
+  readonly probe: (repo: string) => Effect<void, UnavailableError>;
+  /**
+   * The image tag the project's current content hash names — none when the project has no
+   * Dockerfile. The identity check `prune` needs; the hashing scheme stays adapter-internal.
+   */
+  readonly currentTag: (repo: string) => Effect<Option.Option<string>, never>;
 };
 
 /** Result of one agent turn, captured by the runtime. */
