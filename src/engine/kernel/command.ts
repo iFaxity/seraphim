@@ -4,14 +4,7 @@ import { ChildProcessSpawner } from 'effect/process';
 
 import { describeError, CommandParseError } from '../../lib/errors.ts';
 import { type KernelFailure } from '../core/contracts.ts';
-import { type HomeService } from '../core/env.ts';
-import {
-  type AgentRuntimeService,
-  type GitService,
-  type NotifierService,
-  type SandboxService,
-  type TrackerService,
-} from '../core/services.ts';
+import { type KernelServices } from '../core/services.ts';
 import { type DockerRunnerService } from '../sandboxes/docker-sandbox.ts';
 
 /**
@@ -22,18 +15,9 @@ import { type DockerRunnerService } from '../sandboxes/docker-sandbox.ts';
  */
 export type ErrorOutcome = { readonly kind: 'error'; readonly message: string };
 
-/** The service stack every command's execute runs against (the composition root builds it).
- * Adapter platform machinery is sealed inside the adapters' Layers — the stack carries
- * behaviour services only, plus the filesystem the kernel itself reads. */
-export type CommandServices =
-  | TrackerService
-  | SandboxService
-  | AgentRuntimeService
-  | GitService
-  | NotifierService
-  | HomeService
-  | DockerRunnerService
-  | FileSystem.FileSystem;
+/** The service stack every command's execute runs against (the composition root builds it):
+ * the kernel behaviour stack plus the docker runner `prune`'s optional collector resolves. */
+export type CommandServices = KernelServices | DockerRunnerService;
 
 /**
  * One command module's outward shape — the dispatcher's row type. `O` is the command's own

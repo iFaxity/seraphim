@@ -1,4 +1,5 @@
 import { Context } from 'effect';
+import { type FileSystem } from 'effect/FileSystem';
 
 import {
   type AgentRuntime,
@@ -7,6 +8,7 @@ import {
   type Sandbox,
   type Tracker,
 } from './contracts.ts';
+import { HomeService } from './env.ts';
 
 /**
  * The adapter contracts as `Context` service keys: flows and kernel code depend on the
@@ -33,3 +35,18 @@ export class GitService extends Context.Service<GitService, Git>()('seraphim/cor
 export class NotifierService extends Context.Service<NotifierService, Notifier>()(
   'seraphim/core/Notifier',
 ) {}
+
+/**
+ * The kernel's behaviour stack: the five adapter contracts plus the home layout and the
+ * filesystem the kernel itself reads. The composition root builds it once; the sealed
+ * adapters' Layers close their platform machinery at build, so no adapter internals ride
+ * this stack. Stack unions derive from it — hand-maintained copies drift.
+ */
+export type KernelServices =
+  | TrackerService
+  | SandboxService
+  | AgentRuntimeService
+  | GitService
+  | NotifierService
+  | HomeService
+  | FileSystem;

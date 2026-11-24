@@ -1,18 +1,14 @@
 import { join } from 'node:path';
-import { Effect, FileSystem, Result } from 'effect';
+import { Effect, FileSystem, Option, Result } from 'effect';
 
 import { listProjects } from './projects.ts';
 import { listSessions } from './receipts.ts';
 
 import { describeError, isNotFound, ProjectError, ReceiptReadError } from '../../lib/errors.ts';
-import { type Git } from '../core/contracts.ts';
+import { type Git, type Sandbox } from '../core/contracts.ts';
 import { HomeService, type Home } from '../core/env.ts';
-import { GitService } from '../core/services.ts';
-import {
-  DockerRunnerService,
-  type DockerRunner,
-  imageTagFor,
-} from '../sandboxes/docker-sandbox.ts';
+import { GitService, SandboxService } from '../core/services.ts';
+import { DockerRunnerService, type DockerRunner } from '../sandboxes/docker-sandbox.ts';
 
 /**
  * Manual garbage collection (story 26): list worktrees, session receipts, and stale sandbox
@@ -61,7 +57,7 @@ export type PruneDone = {
 
 /** The kernel modules plan and run the sweep over: git mechanics and layout — docker is
  * resolved optionally (`Effect.serviceOption`), so it is never a requirement. */
-export type PruneServices = GitService | HomeService;
+export type PruneServices = GitService | HomeService | SandboxService;
 
 /** The (layout, git, failure-collector) bundle every prune step shares. */
 type PruneContext = {
@@ -86,6 +82,7 @@ export const planPrune: Effect.Effect<
   PruneServices | FileSystem.FileSystem
 > = Effect.gen(function* () {
   const home = yield* HomeService;
+  const sandbox = yield* SandboxService;
   const docker = yield* Effect.serviceOption(DockerRunnerService);
 
   const listed = yield* listSessions();
@@ -114,7 +111,7 @@ export const planPrune: Effect.Effect<
 
   let images: PruneImage[] = [];
   if (docker._tag === 'Some') {
-    images = yield* staleImages(home.home, docker.value);
+    images = yield* staleImages(sandbox, docker.value);
   }
 
   return {
@@ -284,7 +281,7 @@ const listOrphanWorktrees = (worktreesRoot: string, isOrphan: (path: string) => 
  * superseded by a Dockerfile/lockfile change, is reclaimable cache. Docker being down or
  * absent yields an empty image list — image pruning is optional; worktree/session prune is not.
  */
-const staleImages = (home: string, docker: DockerRunner) =>
+const staleImages = (sandbox: Sandbox, docker: DockerRunner) =>
   Effect.gen(function* () {
     const listed = yield* docker.run([
       'images',
@@ -307,10 +304,10 @@ const staleImages = (home: string, docker: DockerRunner) =>
     const hashlessRepos = new Set<string>();
 
     for (const project of projects.success.projects) {
-      const tag = yield* imageTagFor(join(home, 'projects', project.repo));
+      const tag = yield* sandbox.currentTag(project.repo);
 
       // A project without a Dockerfile has no current tag, so all of its old tags are stale.
-      if (tag._tag === 'Some') {
+      if (Option.isSome(tag)) {
         currentTags.add(tag.value);
       } else {
         hashlessRepos.add(project.repo);

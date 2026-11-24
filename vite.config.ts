@@ -106,9 +106,9 @@ export default defineConfig({
       ],
     },
     overrides: [
-      // Tests seed fixtures directly.
+      // Tests seed fixtures directly; the shared fake fixtures under test/fakes do too.
       {
-        files: ['**/*.test.ts'],
+        files: ['**/*.test.ts', 'test/fakes/**'],
         rules: { 'no-restricted-imports': 'off' },
       },
     ],

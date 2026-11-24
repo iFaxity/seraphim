@@ -7,46 +7,29 @@ import { Cause, Effect, Exit, Layer } from 'effect';
 import { afterEach, describe, expect } from 'vite-plus/test';
 
 import { engine } from './engine/core/engine.ts';
-import { HomeService, homeLayout } from './engine/core/env.ts';
 import { type CommandServices } from './engine/kernel/command.ts';
 import { registerProject } from './engine/kernel/projects.ts';
-import { DockerRunnerService, type DockerRunner } from './engine/sandboxes/docker-sandbox.ts';
+import { type DockerRunner } from './engine/sandboxes/docker-sandbox.ts';
 import { main } from './main.ts';
 
 import { FakeGit } from '../test/fakes/git.ts';
 import { FakeNotifier } from '../test/fakes/notifier.ts';
 import { FakeRuntime } from '../test/fakes/runtime.ts';
 import { FakeSandbox } from '../test/fakes/sandbox.ts';
+import { fakeStack } from '../test/fakes/stack.ts';
 import { FakeTracker } from '../test/fakes/tracker.ts';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 /**
- * One test Layer over the fake adapters plus a temp-root HomeService — the whole
- * `CommandServices` stack, so every command under test resolves its services from the
- * same composed context the real CLI composition root would build.
+ * One test Layer over the shared fake stack — the whole `CommandServices` composition, so
+ * every command under test resolves its services from the same composed context the real
+ * CLI composition root would build. `sessionsRoot` stays overridable for the receipt tests.
  */
 function testLayer(
   root: string,
-  {
-    docker = null,
-    sessionsRoot = join(root, 'sessions'),
-  }: { docker?: DockerRunner | null; sessionsRoot?: string } = {},
-): Layer.Layer<CommandServices> {
-  const adapters = Layer.mergeAll(
-    FakeTracker.layer(),
-    FakeSandbox.layer(),
-    FakeGit.layer(),
-    FakeNotifier.layer(),
-    FakeRuntime.layer(),
-    Layer.succeed(HomeService, { ...homeLayout(root), sessionsRoot }),
-    NodeServices.layer,
-  );
-
-  if (docker == null) {
-    return adapters as Layer.Layer<CommandServices>;
-  }
-
-  return Layer.mergeAll(adapters, Layer.succeed(DockerRunnerService, docker));
+  { docker, sessionsRoot }: { docker?: DockerRunner; sessionsRoot?: string } = {},
+) {
+  return fakeStack(root, { docker, sessionsRoot });
 }
 
 /** A throwaway engine home for the test Layer's HomeService. */
@@ -109,6 +92,8 @@ describe('engine', () => {
     Effect.gen(function* () {
       // The kernel's error outcome for a missing engine home is gone — the home rides the
       // Layer now — so the same case is HomeService unresolved from the context.
+      // Negative case: the home service is deliberately absent, so the stack type is a
+      // lie by construction — the missing `HomeService` row is the case under test.
       const homeless = Layer.mergeAll(
         FakeTracker.layer(),
         FakeSandbox.layer(),
